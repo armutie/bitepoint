@@ -521,9 +521,19 @@ export function applyEasyAids(p: CarParams): CarParams {
   p.tcSlip = 0.07
   p.tcFullSpeed = 12.0
   p.tcOffSpeed = 400.0
+  // Easy mode should shorten the learning curve as well as calm the chassis.
+  // The extra force is modest and remains tyre-limited at low speed, but gives
+  // the pedal enough authority in the high-speed braking zones.
+  p.maxBrakeForce *= 1.15
   p.absOn = true
   p.absSlip = deg(1.2)
-  p.absGain = 45.0
+  // Step in early, but do not throw the brakes away when the rear starts to
+  // rotate. The old gain/floor combination could collapse a full command to
+  // five percent under ordinary trail braking, which made the safe mode feel
+  // as though it had no brakes. Keep meaningful pressure while the extra rear
+  // grip below does the stabilising.
+  p.absGain = 18.0
+  p.absFloor = 0.45
   // More rear grip than front means the front washes out first. Running wide is
   // recoverable by lifting; a snap of oversteer at speed is not.
   p.rearGripBias = 1.45
