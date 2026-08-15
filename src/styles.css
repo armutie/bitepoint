@@ -1,0 +1,1259 @@
+/*
+ * Presentation.
+ *
+ * This used to open with "the rule everything here follows: this is a game, not
+ * a document", and everything below it obeyed: angular clip-path cuts on every
+ * panel, 800-weight italic caps, hover lifts, and an accent hot enough to be a
+ * warning light. It read as an arcade cabinet.
+ *
+ * The rule now is that this is an INSTRUMENT. Chrome is flat with hairline
+ * borders and 2-3px radii; type is plain, and numbers are monospace and
+ * right-aligned so a column of them can be compared; the accent is a single
+ * lamp amber used only to say "this one is selected", never for decoration; and
+ * nothing glows, lifts, skews or pulses. The palette below is the pygame
+ * renderer's (racing/render.py), so the HUD and the menus are one instrument
+ * rather than two designs.
+ *
+ * What survives from the old design is what was never the problem: the menu is
+ * a panel over the LIVE circuit rather than an opaque card on a gradient, and
+ * every circuit draws its actual lap shape.
+ */
+
+:root {
+  --bg: #06080b;
+  --ink: rgb(235, 238, 240);
+  --muted: rgb(150, 156, 168);
+  --dim: rgb(108, 115, 128);
+
+  /* One lamp amber, the same one the shift lights use at three-quarter revs. */
+  --accent: rgb(226, 170, 72);
+  --accent-soft: rgba(226, 170, 72, 0.13);
+  --best: rgb(190, 130, 235);
+  --ahead: rgb(120, 210, 140);
+  --behind: rgb(235, 90, 80);
+  --void: rgb(226, 170, 72);
+
+  --edge: rgb(52, 56, 66);
+  --edge-hot: rgba(226, 170, 72, 0.55);
+  --glass: rgba(22, 24, 30, 0.82);
+  --glass-solid: rgba(16, 18, 23, 0.96);
+
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --sans: "Segoe UI Variable Display", "Segoe UI", ui-sans-serif, system-ui, Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The picture. Boxing the stage rather than the canvas keeps the HUD inside
+   the frame instead of floating out over the letterbox bars. */
+#app { display: grid; place-items: center; }
+.stage {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.stage[data-legacy-tyres='true']::after {
+  content: 'LEGACY TYRES  ·  B 9.5 / C 1.5 / E 0.97';
+  position: absolute;
+  z-index: 20;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 8px;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  background: rgba(16, 18, 23, 0.86);
+  color: var(--muted);
+  font: 10px/1 var(--mono);
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.viewport { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+.is-hidden { display: none !important; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.eyebrow.is-void { color: var(--void); }
+.eyebrow.is-best { color: var(--best); }
+
+/* =====================  HUD  ===================== */
+
+.hud {
+  /* Absolute against the stage, not fixed to the window, so it boxes with the
+     picture when the viewport is limited. */
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sector colours, from the pygame renderer's SECTOR_COLS. */
+:root {
+  --s1: rgb(196, 72, 64);
+  --s2: rgb(74, 126, 200);
+  --s3: rgb(224, 206, 96);
+
+  /* The instrument palette, lifted straight from racing/render.py so the two
+     versions of this game read as the same instrument. Every one of these is
+     duller than the menu's equivalent, deliberately: a HUD you notice is a HUD
+     competing with the road. */
+  --hud-ink: rgb(235, 238, 240);
+  --hud-dim: rgb(150, 156, 162);
+  --hud-label: rgb(150, 156, 168);
+  --hud-good: rgb(120, 210, 140);
+  --hud-warn: rgb(235, 90, 80);
+  --hud-card: rgba(22, 24, 30, 0.88);
+  --hud-divider: rgb(52, 56, 66);
+}
+
+/* --- timing card, top left: pygame's table, row for row --- */
+.hud-card {
+  position: absolute;
+  top: 24px;
+  left: 24px;
+  min-width: 280px;
+  padding: 13px 17px 14px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-divider);
+  border-radius: 3px;
+}
+.hud-card-sub {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--hud-label);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--hud-divider);
+}
+
+.hud-rows { display: flex; flex-direction: column; gap: 5px; }
+/* Label left, value hard right — the alignment is what makes a column of times
+   comparable at a glance, and it is the whole reason this is a table. */
+.hud-row { display: flex; justify-content: space-between; align-items: baseline; gap: 18px; }
+.hud-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hud-label);
+}
+.hud-value {
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--hud-ink);
+}
+/* The running lap is the one you are inside; a little larger, not a headline. */
+.hud-value-lead { font-size: 27px; }
+.hud-value.is-void { color: var(--hud-warn); }
+.hud-value.is-idle { color: var(--hud-dim); }
+.hud-best { color: var(--hud-good); }
+.is-ahead { color: var(--hud-good); }
+.is-behind { color: var(--hud-warn); }
+
+/* Sector pills, top centre — the pygame state machine. Fill colour is the
+   classic timing language: purple fastest-ever, green up on your best lap,
+   yellow down, blue counting live, near-black previewing the last lap. */
+.hud-sectors-wrap {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+}
+.hud-sectors { display: flex; gap: 8px; }
+.hud-sector {
+  position: relative;
+  font-family: var(--mono);
+  width: 108px;
+  padding: 6px 0 7px;
+  text-align: center;
+  background: rgb(32, 35, 43);
+  border-top: 3px solid rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.hud-sector[data-n="1"] { border-top-color: var(--s1); }
+.hud-sector[data-n="2"] { border-top-color: var(--s2); }
+.hud-sector[data-n="3"] { border-top-color: var(--s3); }
+.hud-sector-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--hud-label);
+}
+.hud-sector[data-n="1"] .hud-sector-label { color: var(--s1); }
+.hud-sector[data-n="2"] .hud-sector-label { color: var(--s2); }
+.hud-sector[data-n="3"] .hud-sector-label { color: var(--s3); }
+.hud-sector-time {
+  display: block;
+  font-size: 18px;
+  font-weight: 500;
+  margin-top: 1px;
+  color: var(--hud-ink);
+}
+.hud-sector-delta {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
+  margin-top: 1px;
+  min-height: 13px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+/* The pygame pill fills. On a coloured fill the label goes white too. */
+.hud-sector.is-live { background: rgb(50, 92, 146); }
+.hud-sector.is-live .hud-sector-delta { color: rgb(210, 224, 240); letter-spacing: 0.18em; font-size: 9px; }
+.hud-sector.is-pend { background: rgb(24, 26, 32); }
+.hud-sector.is-pend .hud-sector-time { color: var(--dim); font-weight: 600; }
+.hud-sector.is-good { background: rgb(0, 132, 60); }
+.hud-sector.is-warn { background: rgb(207, 112, 0); }
+.hud-sector.is-purple { background: rgb(112, 36, 196); }
+.hud-sector.is-good .hud-sector-label,
+.hud-sector.is-warn .hud-sector-label,
+.hud-sector.is-purple .hud-sector-label { color: rgba(255, 255, 255, 0.85); }
+
+/* A void lap slashes its pills, as the pygame HUD does. */
+.hud-sector.is-invalid::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to top right,
+    transparent calc(50% - 3px),
+    var(--void) calc(50% - 3px),
+    var(--void) calc(50% + 3px),
+    transparent calc(50% + 3px)
+  );
+}
+
+.hud-sector-hint {
+  margin-top: 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--hud-dim);
+  opacity: 0;
+  transition: opacity 150ms;
+}
+.hud-sector-hint.is-on { opacity: 1; }
+
+/* Transient lap result — the flow never stops for it. */
+.lap-banner {
+  position: absolute;
+  top: 128px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-6px);
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 260ms, transform 260ms;
+}
+.lap-banner.is-on { opacity: 1; transform: translateX(-50%) translateY(0); }
+.lap-banner-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--hud-label);
+}
+.lap-banner-time {
+  font-family: var(--mono);
+  font-size: 34px;
+  font-weight: 500;
+  color: var(--hud-ink);
+}
+.lap-banner.is-best .lap-banner-label,
+.lap-banner.is-best .lap-banner-time { color: var(--hud-good); }
+.lap-banner.is-void .lap-banner-label,
+.lap-banner.is-void .lap-banner-time { color: var(--hud-warn); }
+
+/* A flag, not an alarm: it no longer skews or pulses. You already know you put
+   a wheel on the grass — this only has to confirm the lap is gone. */
+.hud-invalid {
+  position: absolute;
+  top: 104px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 18px 9px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-warn);
+  border-radius: 3px;
+  color: var(--hud-warn);
+  font-family: var(--mono);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+.hud-invalid.is-on { opacity: 1; }
+.hud-invalid-label {
+  font-size: 14px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.hud-invalid-action {
+  color: var(--hud-ink);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  max-height: 0;
+  margin-top: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 180ms ease, margin-top 180ms ease, opacity 180ms ease;
+}
+.hud-invalid-action.is-on { max-height: 14px; margin-top: 3px; opacity: 1; }
+
+/* --- the binnacle: shift lights, pedals, speed, gear, steering --- */
+.hud-tele {
+  position: absolute;
+  left: 50%;
+  bottom: 26px;
+  transform: translateX(-50%);
+  padding: 9px 14px 11px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-divider);
+  border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.hud-lights { display: flex; gap: 3px; justify-content: center; }
+.hud-led {
+  width: 18px;
+  height: 6px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  transition: background 40ms linear;
+}
+/* Green through the mid-range, amber approaching, red at the top — the strip
+   is read by where the colour has got to, not by counting segments. */
+.hud-led.is-on:nth-child(-n+5) { background: var(--hud-good); }
+.hud-led.is-on:nth-child(n+6):nth-child(-n+9) { background: rgb(226, 170, 72); }
+.hud-led.is-on:nth-child(n+10) { background: var(--hud-warn); }
+/* At the limiter the whole strip goes red at once — one unmistakable state. */
+.hud-led.is-on.is-limit { background: var(--hud-warn); }
+
+.hud-tele-main { display: flex; align-items: center; gap: 16px; }
+
+.hud-pedals { display: flex; gap: 7px; }
+.hud-bar-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.hud-bar {
+  width: 14px;
+  height: 62px;
+  background: rgba(0, 0, 0, 0.45);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+.hud-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 0; border-radius: 2px; }
+/* No glow. A bar that lights the room is a bar competing with the road. */
+.hud-throttle { background: var(--hud-good); }
+.hud-brake { background: var(--hud-warn); }
+.hud-bar-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--hud-label);
+}
+
+.hud-readout { display: flex; align-items: baseline; gap: 7px; min-width: 152px; justify-content: flex-end; }
+.hud-speed {
+  font-family: var(--mono);
+  font-size: 47px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--hud-ink);
+}
+.hud-unit {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--hud-label);
+}
+.hud-gear {
+  font-family: var(--mono);
+  font-size: 38px;
+  font-weight: 500;
+  line-height: 1;
+  min-width: 54px;
+  padding: 6px 0;
+  text-align: center;
+  color: var(--hud-ink);
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--hud-divider);
+  border-radius: 2px;
+}
+
+/* --- overhead map, top right: pygame's minimap --- */
+.hud-map-wrap {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  width: 172px;
+  height: 172px;
+  padding: 9px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-divider);
+  border-radius: 3px;
+}
+.hud-map { width: 100%; height: 100%; display: block; overflow: visible; }
+.hud-map-edge {
+  fill: none;
+  stroke: rgb(120, 124, 132);
+  /* Non-scaling, so the road reads as one width whatever the circuit's size —
+     otherwise a 3 km lap draws hairlines and a short one draws ropes. */
+  vector-effect: non-scaling-stroke;
+  stroke-width: 1.2;
+}
+.hud-map-start {
+  stroke: var(--hud-ink);
+  vector-effect: non-scaling-stroke;
+  stroke-width: 2;
+}
+.hud-map-ghost { fill: rgba(235, 238, 240, 0.45); }
+.hud-map-car { stroke: var(--hud-ink); stroke-width: 0.6; vector-effect: non-scaling-stroke; }
+.hud-map-car[data-sector="1"] { fill: var(--s1); }
+.hud-map-car[data-sector="2"] { fill: var(--s2); }
+.hud-map-car[data-sector="3"] { fill: var(--s3); }
+
+/* --- leaderboard assists: what was switched on, and filtering by it --- */
+.leaderboard-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 10px;
+}
+.leaderboard-filter .chip {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--edge);
+  background: transparent;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+}
+.leaderboard-filter .chip:hover { opacity: 1; }
+.leaderboard-filter .chip.is-selected {
+  opacity: 1;
+  border-color: transparent;
+  background: var(--accent-soft);
+}
+.leaderboard-assists {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  min-width: 96px;
+}
+.assist {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 2px 5px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+  /* Colour carries the meaning, so the text stays short enough to scan a
+     column of them without reading any of them twice. */
+  opacity: 0.85;
+}
+.assist.is-setup { color: var(--muted); }
+.assist.is-tc { color: var(--hud-warn); }
+.assist.is-abs { color: #58a6ff; }
+.leaderboard-legend {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--hud-label, #8b949e);
+}
+
+/* --- multifunction display and the TC lamp, right of the gear --- */
+.hud-mfd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+  min-width: 62px;
+  padding: 4px 8px;
+  border-left: 1px solid var(--hud-divider);
+}
+.hud-mfd-label {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--hud-label);
+}
+.hud-mfd-value {
+  font-family: var(--mono);
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--hud-ink);
+}
+/* White by default; amber only while the value is something the driver can
+   turn. The colour is the only thing saying "this is a control", so it must
+   not be on when it is not. */
+.hud-mfd-value { color: var(--hud-ink); }
+.hud-mfd-value.is-live { color: var(--hud-warn); }
+
+.hud-tc {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--hud-label);
+}
+.hud-tc.is-off { opacity: 0.45; }
+.hud-tc-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--hud-divider);
+  /* --bite is written every frame by the HUD; the transition keeps a lamp that
+     is being hammered on and off from flickering, without lagging the release
+     enough to claim TC is still working when it has let go. */
+  background: rgba(255, 176, 32, var(--bite, 0));
+  box-shadow: 0 0 calc(6px * var(--bite, 0)) rgba(255, 176, 32, var(--bite, 0));
+  transition: background-color 60ms linear, box-shadow 60ms linear;
+}
+
+/* --- steering, along the foot of the binnacle --- */
+.hud-steer-track {
+  position: relative;
+  height: 3px;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 2px;
+}
+.hud-steer-centre {
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  bottom: -3px;
+  width: 1px;
+  background: var(--hud-divider);
+}
+.hud-steer-needle {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 9px;
+  margin-left: -1.5px;
+  border-radius: 1px;
+  background: var(--hud-ink);
+}
+
+/* --- chips: state you just changed, then gone --- */
+.hud-chips {
+  position: absolute;
+  right: 24px;
+  top: 24px;
+  display: flex;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity 400ms ease;
+}
+.hud-chips.is-on { opacity: 1; }
+.hud-chip {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-divider);
+  border-radius: 2px;
+  color: var(--hud-dim);
+}
+.hud-easy { color: rgb(226, 170, 72); border-color: rgba(226, 170, 72, 0.5); }
+
+/* =====================  MENU  ===================== */
+
+.menu {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 26px;
+  /* Dark the circuit down enough to read over, but keep it visible — the
+     backdrop is the track you are choosing, not decoration. */
+  /* One flat scrim. The old two-layer gradient plus vignette was lighting the
+     circuit like a poster; a scrim just makes the panel readable over it. */
+  background: rgba(4, 6, 9, 0.82);
+  overflow: auto;
+}
+
+.menu-panel {
+  width: min(1120px, 100%);
+  max-height: calc(100vh - 52px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* The pause and result screens are small centred cards, not the full layout. */
+.menu-dialog .menu-panel {
+  width: min(520px, 100%);
+  background: var(--glass-solid);
+  border: 1px solid var(--edge);
+  border-left: 2px solid var(--accent);
+  border-radius: 3px;
+  padding: 26px 28px 24px;
+}
+
+.menu-header { flex-shrink: 0; margin-bottom: 22px; }
+.menu-title {
+  margin: 6px 0 0;
+  font-size: 21px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.menu-dialog .menu-title { font-size: 18px; }
+
+.menu-body {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  gap: 22px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 6px;
+}
+@media (max-width: 900px) { .menu-body { grid-template-columns: 1fr; } }
+
+.menu-section-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.menu-section-count {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--dim);
+}
+
+.menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: 9px; }
+.menu-list { display: flex; flex-direction: column; gap: 7px; }
+
+/* --- circuit cards and car rows --- */
+.card, .row {
+  position: relative;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--glass);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  padding: 12px 13px;
+  cursor: pointer;
+  /* Colour only. The hover lift this replaces made a list of circuits bounce
+     as the cursor crossed it, which is motion with nothing to say. */
+  transition: background 110ms, border-color 110ms;
+}
+.card:hover, .row:hover { background: rgba(30, 33, 41, 0.9); border-color: rgb(78, 84, 96); }
+/* Selection is one lamp: a lit border and a lit left rule. No fill gradient —
+   a tinted panel makes the selected item harder to read, not easier to find. */
+.card.is-selected, .row.is-selected {
+  border-color: var(--edge-hot);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.card:focus-visible, .row:focus-visible, .btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+
+.card { display: flex; flex-direction: column; gap: 9px; }
+/* Fixed box, and it has to clip: the viewBox already carries padding for the
+   stroke, and letting the SVG spill puts the circuit on top of the card text. */
+.card-map {
+  height: 82px;
+  flex-shrink: 0;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.card-info { min-width: 0; }
+.trackmap { display: block; width: 100%; height: 100%; overflow: hidden; }
+.trackmap-casing { fill: none; stroke: rgba(0, 0, 0, 0.75); stroke-width: 0.062; stroke-linejoin: round; }
+.trackmap-ribbon { fill: none; stroke: var(--dim); stroke-width: 0.032; stroke-linejoin: round; transition: stroke 110ms; }
+.trackmap-start { stroke: var(--muted); stroke-width: 0.022; transition: stroke 110ms; }
+.card:hover .trackmap-ribbon { stroke: var(--muted); }
+.card.is-selected .trackmap-ribbon { stroke: var(--accent); }
+.card.is-selected .trackmap-start { stroke: var(--ink); }
+
+.card-title, .row-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.card-meta { display: flex; gap: 12px; margin-top: 5px; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.card-meta i { font-style: normal; color: var(--dim); margin-left: 3px; font-size: 10px; letter-spacing: 0.06em; }
+.card-pb {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--edge);
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ahead);
+}
+.card-pb.is-empty {
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* --- car rows: a spec sheet, not a stat-bar advert --- */
+.row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.row-ptw { font-family: var(--mono); font-size: 15px; color: var(--ink); }
+.row-ptw i { font-style: normal; color: var(--dim); font-size: 10px; margin-left: 3px; }
+.row.is-selected .row-ptw { color: var(--accent); }
+/* The spec table. Two columns of label-left / value-right, mono and aligned,
+   because the comparison you are actually making between two cars is numeric.
+   The 0..1 bars this replaces could rank two cars but could not tell you what
+   either one WAS — every bar was full or empty against invented endpoints. */
+.row-specs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 20px;
+  margin-top: 10px;
+}
+.spec { display: flex; align-items: center; gap: 9px; }
+.spec-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  /* Fixed, so every bar starts at the same x and the row reads as a chart
+     rather than as five separate measurements. */
+  width: 74px;
+  flex-shrink: 0;
+}
+.spec-bar {
+  position: relative;
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+.spec-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 2px;
+  background: var(--accent);
+}
+/* The bar that reads the same on both setups. Dimmed rather than dropped: it
+   is saying "the engine is not what you are choosing between", which is worth
+   one quiet line. */
+.spec.is-shared .spec-bar-fill { background: var(--dim); }
+.spec.is-shared .spec-label { opacity: 0.6; }
+
+.row-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 10px; }
+.tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 2px;
+  color: var(--dim);
+  border: 1px solid var(--edge);
+}
+.tag-warn { color: var(--void); border-color: rgba(226, 170, 72, 0.4); }
+.tag-soon { color: var(--muted); }
+
+/* Locked content: visible on purpose — a roadmap, not a hole. */
+.card.is-locked, .row.is-locked {
+  opacity: 0.45;
+  cursor: default;
+  pointer-events: none;
+}
+.card.is-locked {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  min-height: 120px;
+}
+
+/* --- footer --- */
+.menu-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--edge);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.menu-toggles { display: flex; gap: 22px; flex-wrap: wrap; }
+.switch { display: flex; gap: 11px; align-items: center; cursor: pointer; max-width: 290px; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch-knob {
+  position: relative;
+  width: 36px; height: 18px;
+  flex-shrink: 0;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--edge);
+  transition: border-color 140ms;
+}
+.switch-knob::after {
+  content: "";
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 12px; height: 10px;
+  border-radius: 1px;
+  background: var(--dim);
+  transition: transform 140ms, background 140ms;
+}
+.switch.is-on .switch-knob { border-color: var(--edge-hot); }
+.switch.is-on .switch-knob::after { transform: translateX(16px); background: var(--accent); }
+.switch-title { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; display: block; }
+.switch-blurb { font-size: 10.5px; color: var(--dim); display: block; margin-top: 2px; line-height: 1.35; }
+
+.btn {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--edge);
+  border-radius: 3px;
+  padding: 11px 22px;
+  cursor: pointer;
+  transition: background 110ms, border-color 110ms;
+}
+.btn:hover { background: rgba(255, 255, 255, 0.1); border-color: rgb(78, 84, 96); }
+/* The one filled control on screen, so it needs no glow to be found. */
+.btn-primary { background: var(--accent); border-color: var(--accent); color: rgb(28, 20, 6); }
+.btn-primary:hover { background: rgb(238, 186, 96); border-color: rgb(238, 186, 96); }
+.btn-drive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 54px;
+  padding: 14px 42px;
+  font-size: 15px;
+}
+.btn-drive .icon { width: 13px; height: 13px; }
+.btn-controls { display: inline-flex; align-items: center; gap: 9px; }
+
+.menu-actions { display: flex; gap: 9px; margin-top: 22px; flex-wrap: wrap; }
+
+/* Buttons that carry their own shortcut. The kbd sits inside, quieter than
+   the label, so the button reads as one thing rather than two. */
+.btn-action { display: inline-flex; align-items: center; gap: 9px; padding: 13px 20px; }
+.btn-action .icon { width: 14px; height: 14px; }
+.btn-action kbd { margin-left: 2px; background: rgba(0, 0, 0, 0.22); border-bottom-color: rgba(0, 0, 0, 0.3); }
+.btn-primary kbd { color: #150500; }
+
+/* ---------- pause screen ---------- */
+
+/* One deliberate action stack. Letting these three wrap as ordinary menu
+   buttons made Menu fall onto a stray second row at this card width. */
+.pause-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+.pause-actions .btn-action {
+  width: 100%;
+  justify-content: flex-start;
+}
+.pause-actions .btn-action kbd { margin-left: auto; }
+
+/* ---------- controls reference ---------- */
+
+.menu-controls.menu-dialog .menu-panel { width: min(720px, 100%); }
+.controls-header { margin-bottom: 18px; }
+.controls-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.9fr 0.9fr;
+  gap: 10px;
+}
+.control-group {
+  min-width: 0;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--edge);
+  border-top-color: var(--edge-hot);
+}
+.control-group-title {
+  margin: 0 0 12px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.control-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
+}
+.control-group-title + .control-row { border-top: 0; }
+.control-row kbd { white-space: nowrap; }
+.control-label {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-align: right;
+}
+.controls-actions { justify-content: flex-end; }
+.controls-actions .btn { min-width: 120px; }
+
+.quick-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+  padding: 4px 16px;
+  border: 1px solid var(--edge);
+  background: rgba(255, 255, 255, 0.025);
+}
+.quick-actions { justify-content: flex-end; }
+
+@media (max-width: 680px) {
+  .controls-grid { grid-template-columns: 1fr; }
+  .quick-controls { grid-template-columns: 1fr; }
+}
+
+.pause-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+.pause-chip {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-style: italic;
+}
+.pause-sep { color: var(--dim); }
+
+.pause-stats {
+  display: grid;
+  grid-template-columns: repeat(3, auto);
+  justify-content: start;
+  gap: 26px;
+  margin-top: 20px;
+  padding-top: 18px;
+  border-top: 1px solid var(--edge);
+}
+.pause-stat { display: flex; flex-direction: column; gap: 3px; }
+.pause-stat-label {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.pause-stat-value {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+/* The lap at stake is the headline; the rest are references beside it. */
+.pause-stat.is-lead .pause-stat-value { font-size: 38px; }
+.pause-stat.is-void .pause-stat-value { color: var(--void); }
+.pause-void {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--void);
+  margin-top: 4px;
+}
+
+.menu-result-time {
+  font-family: var(--mono);
+  font-size: 58px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  margin: 12px 0 2px;
+  line-height: 1;
+}
+.menu-result-time.is-void { color: var(--void); }
+
+.menu-help {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 15px;
+  margin-top: 18px;
+  padding-top: 15px;
+  border-top: 1px solid var(--edge);
+  font-size: 10.5px;
+  color: var(--dim);
+  flex-shrink: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 2px 6px;
+  color: var(--ink);
+  letter-spacing: 0;
+}
+
+/* ---------- Settings screen ---------- */
+
+.menu-footer-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(170px, 1.35fr);
+  align-items: stretch;
+  gap: 10px;
+  flex: 1 1 620px;
+  max-width: 720px;
+  margin-left: auto;
+}
+.menu-secondary-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.btn-menu-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  padding-inline: 14px;
+  white-space: nowrap;
+}
+.btn-menu-secondary .icon { width: 14px; height: 14px; flex: 0 0 auto; color: var(--muted); }
+
+@media (max-width: 680px) {
+  .menu-footer { align-items: stretch; }
+  .menu-footer-actions {
+    display: flex;
+    flex: 1 1 100%;
+    flex-direction: column;
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+  .btn-drive { order: -1; width: 100%; }
+  .btn-menu-secondary {
+    gap: 5px;
+    padding: 10px 6px;
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+  }
+  .btn-menu-secondary .icon { width: 12px; height: 12px; }
+}
+
+/* Not three equal columns: the middle one carries View, whose four options are
+   the widest control on the screen now that they are named rather than drawn.
+   At 1fr each, "Overhead" fell to a second line by a few pixels. The outer two
+   hold short controls — two or three words each — and give the width up without
+   coming near wrapping themselves. The total is unchanged. */
+.settings-body { grid-template-columns: 0.82fr 1.36fr 0.82fr; }
+@media (max-width: 900px) { .settings-body { grid-template-columns: 1fr; } }
+
+/* Title and Reset-all share the header. */
+.set-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-left: auto;
+}
+.settings-actions .btn { min-width: 220px; }
+@media (max-width: 680px) {
+  .settings-actions { width: 100%; }
+  .settings-actions .btn { width: 100%; }
+}
+
+/* Label, control, reset — the reset column keeps its width when empty so a
+   row never shifts under the cursor as you change it. */
+.set-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 4px 10px;
+  margin-bottom: 16px;
+}
+.set-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.set-row .segmented { grid-column: 1 / -1; }
+
+.icon { width: 1em; height: 1em; flex-shrink: 0; }
+
+.reset-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  padding: 4px;
+  cursor: pointer;
+  transition: color 110ms, opacity 110ms;
+}
+.reset-btn .icon { width: 13px; height: 13px; }
+.reset-btn:hover { color: var(--accent); }
+/* Hidden but still occupying its cell. */
+.reset-btn.is-idle { visibility: hidden; }
+.reset-all { padding: 8px 10px; background: rgba(255, 255, 255, 0.06); }
+
+.segmented { display: flex; gap: 4px; flex-wrap: wrap; }
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background 110ms, color 110ms, border-color 110ms;
+}
+.seg .icon { width: 15px; height: 15px; }
+.seg:hover { background: rgba(255, 255, 255, 0.09); color: var(--ink); }
+.seg.is-on { background: var(--accent); border-color: var(--accent); color: rgb(28, 20, 6); }
+/* Custom: a readout of where you are, not somewhere to go. */
+.seg.is-inert { cursor: default; opacity: 0.55; }
+.seg.is-inert:hover { background: rgba(255, 255, 255, 0.04); color: var(--muted); }
+.seg.is-inert.is-on {
+  opacity: 1;
+  background: var(--accent-soft);
+  border-color: var(--edge-hot);
+  color: var(--accent);
+}
+
+/* ---------- Records ---------- */
+
+.leaderboard-meta {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.leaderboard-body { display: block; }
+.leaderboard-scope {
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.leaderboard-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--edge);
+}
+.leaderboard-row {
+  display: grid;
+  /* rank, driver, assists, time, ghost */
+  grid-template-columns: 46px minmax(110px, 1fr) auto 120px 132px;
+  align-items: center;
+  gap: 12px;
+  min-height: 54px;
+  border-bottom: 1px solid var(--edge);
+  padding: 7px 4px;
+}
+.leaderboard-row.is-selected { background: var(--accent-soft); }
+.leaderboard-rank, .leaderboard-time { font-family: var(--mono); }
+.leaderboard-rank { color: var(--dim); font-size: 12px; }
+.leaderboard-driver { font-size: 13px; font-weight: 750; }
+.leaderboard-time { font-size: 16px; font-weight: 700; text-align: right; }
+.leaderboard-ghost { padding: 8px 10px; font-size: 10px; }
+.leaderboard-ghost:disabled, .leaderboard-footer .btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.leaderboard-empty {
+  display: grid;
+  place-items: center;
+  min-height: 180px;
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.leaderboard-empty.is-error { color: var(--void); }
+.leaderboard-footer { justify-content: flex-end; }
+
+@media (max-width: 680px) {
+  .leaderboard-row { grid-template-columns: 32px 1fr auto; }
+  .leaderboard-time { grid-column: 2; grid-row: 2; text-align: left; }
+  .leaderboard-ghost { grid-column: 3; grid-row: 1 / span 2; }
+  .leaderboard-footer { align-items: stretch; gap: 12px; }
+}
