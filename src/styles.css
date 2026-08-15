@@ -1257,3 +1257,23 @@ kbd {
   .leaderboard-ghost { grid-column: 3; grid-row: 1 / span 2; }
   .leaderboard-footer { align-items: stretch; gap: 12px; }
 }
+
+/* A 1080p laptop is most comfortable at the density the interface had while
+   it was designed at 75% browser zoom. Give menus and driving instruments a
+   larger virtual layout surface, then scale that surface back into the real
+   viewport. Large desktop displays keep the full-size presentation, while the
+   purpose-built mobile layout below 901px remains untouched. */
+@media (min-width: 901px) and (max-width: 1920px) {
+  .menu,
+  .hud {
+    inset: auto;
+    top: 0;
+    left: 0;
+    width: 133.333333%;
+    height: 133.333333%;
+    transform: scale(0.75);
+    transform-origin: top left;
+  }
+
+  .menu-panel { max-height: calc(133.333333vh - 52px); }
+}
