@@ -22,25 +22,42 @@ function topSpeedKmh(p: CarParams): number {
   return car.s.vx * 3.6
 }
 
-/** Highest entry speed that holds a ~60 m radius without the rear letting go. */
+/** Does this steering input hold the corner at this entry speed? */
+function holds(p: CarParams, kph: number, steer: number): boolean {
+  const car = new Car(p)
+  car.s.vx = kph / 3.6
+  car.s.gear = 4
+  for (let i = 0; i < 3 / DT; i++) {
+    car.step(steer, 0.15, DT, 10)
+    const radius = Math.abs(car.s.r) > 1e-6 ? Math.abs(car.s.vx / car.s.r) : 1e9
+    if (i > 60 && (radius > 85 || Math.abs(car.s.slipR) > 0.35)) return false
+  }
+  return true
+}
+
+/**
+ * Highest entry speed that holds a ~60 m radius without the rear letting go.
+ *
+ * The steering input is SWEPT rather than held at one value, and that is the
+ * whole difference between measuring the car and measuring the steering rack.
+ * This used to pin the input at 0.35, which was fine while both setups shared a
+ * rack: the same input meant the same road-wheel angle, so the number moved
+ * only when grip moved. Once the lock changed, 0.35 stopped meaning the angle
+ * it used to mean, and the quoted cornering speed fell by 13 km/h for a car
+ * that had in fact gained peak lateral grip. A spec sheet that reports the rack
+ * ratio in the Cornering row is worse than one that says nothing.
+ */
 function corneringKmh(p: CarParams): number {
   let best = 0
   // 1 km/h steps: the two setups are eight km/h apart, so a coarser sweep
   // cannot resolve the difference it exists to check.
   for (let kph = 150; kph <= 240; kph += 1) {
-    const car = new Car(p)
-    car.s.vx = kph / 3.6
-    car.s.gear = 4
-    let held = true
-    for (let i = 0; i < 3 / DT; i++) {
-      car.step(0.35, 0.15, DT, 10)
-      const radius = Math.abs(car.s.r) > 1e-6 ? Math.abs(car.s.vx / car.s.r) : 1e9
-      if (i > 60 && (radius > 85 || Math.abs(car.s.slipR) > 0.35)) { held = false; break }
-    }
-    if (held) best = kph
+    if (STEER_SWEEP.some((s) => holds(p, kph, s))) best = kph
   }
   return best
 }
+
+const STEER_SWEEP = [0.3, 0.4, 0.5, 0.6, 0.75, 1.0] as const
 
 describe('the numbers on the car card', () => {
   for (const preset of ['legacy', 'classic'] as const) {

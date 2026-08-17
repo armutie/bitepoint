@@ -84,9 +84,12 @@ export interface CarParams {
   tcGearMax: number
 
   absOn: boolean
+  /** rad of rear slip angle before the brake starts moving forward */
   absSlip: number
+  /** brake bias added per rad of rear slip past `absSlip` */
   absGain: number
-  absFloor: number
+  /** the furthest forward the bias may go */
+  absBiasMax: number
 
   /**
    * Drive weight transfer from the force the tyres can actually deliver rather
@@ -179,9 +182,30 @@ export function defaultParams(): CarParams {
     tcGearMax: -1,
 
     absOn: false,
-    absSlip: deg(2.0),
-    absGain: 30.0,
-    absFloor: 0.05,
+    absSlip: deg(2.5),
+    // Bias per radian. 6.0 puts the bias on its stop about 1.3 degrees past the
+    // threshold — the aid is meant to arrive inside one corner entry, not over
+    // several.
+    absGain: 6.0,
+    /**
+     * How far forward the bias may go, and the number that decides whether the
+     * aid steers for you or lets you steer.
+     *
+     * The front's grip budget is shared between braking and cornering by the
+     * friction ellipse, so brake moved onto an axle that is already saturated
+     * does not just fail to stop you harder — it scales that axle's LATERAL
+     * force down too, and the aid buys its stability by taking the steering
+     * away. Under full brake at 200 km/h the front keeps 85% of its cornering
+     * force at the base 0.60 bias, 71% at 0.74, and only 55% at 0.85.
+     *
+     * 0.85 was the first guess and it was too far. Measured on a steering ramp
+     * under a held brake, it cost about 6% of the cornering available on a
+     * light-to-medium brake — 3.37 g against 3.56 g at 0.74 — to buy margin
+     * nothing was asking for: worst body slip through the steered stops was
+     * 7.3 degrees where 12.7 is still comfortably held. Below 0.70 it stops
+     * working (0.66 spins), so this sits one step the safe side of the cliff.
+     */
+    absBiasMax: 0.74,
 
     trueLoadTransfer: false,
 
@@ -297,6 +321,31 @@ export function presetLabel(name: PresetName): string {
  * nobody could feel, bought with a second ladder to keep in step with this one.
  */
 const GP_RATIOS: readonly number[] = [3.03, 2.53, 2.11, 1.75, 1.46, 1.21, 1.01]
+
+/**
+ * The steering rack both setups run, and the reason it shrank.
+ *
+ * It was 22 degrees falling to 10.8, and that put the front tyre past its own
+ * peak everywhere. The tyre peaks at 9.1 degrees of slip; at full lock the
+ * front sat at 14 degrees while the rear sat at 3.4, and the axles ran at 97%
+ * and 72% of their grip. In terminal understeer the car barely yaws, so the
+ * front slip angle is very nearly the steering angle itself — measured within
+ * 1.7 degrees at speed — which means lock past the tyre's peak does not turn
+ * the car, it only scrubs the front.
+ *
+ * The cost was not just feel. Peak lateral g arrived at 55-65% of the available
+ * lock, so the last third of the travel made the car SLOWER: 2.36 g at full
+ * lock against 2.51 g at 55%. The control was inverted exactly where a driver's
+ * instinct is to add more of it, which is what "it barely wants to turn" was.
+ *
+ * At 16 degrees falling to 9, full lock lands on the tyre's peak instead of
+ * past it. Full lock becomes the fastest input at 60-90 km/h rather than a
+ * mistake, cornering force at full lock RISES (2.02 -> 2.12 g at 90 km/h), and
+ * the front keeps something in reserve to catch the rear with. It costs 1.3 m
+ * of minimum radius at 60 km/h, 14.0 to 15.3, which is the whole bill.
+ */
+const LOCK = deg(16.0)
+const HIGH_SPEED_LOCK = deg(9.0)
 
 const PRESETS: Record<PresetName, () => CarParams> = {
   nimble: () => defaultParams(),
@@ -436,9 +485,9 @@ const PRESETS: Record<PresetName, () => CarParams> = {
     maxBrakeForce: 42000.0,
     brakeBias: 0.6,
     trueLoadTransfer: true,
-    maxSteer: deg(22.0),
+    maxSteer: LOCK,
     steerRateLo: deg(160.0),
-    highSpeedSteer: 10.8 / 22.0,
+    highSpeedSteer: HIGH_SPEED_LOCK / LOCK,
     steerUsesRoadSpeed: true,
     divePitch: deg(1.6),
     squatPitch: deg(0.5),
@@ -450,7 +499,7 @@ const PRESETS: Record<PresetName, () => CarParams> = {
     gearRatios: GP_RATIOS,
     // Trimmed from 1.05 so the top of the gearbox is reachable. Eight ratios
     // under a 271 km/h ceiling left 8th a six km/h band — the lugging overdrive
-    // straight back. At 0.86 the car runs to 290 and 8th gets 24 km/h to work
+    // straight back. At 0.86 the car runs to 288 and 8th gets 24 km/h to work
     // in. Downforce is untouched at 1.8: a cleaner car, not a lower-downforce
     // one, which is how you buy top speed without giving back the cornering.
     dragCoef: 0.86,
@@ -476,9 +525,9 @@ const PRESETS: Record<PresetName, () => CarParams> = {
     maxBrakeForce: 42000.0,
     brakeBias: 0.6,
     trueLoadTransfer: true,
-    maxSteer: deg(22.0),
+    maxSteer: LOCK,
     steerRateLo: deg(160.0),
-    highSpeedSteer: 10.8 / 22.0,
+    highSpeedSteer: HIGH_SPEED_LOCK / LOCK,
     steerUsesRoadSpeed: true,
     divePitch: deg(1.6),
     squatPitch: deg(0.5),
@@ -521,21 +570,40 @@ export function applyEasyAids(p: CarParams): CarParams {
   p.tcSlip = 0.07
   p.tcFullSpeed = 12.0
   p.tcOffSpeed = 400.0
-  // Easy mode should shorten the learning curve as well as calm the chassis.
-  // The extra force is modest and remains tyre-limited at low speed, but gives
-  // the pedal enough authority in the high-speed braking zones.
-  p.maxBrakeForce *= 1.15
+  // Easy mode used to add 15% to the brake force here, on the reasoning that
+  // the safe setting felt as though it had no brakes in the high-speed zones.
+  // It really did — but the cause was the old ABS throwing 95% of the command
+  // away, not a shortage of brake, and rebuilding ABS as brakeforce
+  // distribution fixed it at the source: the same steered stops now run 64-73 m
+  // where they used to take 124-157.
+  //
+  // With that gone the extra force is no longer free. Measured, it buys 1-2 m
+  // of stopping and costs about 9% of the cornering available under braking
+  // (2.16 g down to 1.98 at half brake), which is the wrong trade for the
+  // setting a beginner is on.
   p.absOn = true
-  p.absSlip = deg(1.2)
-  // Step in early, but do not throw the brakes away when the rear starts to
-  // rotate. The old gain/floor combination could collapse a full command to
-  // five percent under ordinary trail braking, which made the safe mode feel
-  // as though it had no brakes. Keep meaningful pressure while the extra rear
-  // grip below does the stabilising.
-  p.absGain = 18.0
-  p.absFloor = 0.45
-  // More rear grip than front means the front washes out first. Running wide is
-  // recoverable by lifting; a snap of oversteer at speed is not.
-  p.rearGripBias = 1.45
+  // Earlier and harder than the racing setting: the bias starts moving at one
+  // and three quarter degrees of rear slip rather than two and a half, and gets
+  // all the way forward in half the angle.
+  //
+  // 1.75 and not 1.5 for a reason worth writing down: `math.radians(1.5)` and
+  // `(1.5 * pi) / 180` differ in the last bit, and Python and this file compute
+  // it the two different ways, so 1.5 fails the exact preset-parity check for
+  // no behavioural reason at all. 1.75 is representable identically in both.
+  p.absSlip = deg(1.75)
+  p.absGain = 12.0
+  // Left at the standard 1.25, where it used to be raised to 1.45.
+  //
+  // The old argument was sound on its own terms — more rear grip than front
+  // means the front washes out first, running wide is recoverable by lifting
+  // and a snap of oversteer at speed is not. What it cost was that easy mode
+  // stopped being the same car: at 1.45 the rear barely reached its slip
+  // ceiling at all, which is why the traction control position made almost no
+  // difference to a corner exit. The aid a beginner was told they had was not
+  // the thing actually saving them.
+  //
+  // Easy is now the standard chassis with the aids switched on, which is what
+  // it says on the menu, and the aids have to earn it.
+  p.rearGripBias = 1.25
   return p
 }

@@ -164,6 +164,13 @@ export class Car {
    */
   tcCut = 0
 
+  /**
+   * How far ABS has moved the brake bias, 0..1 of its available travel, and 0
+   * when it is not intervening. Same reasoning as `tcCut`: a magnitude rather
+   * than a flag, because a badge driven by a per-tick boolean strobes.
+   */
+  absCut = 0
+
   constructor(params?: CarParams) {
     this.p = params ?? defaultParams()
     this.s = initialState()
@@ -203,6 +210,7 @@ export class Car {
     steerCmd = clamp(steerCmd, -1.0, 1.0)
     throttle = clamp(throttle, -1.0, 1.0)
     this.tcCut = 0
+    this.absCut = 0
 
     const steerSpeed = p.steerUsesRoadSpeed ? Math.hypot(s.vx, s.vy) : Math.abs(s.vx)
     const speedFrac = Math.min(steerSpeed / p.steerSpeedRef, 1.0)
@@ -286,28 +294,66 @@ export class Car {
     const delta = s.steer
 
     // Longitudinal force command: geared drive, or braking/reverse.
+    // `brakeBias` is a local rather than `p.brakeBias` read in place, because
+    // ABS moves it during the tick and every consumer — the load-transfer
+    // estimate and the axle split alike — has to see the same number.
+    let brakeBias = p.brakeBias
     let fxDrive: number
     if (throttle >= 0.0) {
       const total = p.gearRatios[s.gear]! * p.finalDrive
-      const rpmRoad = this.engineRpmAt(s.vx, s.gear)
-      const rpm = Math.min(Math.max(rpmRoad, p.idleRpm), p.redlineRpm)
+      // Engine speed follows the DRIVEN WHEEL, not the road.
+      //
+      // This read `s.vx` and that was a real bug, not a simplification: the
+      // crank is geared to the rear wheel, so a wheel that is spinning revs the
+      // engine whether or not the car is going anywhere. Taking rpm from road
+      // speed meant a spinning wheel left the engine at the road's rpm, still
+      // on its fat part of the torque curve, still making full torque — so
+      // nothing ever arrested the spin. Measured with traction control off, a
+      // second-gear exit reached a slip ratio of EIGHTY-FOUR (the tyre peak is
+      // 0.16) and the car simply span, because the only thing that had ever
+      // limited wheelspin was the traction control hiding this.
+      //
+      // With the wheel driving the tacho the loop closes the way it does in a
+      // real car: spin the rears, the revs climb, the limiter cuts the fuel and
+      // the spin arrests itself. That is what makes driving with the aid OFF a
+      // skill rather than a coin toss.
+      const rpmWheel = this.engineRpmAt(s.wheelVr, s.gear)
+      const rpm = Math.min(Math.max(rpmWheel, p.idleRpm), p.redlineRpm)
       let wheelForce = (engineTorque(rpm) * p.torqueScale * total) / p.wheelRadius
       // Rev limiter, and it is not decoration — without it the clamp above
       // means the engine keeps making its redline torque at ANY engine speed.
       // Held in 2nd this car reached 15,800 rpm and 190 km/h, still pulling,
       // because nothing ever told it to stop. The gears limited acceleration
       // but never top speed, so every ratio was effectively a top gear.
-      wheelForce *= revLimiter(rpmRoad, p.redlineRpm)
+      wheelForce *= revLimiter(rpmWheel, p.redlineRpm)
       if (s.shiftTimer > 0.0) wheelForce = 0.0 // clutch/torque cut mid-change
       fxDrive = throttle * wheelForce
     } else if (s.vx > 0.5) {
       fxDrive = throttle * p.maxBrakeForce
       if (p.absOn) {
-        // Rear stepping out under brakes: shed brake in proportion to how far the
-        // rear slip angle has run past the threshold, down to a floor. Feeds the
-        // reduced brake into the transfer estimate below, so the rear re-loads.
+        // Rear stepping out under brakes: move brake FORWARD, do not throw it
+        // away. This used to scale the whole brake command down toward a floor,
+        // and it was worse than useless — measured braking from 250 km/h with
+        // any steering at all, it stretched the stop from 86 m to 124 m and
+        // STILL span the car more often, because a car that is not slowing down
+        // spends longer in the state that was about to spin it.
+        //
+        // What actually unsettles the rear is not the amount of brake but its
+        // distribution: under 4 g the rear unloads to 6.8 kN, and at a 0.60 bias
+        // the rear brake alone asks for 99% of what is left, so the axle has
+        // 0.22 g of cornering grip and lets go the moment the wheel moves. The
+        // front, meanwhile, is being pressed down by the same transfer and has
+        // grip going spare. So the fix is the one a real car uses — electronic
+        // brakeforce distribution — and it costs almost no stopping power
+        // because the force moves to the axle that can take it.
         const excess = Math.max(0.0, Math.abs(s.slipR) - p.absSlip)
-        fxDrive *= Math.max(p.absFloor, 1.0 - p.absGain * excess)
+        brakeBias = Math.min(p.absBiasMax, p.brakeBias + p.absGain * excess)
+        // Report the share of the bias travel used, so the badge reads the same
+        // whether the aid nudged the bias or put it on the stop.
+        const travel = p.absBiasMax - p.brakeBias
+        if (travel > 0.0) {
+          this.absCut = Math.max(this.absCut, (brakeBias - p.brakeBias) / travel)
+        }
       }
     } else {
       fxDrive = throttle * p.maxEngineForce * 0.5 // gentle reverse
@@ -333,8 +379,8 @@ export class Car {
       if (fxDrive < 0.0) {
         const brake = -fxDrive
         fxEst = -(
-          Math.min(p.brakeBias * brake, gripFEst) +
-          Math.min((1.0 - p.brakeBias) * brake, gripREst)
+          Math.min(brakeBias * brake, gripFEst) +
+          Math.min((1.0 - brakeBias) * brake, gripREst)
         )
       } else {
         fxEst = Math.min(fxDrive, gripREst)
@@ -428,7 +474,7 @@ export class Car {
       // Braking: the front shares its grip budget between brake and cornering via
       // a friction ellipse, so you can still trail-brake and rotate, just with
       // less of each. The rear keeps lateral-first so it stays planted.
-      const bias = p.brakeBias
+      const bias = brakeBias
       const fxFWant = fxDrive * bias
       const mag = Math.hypot(fxFWant, fyF)
       if (mag > gripF) {

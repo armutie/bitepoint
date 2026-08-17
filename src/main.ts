@@ -11,7 +11,7 @@ import './styles.css'
 import { useLegacyTyreModel, type CarState } from './core/car'
 import {
   applyEasyAids, handlingPreset, presetLabel, PRESET_INFO, PRESET_ORDER,
-  TC_LEVEL_DEFAULT, TC_LEVEL_MAX, type PresetName,
+  TC_LEVEL_MAX, type PresetName,
 } from './core/carParams'
 import { ASSISTS_ADJUSTABLE, LEGACY_TYRE_MODE } from './features'
 
@@ -162,10 +162,43 @@ async function boot(): Promise<void> {
    * from it — the background field belongs to the main menu alone.
    */
   let paused = false
-  /** Traction-control position. Fixed for v1 — see ASSISTS_ADJUSTABLE. */
-  let tcLevel = ASSISTS_ADJUSTABLE ? settings.tcLevel : TC_LEVEL_DEFAULT
+  /**
+   * Easy's rotary position — being FELT rather than settled.
+   *
+   * Position 1 is the weakest setting the dial has: a 0.30 slip ceiling against
+   * a tyre that peaks at 0.16, so it only catches a wheel that is already well
+   * past the point of making drive. Measured, it changes almost nothing in easy
+   * mode — corner exits are identical to position 4 at 0.11 slip and 1.6 degrees
+   * of body slip, because the 1.45 rear grip bias means the ceiling is rarely
+   * reached at all. The one place it shows is a standing start, which spins to
+   * 0.30 against 0.14 and arrives 1 km/h slower.
+   *
+   * `TC_LEVEL_DEFAULT` (4) is the other candidate and is what this was.
+   */
+  const EASY_TC_LEVEL = 1
+  /**
+   * Traction-control position, which the difficulty now decides.
+   *
+   * Easy gets the aid, Standard gets none — the same split ABS already has, so
+   * "Easy" means every aid on and "Standard" means you do it yourself, rather
+   * than the previous state of affairs, in which the two ran IDENTICAL traction
+   * control and only ABS and the grip bias told them apart. `tc: true` on the
+   * sim keeps the rotary in force at all times, so a preset's own
+   * `tractionControl` never gets a say and this is the only place it can be
+   * turned off.
+   *
+   * Standard with no traction control is only a driveable proposition because
+   * engine rpm now follows the driven wheel: wheelspin used to run away to a
+   * slip ratio of eighty-four because a spinning wheel never revved the engine
+   * out, and the aid was the only thing hiding it.
+   */
+  const tcFor = (easy: boolean): number =>
+    ASSISTS_ADJUSTABLE ? settings.tcLevel : easy ? EASY_TC_LEVEL : 0
+  let tcLevel = tcFor(selection.easy)
   /** Smoothed TC intervention for the lamp — see TC_LAMP_DECAY. */
   let tcBite = 0
+  /** Smoothed ABS intervention for the badge. */
+  let absBite = 0
   let attractTime = 0
   /** Selection + record stamp the attract line was last baked for. */
   let attractLineKey = ''
@@ -300,8 +333,9 @@ async function boot(): Promise<void> {
       // rather than sampled per tick like the rotary.
       abs: ASSISTS_ADJUSTABLE && settings.abs,
     })
-    tcLevel = ASSISTS_ADJUSTABLE ? settings.tcLevel : TC_LEVEL_DEFAULT
+    tcLevel = tcFor(sel.easy)
     tcBite = 0
+    absBite = 0
 
     prevState = { ...sim.car.s }
 
@@ -335,7 +369,12 @@ async function boot(): Promise<void> {
     }
     // Delta follows the chosen opponent; with no pinned board entry that is PB.
     sim.referenceTrace = ghostRecord?.trace ?? null
-    renderer.setCars(p, ghostRecord !== null)
+    // The ghost model is built even with no lap to replay yet. It costs a car's
+    // worth of geometry on a screen that is already building the session — and
+    // it means the first personal best of a fresh profile does not construct
+    // and upload a whole car in the middle of the lap that follows it. It
+    // stays invisible until a replay actually runs.
+    renderer.setCars(p, true)
     renderer.ghostVisible = sel.ghost
     ghost = null
 
@@ -425,6 +464,14 @@ async function boot(): Promise<void> {
         renderer.ghostVisible = current.ghost
       }
 
+      // And the yield is a real one: past the frame, into browser idle time.
+      // Saving a lap serializes a few hundred KB and localStorage writes are
+      // synchronous, which measured ~30 ms in one tick — run it on the line
+      // crossing and the reward for a personal best was two dropped frames at
+      // the exact moment the next lap starts. The next lap is already running,
+      // so the result banner landing a frame or two later costs nothing.
+      await afterPresent()
+
       isBest = await store.submit(record)
       // Remote acceptance is deliberately off the driving path. The API
       // replays and derives the time; a slow or unavailable board must never
@@ -461,6 +508,9 @@ async function boot(): Promise<void> {
       // news and should be instant; TC having stopped is not, and a lamp that
       // dropped as sharply as it lit would strobe through every bump.
       tcBite = Math.max(sim.car.tcCut, tcBite * TC_LAMP_DECAY)
+      // Same smoothing for the ABS badge, and for the same reason: the aid
+      // engages and releases many times through one braking zone.
+      absBite = Math.max(sim.car.absCut, absBite * TC_LAMP_DECAY)
 
       // Start the ghost the instant the player's lap does, so the two are
       // always comparing the same stretch of road.
@@ -598,6 +648,7 @@ async function boot(): Promise<void> {
           ghostY: ghostDrawn ? ghostDrawn.y : null,
           tcLevel,
           tcBite,
+          absBite,
           currentLap: sim.currentLapTime,
           lastLap: sim.lastLapTime,
           bestLap: sim.bestLapTime,
@@ -619,6 +670,10 @@ async function boot(): Promise<void> {
           inputLabel: input.mode === 'mouse' ? 'Mouse' : 'Keys',
           viewportLabel: VIEWPORT_LABEL[viewport],
           easy: current.easy,
+          // What the car was actually built with, not what was requested — the
+          // sim resolves the aid, so reading it back is the only way the HUD
+          // cannot drift from the thing it is describing.
+          abs: sim.car.p.absOn,
           ghost: current.ghost,
           lapCount: sim.lapsCompleted,
           validLaps: sim.validLaps,
@@ -696,7 +751,34 @@ async function boot(): Promise<void> {
     }
   }
 
-  window.addEventListener('resize', () => setViewport(viewport))
+  // Coalesced to one per frame. A window drag fires `resize` far faster than
+  // the display refreshes, and each one reached `EffectComposer.setSize` and
+  // reallocated both render targets; doing that several times inside a single
+  // frame is work whose result is thrown away before anything is drawn with it.
+  let resizePending = false
+  window.addEventListener('resize', () => {
+    if (resizePending) return
+    resizePending = true
+    requestAnimationFrame(() => {
+      resizePending = false
+      setViewport(viewport)
+    })
+  })
+
+  // Stop the loop while the tab is hidden, and restart it clean.
+  //
+  // Nothing was watching for this, so a hidden tab kept whatever the browser
+  // still gave it and came back holding stale timing. `start()` resets both the
+  // clock and the accumulator, so returning costs one ordinary frame instead of
+  // a catch-up: with `MAX_FRAME` at 0.25 s that catch-up was fifteen fixed
+  // steps, which measures 0.7 ms and is NOT what makes the return feel rough --
+  // but running nothing at all while nobody is looking is still the right
+  // behaviour, and it is what stops a backgrounded tab burning a core.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) loop.stop()
+    else if (!loop.isRunning) loop.start()
+  })
+
   renderer.resize()
   // Show the opening circuit straight away, so the menu never opens on a void.
   void preview(selection.trackId)
@@ -721,6 +803,21 @@ async function boot(): Promise<void> {
     })
   }
 }
+
+/**
+ * Resolve once the current frame has presented and the browser has gone idle —
+ * the place where a few milliseconds of synchronous work cannot cost a vsync.
+ * The timeout bounds the wait on a busy main thread; Safari has no
+ * requestIdleCallback, and a timer past the next frame serves the same end.
+ */
+const afterPresent = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(() => resolve(), { timeout: 250 })
+    } else {
+      setTimeout(resolve, 32)
+    }
+  })
 
 /** Position and heading between two physics states, for smooth drawing. */
 function interpolate(a: CarState, b: CarState, alpha: number): CarState {

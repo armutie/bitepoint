@@ -833,7 +833,7 @@ const CONTROL_GROUPS = [
   {
     title: 'Driving',
     rows: [
-      ['Mouse / A D / ← →', 'Steer'],
+      ['Mouse', 'Steer'],
       ['W / ↑', 'Throttle'],
       ['S / ↓', 'Brake'],
     ],

@@ -53,7 +53,10 @@ export interface Bar {
 const DOMAIN = {
   downforce: [1.6, 2.3],
   drag: [0.78, 1.13],
-  topSpeed: [270, 296],
+  // Widened at the bottom when both setups lost ~1.5 km/h to the driven-wheel
+  // rpm fix: at [270, 296] the high-downforce car sat two thousandths off the
+  // end of its own bar, which is the failure this domain exists to prevent.
+  topSpeed: [268, 296],
   cornering: [184, 204],
   power: [300, 600],
 } as const
@@ -84,8 +87,14 @@ export function carBars(p: CarParams, preset?: string): Bar[] {
 export const PERFORMANCE: Record<string, {
   topKmh: number; cornerKmh: number; downforce: number; drag: number
 }> = {
-  legacy: { topKmh: 290.0, cornerKmh: 188, downforce: 1.8, drag: 0.86 },
-  classic: { topKmh: 272.0, cornerKmh: 198, downforce: 2.05, drag: 1.05 },
+  // Top speed came down about 1.5 km/h when engine rpm was moved onto the
+  // driven wheel instead of the road: at terminal velocity the rear is turning
+  // fractionally faster than the car is travelling, so the limiter now arrives
+  // where it really would. Re-measured rather than tuned back out — the drag
+  // figure describes the body, and bending it to recover a round number on a
+  // card would be the card deciding the car.
+  legacy: { topKmh: 288.4, cornerKmh: 189, downforce: 1.8, drag: 0.86 },
+  classic: { topKmh: 270.5, cornerKmh: 200, downforce: 2.05, drag: 1.05 },
 }
 
 /** Power-to-weight, the one number that actually predicts how it will feel. */

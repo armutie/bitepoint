@@ -220,13 +220,12 @@ export class InputState {
     const down = this.held.has('ArrowDown') || this.held.has('KeyS')
     this.lookBack = this.held.has('ShiftLeft') || this.held.has('ShiftRight')
 
-    const left = this.held.has('ArrowLeft') || this.held.has('KeyA')
-    const right = this.held.has('ArrowRight') || this.held.has('KeyD')
-
-    // Mouse is the released control scheme. A/D and the arrow keys remain a
-    // quiet fallback: holding either temporarily takes the wheel, without
-    // adding another mode for a new player to choose or configure.
-    if (this.mode === 'mouse' && !left && !right) {
+    // Mouse is the released control scheme, and it is the ONLY thing that
+    // steers while it is selected. A/D and the arrow keys briefly took the
+    // wheel off the mouse when held; that made the wheel jump to a keyboard
+    // rate mid-corner from a key a driver was holding for some other reason,
+    // which is a worse surprise than the extra scheme it saved.
+    if (this.mode === 'mouse') {
       // Relative to the picture, not the window. With the stage letterboxed
       // these differ, and using window coordinates puts the straight-ahead
       // point off to one side of the screen.
@@ -241,6 +240,8 @@ export class InputState {
       const span = Math.max((half - dead) * this.fullLockFraction, 1)
       this.steer = clamp(Math.sign(dx) * (mag / span), -1, 1)
     } else {
+      const left = this.held.has('ArrowLeft') || this.held.has('KeyA')
+      const right = this.held.has('ArrowRight') || this.held.has('KeyD')
       const target = (left ? 1 : 0) + (right ? -1 : 0)
       this.steer += clamp(target - this.steer, -STEER_SLEW, STEER_SLEW)
       if (target === 0) this.steer *= STEER_RETURN

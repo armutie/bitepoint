@@ -71,6 +71,10 @@ export interface HudState {
   ghostY: number | null
   /** Traction control position, 0 = off. */
   tcLevel: number
+  /** Whether the brake-stability aid is fitted to this car. */
+  abs: boolean
+  /** How hard ABS is intervening right now, 0..1, already smoothed. */
+  absBite: number
   /**
    * How hard TC is intervening right now, 0..1, already smoothed.
    *
@@ -91,6 +95,7 @@ export class Hud {
   private hudMap: HudMap | null = null
   private mapTrackId = ''
   private readonly mfdValue: HTMLElement
+  private readonly absBadge: HTMLElement
   private readonly tcLamp: HTMLElement
   private readonly tcLampText: HTMLElement
   private readonly lights: HTMLElement[]
@@ -103,13 +108,18 @@ export class Hud {
   private readonly invalidAction: HTMLElement
   private readonly delta: HTMLElement
   private readonly sectors: HTMLElement[]
+  private readonly sectorTimes: HTMLElement[] = []
+  private readonly sectorDeltaEls: HTMLElement[] = []
   private readonly throttleBar: HTMLElement
   private readonly brakeBar: HTMLElement
   private readonly camera: HTMLElement
   private readonly inputChip: HTMLElement
   private readonly viewportChip: HTMLElement
   private readonly ghostChip: HTMLElement
+  private readonly tcChip: HTMLElement
+  private readonly absChip: HTMLElement
   private readonly easyBadge: HTMLElement
+  private readonly steerRail: HTMLElement
   private readonly steerNeedle: HTMLElement
   private readonly lapBanner: HTMLElement
   private readonly lapBannerTime: HTMLElement
@@ -163,6 +173,11 @@ export class Hud {
       const delta = el('span', 'hud-sector-delta')
       chip.append(label, time, delta)
       sectorRow.append(chip)
+      // Held rather than re-found: `setPill` runs for all three pills every
+      // frame, and querying the subtree each time is a tree walk for a node
+      // that has been in hand since construction.
+      this.sectorTimes.push(time)
+      this.sectorDeltaEls.push(delta)
       return chip
     })
     this.sectorHint = el('div', 'hud-sector-hint')
@@ -220,6 +235,19 @@ export class Hud {
     readout.append(this.speed, unit)
     this.gear = el('div', 'hud-gear')
 
+    // ABS badge, as `racing/render.py` has it: a tiny word, lit while the aid
+    // is working and dim while it is merely armed.
+    //
+    // Stacked above the gear rather than floated into the corner, where it
+    // collided with the shift lights. It costs no height: the row is as tall as
+    // the pedal column (~78px) and the gear is only 52, so the badge, its gap
+    // and the gear still come to ~70. A car with no ABS hides the badge and the
+    // gear re-centres, which is the instrument exactly as it was.
+    this.absBadge = el('div', 'hud-abs')
+    this.absBadge.textContent = 'ABS'
+    const gearStack = el('div', 'hud-gear-stack')
+    gearStack.append(this.absBadge, this.gear)
+
     // The traction-control panel: its position, and a lamp for when it bites.
     //
     // Built always, shown only while the aids are something the driver can
@@ -241,15 +269,23 @@ export class Hud {
     this.tcLamp.append(tcDot, this.tcLampText)
     mfd.append(mfdLabel, this.mfdValue, this.tcLamp)
 
-    main.append(pedals, readout, this.gear)
+    main.append(pedals, readout, gearStack)
     if (ASSISTS_ADJUSTABLE) main.append(mfd)
 
     // Steering readout. This is the wheel, not a region you must keep the
     // cursor inside — the cursor steers anywhere on screen.
+    //
+    // The needle rides a full-width rail moved with `transform` rather than
+    // being positioned with `left`: a transform stays on the compositor, where
+    // a `left` write invalidates layout — and this moves every frame. The
+    // rail's own width is the track's, so a percentage translate of the rail
+    // is a fraction of the track, exactly what `left: N%` meant.
     const steerTrack = el('div', 'hud-steer-track')
     const steerCentre = el('div', 'hud-steer-centre')
+    this.steerRail = el('div', 'hud-steer-rail')
     this.steerNeedle = el('div', 'hud-steer-needle')
-    steerTrack.append(steerCentre, this.steerNeedle)
+    this.steerRail.append(this.steerNeedle)
+    steerTrack.append(steerCentre, this.steerRail)
 
     tele.append(lights, main, steerTrack)
 
@@ -260,10 +296,15 @@ export class Hud {
     this.inputChip = el('div', 'hud-chip')
     this.viewportChip = el('div', 'hud-chip')
     this.ghostChip = el('div', 'hud-chip')
+    this.tcChip = el('div', 'hud-chip')
+    this.absChip = el('div', 'hud-chip')
     this.easyBadge = el('div', 'hud-chip hud-easy')
     this.easyBadge.textContent = 'Easy'
     this.chips = el('div', 'hud-chips')
-    this.chips.append(this.viewportChip, this.inputChip, this.camera, this.ghostChip, this.easyBadge)
+    this.chips.append(
+      this.viewportChip, this.inputChip, this.camera, this.ghostChip,
+      this.tcChip, this.absChip, this.easyBadge,
+    )
 
     this.root.append(card, sectorWrap, this.map, this.invalid, this.lapBanner, tele, this.chips)
   }
@@ -298,10 +339,10 @@ export class Hud {
     invalid: boolean,
   ): void {
     const node = this.sectors[i]!
-    node.className = `hud-sector is-${state}${invalid ? ' is-invalid' : ''}`
-    node.dataset['n'] = String(i + 1)
-    ;(node.querySelector('.hud-sector-time') as HTMLElement).textContent = timeText
-    ;(node.querySelector('.hud-sector-delta') as HTMLElement).textContent = deltaText
+    const cls = `hud-sector is-${state}${invalid ? ' is-invalid' : ''}`
+    if (node.className !== cls) node.className = cls
+    setText(this.sectorTimes[i]!, timeText)
+    setText(this.sectorDeltaEls[i]!, deltaText)
   }
 
   /**
@@ -322,15 +363,17 @@ export class Hud {
   }
 
   update(s: HudState): void {
-    this.speed.textContent = String(Math.round(s.speedKmh))
-    this.gear.textContent = s.speedKmh < 1 && s.gear === 0 ? 'N' : String(s.gear + 1)
+    setText(this.speed, String(Math.round(s.speedKmh)))
+    setText(this.gear, s.speedKmh < 1 && s.gear === 0 ? 'N' : String(s.gear + 1))
 
     if (this.hudMap) {
       this.hudMap.setCar(s.carX, s.carY, s.sector)
       this.hudMap.setGhost(s.ghostX ?? 0, s.ghostY)
     }
 
-    this.mfdValue.textContent = s.tcLevel > 0 ? String(s.tcLevel) : 'OFF'
+    setText(this.mfdValue, s.tcLevel > 0 ? String(s.tcLevel) : 'OFF')
+    setDisplay(this.absBadge, s.abs)
+    this.absBadge.classList.toggle('is-live', s.absBite > 0.02)
     // Amber says "the wheel does something here", so it is only honest while
     // the wheel does. Fixed aids read as an instrument, not a control.
     this.mfdValue.classList.toggle('is-live', ASSISTS_ADJUSTABLE)
@@ -338,7 +381,7 @@ export class Hud {
     // The lamp reads OFF rather than disappearing. A missing indicator and an
     // indicator saying nothing is happening look identical at a glance, and
     // those two are the opposite of each other when the car steps sideways.
-    this.tcLampText.textContent = s.tcLevel > 0 ? 'ACTIVE' : 'OFF'
+    setText(this.tcLampText, s.tcLevel > 0 ? 'ACTIVE' : 'OFF')
     this.tcLamp.classList.toggle('is-off', s.tcLevel === 0)
     // Opacity rather than on/off, so a light brush of TC looks like a light
     // brush. Floored well above zero once it bites at all, or the first hint of
@@ -361,19 +404,22 @@ export class Hud {
       led.classList.toggle('is-limit', limit)
     }
 
-    this.sub.textContent =
-      `Lap ${s.lapCount + 1} · ${Math.round(s.lapFraction * 100)}% · ${s.validLaps} valid`
-    this.current.textContent = s.timingArmed ? formatTime(s.currentLap) : '--:--.---'
+    setText(
+      this.sub,
+      `Lap ${s.lapCount + 1} · ${Math.round(s.lapFraction * 100)}% · ${s.validLaps} valid`,
+    )
+    setText(this.current, s.timingArmed ? formatTime(s.currentLap) : '--:--.---')
     this.current.classList.toggle('is-void', !s.lapValid && s.timingArmed)
-    this.last.textContent = formatTime(s.lastLap)
-    this.best.textContent = formatTime(s.bestLap)
+    setText(this.last, formatTime(s.lastLap))
+    setText(this.best, formatTime(s.bestLap))
 
     // The delta is a row like the others now, so it keeps its slot rather than
     // appearing and collapsing the card under it.
-    this.delta.textContent = s.ghostDelta === null ? '--.---' : formatDelta(s.ghostDelta)
-    this.delta.className =
+    setText(this.delta, s.ghostDelta === null ? '--.---' : formatDelta(s.ghostDelta))
+    const deltaCls =
       'hud-value' +
       (s.ghostDelta === null ? ' is-idle' : s.ghostDelta <= 0 ? ' is-ahead' : ' is-behind')
+    if (this.delta.className !== deltaCls) this.delta.className = deltaCls
 
     // --- the sector pills, pygame's state machine ---
     // During the hold, show the finished lap's whole set; otherwise the live
@@ -421,18 +467,25 @@ export class Hud {
       this.invalidTimer = null
     }
     this.lapWasInvalid = lapInvalid
-    this.throttleBar.style.height = `${Math.round(s.throttle * 100)}%`
-    this.brakeBar.style.height = `${Math.round(s.brake * 100)}%`
-    this.steerNeedle.style.left = `${(0.5 - s.steer * 0.5) * 100}%`
+    // Transforms, not height/left: these three move every frame, and a
+    // transform is compositor-only where a geometry write forces layout.
+    this.throttleBar.style.transform = `scaleY(${s.throttle})`
+    this.brakeBar.style.transform = `scaleY(${s.brake})`
+    this.steerRail.style.transform = `translateX(${(0.5 - s.steer * 0.5) * 100}%)`
 
-    this.camera.textContent = s.cameraLabel
-    this.inputChip.textContent = s.inputLabel
-    this.viewportChip.textContent = s.viewportLabel
-    this.ghostChip.textContent = `Ghost ${s.ghost ? 'on' : 'off'}`
-    this.easyBadge.style.display = s.easy ? '' : 'none'
+    setText(this.camera, s.cameraLabel)
+    setText(this.inputChip, s.inputLabel)
+    setText(this.viewportChip, s.viewportLabel)
+    setText(this.ghostChip, `Ghost ${s.ghost ? 'on' : 'off'}`)
+    setText(this.tcChip, s.tcLevel > 0 ? `TC level ${s.tcLevel}` : 'TC off')
+    setText(this.absChip, `ABS ${s.abs ? 'on' : 'off'}`)
+    setDisplay(this.easyBadge, s.easy)
     // Show the chips only when one of them changes — press C and the camera
-    // name confirms itself, then the corner goes back to being sky.
-    const sig = `${s.viewportLabel}|${s.inputLabel}|${s.cameraLabel}|${s.ghost}|${s.easy}`
+    // name confirms itself, then the corner goes back to being sky. The aids
+    // are in the signature too, so switching difficulty says what that bought
+    // you rather than leaving it to be discovered at the first corner.
+    const sig = `${s.viewportLabel}|${s.inputLabel}|${s.cameraLabel}|${s.ghost}`
+      + `|${s.easy}|${s.tcLevel}|${s.abs}`
     if (sig !== this.chipSig) {
       this.chipSig = sig
       this.chips.classList.add('is-on')
@@ -448,6 +501,25 @@ function el<K extends keyof HTMLElementTagNameMap>(
   const node = document.createElement(tag)
   if (className) node.className = className
   return node
+}
+
+/**
+ * Write text only when it actually changed.
+ *
+ * Assigning `textContent` replaces the element's child text node whether or not
+ * the string differs, which invalidates layout for that node every time. The
+ * HUD rewrote 29 of them per frame while only a handful — speed, the running
+ * lap, the delta — differ between one frame and the next; the rest are lap
+ * times, sector splits and setting names that change a few times a minute.
+ */
+function setText(node: HTMLElement, value: string): void {
+  if (node.textContent !== value) node.textContent = value
+}
+
+/** Show or hide, writing the style only on the transition — same reasoning. */
+function setDisplay(node: HTMLElement, shown: boolean): void {
+  const value = shown ? '' : 'none'
+  if (node.style.display !== value) node.style.display = value
 }
 
 function labelled(label: string, value: HTMLElement): HTMLElement {

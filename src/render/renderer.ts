@@ -124,6 +124,14 @@ export class Renderer {
   private readonly sun: THREE.DirectionalLight
   private world: World | null = null
   private scenery: Scenery | null = null
+  /**
+   * The attract field's cars live under one group so the whole field can be
+   * DETACHED from the scene while driving, not merely hidden. `visible=false`
+   * skips drawing but not matrix updates — three.js recomposes every attached
+   * object's matrices every frame, moved or not, and ten cars of suspension
+   * arms and wheel rigs were paying that all lap for a field nobody could see.
+   */
+  private readonly attractGroup = new THREE.Group()
   private attract: AttractCar[] = []
   private attractTrack: Track | null = null
   private attractLines: AttractLine[] = []
@@ -201,6 +209,15 @@ export class Renderer {
     this.world = buildWorld(track, terrain)
     this.scenery = buildScenery(track, terrain)
     this.scene.add(this.world.root, this.scenery.root)
+    // The circuit never moves, so its matrices are computed once, here, and
+    // never again. three.js re-walks the whole scene every render and, with
+    // `matrixAutoUpdate` on, re-composes every object's matrix from its
+    // position/quaternion/scale — for the few hundred static objects of road,
+    // wall and scenery that was the single largest JS cost in a CPU profile
+    // of a driving session, all of it recomputing values that never change.
+    this.scene.updateMatrixWorld(true)
+    this.world.root.traverse((o) => { o.matrixAutoUpdate = false })
+    this.scenery.root.traverse((o) => { o.matrixAutoUpdate = false })
     this.buildAttractField(track)
   }
 
@@ -218,7 +235,7 @@ export class Renderer {
    */
   private buildAttractField(track: Track): void {
     for (const c of this.attract) {
-      this.scene.remove(c.model.root)
+      this.attractGroup.remove(c.model.root)
       c.model.dispose()
     }
     this.attract = []
@@ -230,7 +247,7 @@ export class Renderer {
     for (let i = 0; i < ATTRACT_COUNT; i++) {
       const model = buildCar(p, ATTRACT_SKINS[i % ATTRACT_SKINS.length]!)
       model.root.visible = false
-      this.scene.add(model.root)
+      this.attractGroup.add(model.root)
       // Fallback state: evenly round the lap, alternating lanes, and a pace
       // spread wide enough that the order keeps changing.
       this.attract.push({
@@ -436,8 +453,9 @@ export class Renderer {
     }
     this.rig.update(player, params, throttle, dtWall, surface)
 
-    // The attract field belongs to the menu; while driving it stands down.
-    for (const c of this.attract) c.model.root.visible = false
+    // The attract field belongs to the menu; while driving it stands down —
+    // detached entirely, so its thousand-odd parts cost no matrix work either.
+    if (this.attractGroup.parent) this.scene.remove(this.attractGroup)
 
     if (this.playerCar) {
       placeCar(this.playerCar, player)
@@ -491,6 +509,7 @@ export class Renderer {
     }
     if (this.playerCar) this.playerCar.root.visible = false
     if (this.ghostCar) this.ghostCar.root.visible = false
+    if (!this.attractGroup.parent) this.scene.add(this.attractGroup)
     this.updateAttract(dtWall)
     this.rig.flyover(track, t)
     const eye = this.rig.camera.position

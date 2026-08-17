@@ -230,8 +230,19 @@ export interface SerializedLapRecord {
   path?: string
 }
 
-export function encodeInputs(inputs: Float64Array): string {
-  const bytes = new Uint8Array(inputs.buffer, inputs.byteOffset, inputs.byteLength)
+/**
+ * Bytes to base64, natively where the browser can.
+ *
+ * `Uint8Array.prototype.toBase64` produces the exact string the
+ * `String.fromCharCode` + `btoa` fallback does, an order of magnitude faster —
+ * and speed matters here because a personal best serializes ~700 KB of bytes on
+ * the tick the lap ends. NOT `TextDecoder('latin1')` for the binary string:
+ * that label is windows-1252, which maps 0x80–0x9F above U+00FF and makes
+ * `btoa` throw.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const native = bytes as unknown as { toBase64?: () => string }
+  if (typeof native.toBase64 === 'function') return native.toBase64()
   let binary = ''
   // Chunked: String.fromCharCode(...huge) blows the argument limit on a long lap.
   const CHUNK = 0x8000
@@ -241,31 +252,34 @@ export function encodeInputs(inputs: Float64Array): string {
   return btoa(binary)
 }
 
-export function decodeInputs(encoded: string): Float64Array {
+function base64ToBytes(encoded: string): Uint8Array {
+  const native = Uint8Array as unknown as { fromBase64?: (s: string) => Uint8Array }
+  if (typeof native.fromBase64 === 'function') return native.fromBase64(encoded)
   const binary = atob(encoded)
   const bytes = new Uint8Array(binary.length)
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return new Float64Array(bytes.buffer, 0, bytes.byteLength / 8)
+  return bytes
+}
+
+export function encodeInputs(inputs: Float64Array): string {
+  return bytesToBase64(new Uint8Array(inputs.buffer, inputs.byteOffset, inputs.byteLength))
+}
+
+export function decodeInputs(encoded: string): Float64Array {
+  const bytes = base64ToBytes(encoded)
+  return new Float64Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 8)
 }
 
 /** Float32 round-trip for the trace: metres and seconds do not need 64 bits,
  *  and halving the bytes matters when this shares a 5 MB quota. */
 function encodeFloat32(src: Float64Array): string {
   const f32 = Float32Array.from(src)
-  const bytes = new Uint8Array(f32.buffer)
-  let binary = ''
-  const CHUNK = 0x8000
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
-  }
-  return btoa(binary)
+  return bytesToBase64(new Uint8Array(f32.buffer))
 }
 
 function decodeFloat32(encoded: string): Float64Array {
-  const binary = atob(encoded)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return Float64Array.from(new Float32Array(bytes.buffer, 0, bytes.byteLength / 4))
+  const bytes = base64ToBytes(encoded)
+  return Float64Array.from(new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4))
 }
 
 export function serializeLapRecord(r: LapRecord): SerializedLapRecord {

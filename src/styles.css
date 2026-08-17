@@ -331,6 +331,25 @@ html, body, #app {
 .hud-invalid-action.is-on { max-height: 14px; margin-top: 3px; opacity: 1; }
 
 /* --- the binnacle: shift lights, pedals, speed, gear, steering --- */
+/* The badge rides above the gear, inside vertical slack the row already had,
+   so fitting it in costs the binnacle no height. */
+.hud-gear-stack { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.hud-abs {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  /* Dim while merely armed, lit while the aid is actually moving brake
+     forward — the same two states the pygame HUD uses. */
+  color: var(--hud-dim);
+  opacity: 0.45;
+  transition: color 90ms linear, opacity 90ms linear;
+}
+.hud-abs.is-live {
+  color: var(--hud-good);
+  opacity: 1;
+}
+
 .hud-tele {
   position: absolute;
   left: 50%;
@@ -373,7 +392,19 @@ html, body, #app {
   position: relative;
   overflow: hidden;
 }
-.hud-bar-fill { position: absolute; left: 0; right: 0; bottom: 0; height: 0; border-radius: 2px; }
+/* Full height, scaled by transform from the bottom — the fill level changes
+   every frame, and scaleY animates on the compositor where height forces
+   layout. */
+.hud-bar-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
+  border-radius: 2px;
+  transform: scaleY(0);
+  transform-origin: bottom;
+}
 /* No glow. A bar that lights the room is a bar competing with the road. */
 .hud-throttle { background: var(--hud-good); }
 .hud-brake { background: var(--hud-warn); }
@@ -562,8 +593,16 @@ html, body, #app {
   width: 1px;
   background: var(--hud-divider);
 }
+/* Spans the track exactly, so translateX by a percentage of itself moves the
+   needle by that fraction of the track — `left: N%` semantics, without the
+   per-frame layout that `left` costs. */
+.hud-steer-rail {
+  position: absolute;
+  inset: 0;
+}
 .hud-steer-needle {
   position: absolute;
+  left: 0;
   top: -3px;
   width: 3px;
   height: 9px;

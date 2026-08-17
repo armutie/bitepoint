@@ -46,6 +46,8 @@ export class Sound {
   private noise: AudioBuffer | null = null
   private level = 0.7
   private muted = false
+  /** Context time of the last `update`, for the rate cap below. */
+  private lastUpdateAt = -1
 
   /**
    * Build the graph. Safe to call repeatedly; only the first does anything.
@@ -126,6 +128,11 @@ export class Sound {
   idle(): void {
     if (!this.ctx || !this.layers) return
     const t = this.ctx.currentTime
+    // Same rate cap as `update`, and the same gate: the menu calls this every
+    // rendered frame to say "still silent", which needs saying at most 60
+    // times a second.
+    if (t - this.lastUpdateAt < 0.014) return
+    this.lastUpdateAt = t
     for (const layer of Object.values(this.layers)) {
       layer.gain.gain.setTargetAtTime(0, t, TAU_DOWN)
       layer.grainDepth?.gain.setTargetAtTime(0, t, TAU_DOWN)
@@ -145,6 +152,13 @@ export class Sound {
   update(input: AudioInput): void {
     if (!this.ctx || !this.layers) return
     const t = this.ctx.currentTime
+    // Capped near the 60 Hz physics rate. This is called once per RENDERED
+    // frame, and every call schedules ~35 automation events — on a 144 Hz
+    // screen that is five thousand events a second describing a mix that only
+    // changes when the physics ticks. The smoothing constants make each event
+    // a target to glide to, so dropping the extras changes nothing audible.
+    if (t - this.lastUpdateAt < 0.014) return
+    this.lastUpdateAt = t
     const l = levelsFor(input)
 
     ramp(this.layers.wind.gain.gain, l.windGain, t)
