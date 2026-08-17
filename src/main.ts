@@ -843,10 +843,16 @@ function restoreSelection(manifest: TrackManifestEntry[]): Selection {
   // four released circuits. The default car is whatever leads
   // `RELEASED_PRESETS` — currently `legacy`/F1-Test, the tune the lap records
   // were set on.
+  //
+  // Easy is ON for a first session. It is no longer a different car — since the
+  // rear grip bias went back to the standard 1.25 it is the same chassis with
+  // the aids switched on — so the cost of defaulting to it is a beginner
+  // getting TC and ABS rather than a beginner learning a car nobody else
+  // drives. Someone who turns it off is choosing that, and the choice is stored.
   const fallback: Selection = {
     trackId: RELEASED_TRACKS.find((id) => manifest.some((t) => t.id === id)) ?? manifest[0]!.id,
     preset: RELEASED_PRESETS[0]!,
-    easy: false,
+    easy: true,
     ghost: true,
     ghostEntryId: null,
   }
@@ -865,7 +871,7 @@ function restoreSelection(manifest: TrackManifestEntry[]): Selection {
     return {
       trackId,
       preset,
-      easy: parsed.easy ?? false,
+      easy: parsed.easy ?? fallback.easy,
       ghost: parsed.ghost ?? true,
       ghostEntryId: typeof parsed.ghostEntryId === 'string' ? parsed.ghostEntryId : null,
     }
