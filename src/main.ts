@@ -91,6 +91,9 @@ async function boot(): Promise<void> {
       presets: PRESET_ORDER.map((p) => PRESET_INFO[p]),
       bests,
       leaderboard,
+      // The canvas, not the stage: mouse steering is measured against the
+      // picture, and the sensitivity preview has to draw in the same frame.
+      picture: canvas,
     },
     selection,
     settings,

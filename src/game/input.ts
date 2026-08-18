@@ -33,8 +33,31 @@ const STEER_RETURN = 0.8
  * play.py uses 18 px either side of centre on an 1100 px window, i.e. 18/550.
  * Expressed as a fraction so it means the same thing on any viewport, where a
  * fixed pixel count would be a much wider deadzone on a small screen.
+ *
+ * Exported because the settings screen draws where full lock lands, and that
+ * position starts at the edge of this band. A second copy of the number over
+ * there would drift the moment either was touched, and the drawing would then
+ * be lying about the control it claims to preview.
  */
-const MOUSE_DEADZONE = 18 / 550
+export const MOUSE_DEADZONE = 18 / 550
+
+/**
+ * The wheel a cursor asks for, from how far it sits off the centre of the
+ * picture. -1..1.
+ *
+ * Lifted out of `sample` so the settings screen can draw the mapping it
+ * configures instead of a lookalike of it. Both arguments are pixels in the
+ * picture's own coordinates; `fullLockFraction` is the setting, and the
+ * deadzone is charged before the travel so a cursor inside it reads as exactly
+ * straight rather than as a small steering input.
+ */
+export function steerFromOffset(dx: number, half: number, fullLockFraction: number): number {
+  const dead = half * MOUSE_DEADZONE
+  const mag = Math.max(Math.abs(dx) - dead, 0)
+  // Sensitivity shortens the travel between the deadzone and full lock.
+  const span = Math.max((half - dead) * fullLockFraction, 1)
+  return clamp(Math.sign(dx) * (mag / span), -1, 1)
+}
 
 export interface Controls {
   steer: number
@@ -99,6 +122,9 @@ export class InputState {
     this.target = target
     this.refreshBounds()
     const keydown = (e: KeyboardEvent): void => {
+      // Before anything else, including the repeat guard: a held arrow key is
+      // exactly how you nudge a slider along.
+      if (controlOwns(e.target, e.code)) return
       if (e.repeat) {
         e.preventDefault()
         return
@@ -231,14 +257,9 @@ export class InputState {
       // point off to one side of the screen.
       const local = this.mouseX - this.left
       const half = this.width / 2
-      const dead = half * MOUSE_DEADZONE
       // Positive steer is left, matching the sim's sign convention, so this is
       // centre-minus-cursor rather than the other way round.
-      const dx = half - local
-      const mag = Math.max(Math.abs(dx) - dead, 0)
-      // Sensitivity shortens the travel between the deadzone and full lock.
-      const span = Math.max((half - dead) * this.fullLockFraction, 1)
-      this.steer = clamp(Math.sign(dx) * (mag / span), -1, 1)
+      this.steer = steerFromOffset(half - local, half, this.fullLockFraction)
     } else {
       const left = this.held.has('ArrowLeft') || this.held.has('KeyA')
       const right = this.held.has('ArrowRight') || this.held.has('KeyD')
@@ -283,6 +304,35 @@ const DRIVING_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
 ])
+
+/** Keys a focused control works with: moving a slider, ticking a box. */
+const CONTROL_KEYS = new Set([
+  'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+  'Home', 'End', 'PageUp', 'PageDown', 'Space', 'Enter',
+])
+
+/**
+ * Does the thing with the focus want this key for itself?
+ *
+ * The window swallows the driving keys so the page cannot scroll out from under
+ * the car, and while driving that is right. But the menu lives on the same
+ * window, and the settings screen now has a slider whose arrow keys are the
+ * only way to move it without a mouse — the blanket `preventDefault` was
+ * quietly cancelling them, so the slider could be focused and not used. Space
+ * on a switch or a button was going the same way.
+ *
+ * Narrow on purpose: only keys a control actually consumes, and only while one
+ * has the focus. W and S are not on the list, so nothing here can take a pedal
+ * away from the car.
+ */
+function controlOwns(target: EventTarget | null, code: string): boolean {
+  if (!CONTROL_KEYS.has(code)) return false
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLSelectElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLButtonElement
+    || (target instanceof HTMLElement && target.isContentEditable)
+}
 
 /**
  * Scroll distance that counts as one detent of the traction-control knob.

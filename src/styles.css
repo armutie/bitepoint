@@ -649,6 +649,8 @@ html, body, #app {
      circuit like a poster; a scrim just makes the panel readable over it. */
   background: rgba(4, 6, 9, 0.82);
   overflow: auto;
+  /* Lifts while the sensitivity lines are being read — see `.menu.is-tuning`. */
+  transition: background 180ms ease;
 }
 
 .menu-panel {
@@ -1234,6 +1236,181 @@ kbd {
   border-color: var(--edge-hot);
   color: var(--accent);
 }
+
+/* ---------- Sensitivity: the setting, drawn at full size ----------
+
+   Steering sensitivity is a distance on screen — how far from the middle of
+   the picture the wheel runs out of lock — so it gets the one slider in the
+   settings screen, and the picture behind the panel gets two lines showing
+   where that distance lands. Everything from `.lock-preview` down is a drawing
+   of the control rather than part of it: it never takes a pointer event. */
+
+.set-row .lock-control { grid-column: 1 / -1; }
+
+/* The hit zone: the slider and the three ticks under it, and nothing else. The
+   hint below sits outside it on purpose — running the zone to the bottom of a
+   paragraph puts the lines up for a mouse that was only crossing the column. */
+.lock-grip { padding-bottom: 2px; }
+
+.range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  margin: 3px 0 0;
+  background: none;
+  cursor: pointer;
+  /* The value, written by the menu, so the filled part of the track cannot
+     disagree with where the thumb actually is. */
+  --v: 0.5;
+}
+.range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) calc(var(--v) * 100%),
+    rgba(255, 255, 255, 0.11) calc(var(--v) * 100%)
+  );
+}
+.range::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) calc(var(--v) * 100%),
+    rgba(255, 255, 255, 0.11) calc(var(--v) * 100%)
+  );
+}
+/* 16px, and `THUMB` in menu.ts says so too — the tick positions are corrected
+   for it, so the two numbers have to stay the same. */
+.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(226, 170, 72, 0.16);
+}
+.range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(226, 170, 72, 0.16);
+}
+.range:focus-visible { outline: none; }
+.range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-soft), 0 0 0 1px var(--ink); }
+.range:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 4px var(--accent-soft), 0 0 0 1px var(--ink); }
+
+/* Low / Medium / High, kept as places to click rather than as the only choices. */
+.range-ticks { position: relative; height: 16px; margin-top: 4px; }
+.range-tick {
+  position: absolute;
+  transform: translateX(-50%);
+  padding: 3px 0 0;
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.range-tick:hover { color: var(--accent); }
+.range-tick::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  width: 1px;
+  height: 4px;
+  background: var(--edge-hot);
+}
+
+.lock-hint {
+  margin: 9px 0 0;
+  max-width: 30em;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--dim);
+}
+
+/* The preview itself, laid over the canvas — never the window, since a boxed
+   viewport puts the straight-ahead point somewhere other than mid-screen. Up
+   only while the slider is hovered or held, see `setTuning`: left on screen the
+   rest of the time it is decoration over a menu. */
+.lock-preview {
+  position: fixed;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.lock-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: linear-gradient(to bottom, transparent, var(--accent) 13%, var(--accent) 87%, transparent);
+  box-shadow: 0 0 14px rgba(226, 170, 72, 0.3);
+}
+
+.lock-tag {
+  position: absolute;
+  bottom: 13%;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--accent);
+}
+/* Inward, into the middle of the picture, where there is always room to write.
+   `is-tight` is the sensitive end, where the lines have closed in far enough
+   that two inward labels would run into each other. */
+.lock-bar-l .lock-tag { left: 11px; }
+.lock-bar-r .lock-tag { right: 11px; }
+.lock-preview.is-tight .lock-bar-l .lock-tag { left: auto; right: 11px; }
+.lock-preview.is-tight .lock-bar-r .lock-tag { right: auto; left: 11px; }
+
+.lock-centre {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  margin-left: -0.5px;
+  background: repeating-linear-gradient(
+    to bottom, rgba(235, 238, 240, 0.38) 0 7px, transparent 7px 16px
+  );
+}
+/* The straight-ahead band: the few pixels either side of centre that the car
+   reads as exactly straight, so the lines are not the only thing the drawing
+   is honest about. */
+.lock-dead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(235, 238, 240, 0.05);
+}
+
+/* Tuning: the panel steps back so the lines can be seen against the circuit.
+   The Driving section stays lit — it is the control being used. */
+.menu-header,
+.menu-footer,
+.menu-section { transition: opacity 180ms ease; }
+.menu.is-tuning { background: rgba(4, 6, 9, 0.55); }
+.menu.is-tuning .menu-header,
+.menu.is-tuning .menu-footer,
+.menu.is-tuning .menu-section:not(.is-tuning-focus) { opacity: 0.14; }
 
 /* ---------- Records ---------- */
 

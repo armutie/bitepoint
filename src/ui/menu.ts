@@ -21,10 +21,12 @@ import { carBars, carTags, powerToWeight } from './carStats'
 import { buildTrackMap } from './trackMap'
 import { icon, type IconName } from './icons'
 import {
-  DEFAULT_SETTINGS, EFFECTS, SENSITIVITY, VOLUME, levelOf, type Settings,
+  DEFAULT_SETTINGS, EFFECTS, SENSITIVITY, VOLUME, fullLockOffset,
+  levelOf, type Level, type Settings,
 } from './settings'
 import { CAMERA_LABEL, CAMERA_ORDER } from '../render/cameras'
 import { VIEWPORT_LABEL, VIEWPORT_ORDER } from '../game/viewport'
+import { MOUSE_DEADZONE } from '../game/input'
 
 export interface Selection {
   trackId: string
@@ -69,6 +71,15 @@ export interface MenuDeps {
   /** Personal bests, keyed by `keyOf`, for showing what there is to beat. */
   bests: Map<string, LapRecord>
   leaderboard: LeaderboardClient
+  /**
+   * The picture — the canvas, not the window.
+   *
+   * Steering is measured from the centre of the picture, and with the viewport
+   * boxed to 11:7.6 that is not the centre of the screen. The sensitivity
+   * preview draws in the same frame the input reads in, so it takes the same
+   * element rather than assuming the two agree.
+   */
+  picture: HTMLElement
 }
 
 export class Menu {
@@ -85,9 +96,33 @@ export class Menu {
 
   private readonly deps: MenuDeps
   private readonly panel: HTMLDivElement
+  /** The two full-lock lines over the picture. Built once, moved as needed. */
+  private readonly lock: LockPreview
   private mainOpen = false
   private controlsOpen = false
   private settingsOpen = false
+  /**
+   * Tuning: the pointer is on the sensitivity slider, so the lines are up and
+   * the rest of the panel is out of the way.
+   *
+   * Strictly while the control is held or hovered. This was latched at first,
+   * so that you could walk the cursor out to the line you had just placed —
+   * but a preview that stays up after you have moved away reads as something
+   * stuck rather than something offered, and no gesture is worth that.
+   */
+  private tuning = false
+  /**
+   * True between pointerdown and pointerup on the slider.
+   *
+   * The thumb captures the pointer, so a drag that runs past the end of the
+   * track leaves the control's box and fires `pointerleave` — mid-drag, which
+   * is the one moment the lines must not go anywhere.
+   */
+  private dragging = false
+  /** Window-to-menu transform, refreshed whenever the preview is laid out. */
+  private frame = { left: 0, top: 0, scale: 1 }
+  /** The slider block the lines belong to, or null outside the settings screen. */
+  private tuningControl: HTMLElement | null = null
 
   constructor(deps: MenuDeps, initial: Selection, settings: Settings) {
     this.deps = deps
@@ -95,13 +130,31 @@ export class Menu {
     this.settings = settings
     this.root = el('div', 'menu')
     this.panel = el('div', 'menu-panel')
-    this.root.append(this.panel)
+    this.lock = buildLockPreview()
+    this.root.append(this.panel, this.lock.root)
     window.addEventListener('keydown', (event) => {
       if (!this.visible || event.key !== '?') return
       if (this.mainOpen || this.controlsOpen) {
         event.preventDefault()
         this.controlsOpen ? this.showMain() : this.showControls()
       }
+    })
+    // Both wired ONCE, on things that outlive a rebuild. Choosing any setting
+    // calls showSettings again, so a listener added while building the panel
+    // would be added again on every click — the panel node itself survives
+    // `replaceChildren`, and so would its listeners.
+    window.addEventListener('resize', () => { if (this.tuning) this.layoutLock() })
+    // The drag ends wherever the mouse happens to be. If that is off the
+    // slider, the hover that put the lines up is over too.
+    //
+    // Tested against where the pointer actually is rather than against
+    // `:hover`, which the thumb's pointer capture leaves stuck on the slider
+    // until the mouse next moves — release the drag out over the circuit and
+    // the lines would have stayed up, which is the exact thing being fixed.
+    window.addEventListener('pointerup', (e) => {
+      if (!this.dragging) return
+      this.dragging = false
+      if (!hits(this.tuningControl, e.clientX, e.clientY)) this.setTuning(false)
     })
     this.showMain()
   }
@@ -112,6 +165,7 @@ export class Menu {
 
   hide(): void {
     this.root.classList.add('is-hidden')
+    this.hideLock()
   }
 
   /** Return from a settings/reference screen before Escape reaches gameplay. */
@@ -128,6 +182,17 @@ export class Menu {
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
+    // Every screen comes through here, so this is the one place the preview has
+    // to be put away — including the case where the pointer left the slider by
+    // way of a click that changed screens, which fires no `pointerleave`.
+    this.hideLock()
+  }
+
+  /** Put the full-lock lines away, whatever state they were left in. */
+  private hideLock(): void {
+    this.setTuning(false)
+    this.tuningControl = null
+    this.lock.root.hidden = true
   }
 
   private paramsFor(preset: PresetName): CarParams {
@@ -510,24 +575,28 @@ export class Menu {
     const header = el('header', 'menu-header set-header')
     const title = el('h1', 'menu-title')
     title.textContent = 'Settings'
-    header.append(title)
-    if ((Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]).some(off)) {
-      const all = el('button', 'reset-btn reset-all')
-      all.append(icon('reset'), text('Reset all'))
-      all.title = 'Put every setting back to default'
-      all.addEventListener('click', () => set(DEFAULT_SETTINGS))
-      header.append(all)
+    // Built always and hidden when idle, like the per-row resets — the slider
+    // changes a setting without rebuilding the panel, so a Reset all that only
+    // existed if something was already off default would never appear.
+    const all = el('button', 'reset-btn reset-all')
+    all.append(icon('reset'), text('Reset all'))
+    all.title = 'Put every setting back to default'
+    all.addEventListener('click', () => set(DEFAULT_SETTINGS))
+    header.append(title, all)
+    /** Re-read the live settings, not the build-time snapshot in `s`. */
+    const syncResetAll = (): void => {
+      const keys = Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]
+      all.classList.toggle('is-idle', !keys.some((k) => this.settings[k] !== DEFAULT_SETTINGS[k]))
     }
+    syncResetAll()
 
     const body = el('div', 'menu-body settings-body')
 
-    const driving = el('section', 'menu-section')
+    // The section stays lit while the sensitivity lines are up; the rest of the
+    // panel dims out of the way. See `.menu.is-tuning`.
+    const driving = el('section', 'menu-section is-tuning-focus')
     driving.append(sectionTitle('Driving', ''))
-    driving.append(
-      setRow('Sensitivity', levels(
-        SENSITIVITY, s.mouseSensitivity, (v) => set({ mouseSensitivity: v }),
-      ), off('mouseSensitivity'), revert('mouseSensitivity')),
-    )
+    driving.append(this.sensitivityRow(syncResetAll))
     // ABS sits here rather than on the wheel with traction control, because
     // unlike TC it cannot be changed while driving — so it is a choice you make
     // before the lap, and one bit travels with the recording. Not offered in
@@ -604,6 +673,184 @@ export class Menu {
     footer.append(el('div', ''), acts)
 
     this.panel.append(header, body, footer)
+  }
+
+  /**
+   * Sensitivity: a slider, and two lines on the picture at full lock.
+   *
+   * The setting is a distance — how far from the middle of the screen the wheel
+   * reaches its stop — so the control shows that distance at full size rather
+   * than describing it. Drag, and the lines walk in or out to where your hand
+   * will actually have to go. Nothing else in here can be previewed this
+   * honestly, which is why nothing else in here is a slider.
+   *
+   * Deliberately does NOT go through `set`, which rebuilds the whole panel: a
+   * slider that replaced itself on every input event would drop the drag on the
+   * first pixel. It does the same three things by hand instead — store, notify,
+   * and update the two resets that would otherwise have gone stale.
+   */
+  private sensitivityRow(syncResetAll: () => void): HTMLElement {
+    const control = el('div', 'lock-control')
+    const range = document.createElement('input')
+    range.type = 'range'
+    range.className = 'range'
+    range.min = '0'
+    range.max = '1'
+    // Fine enough that the lines move smoothly, coarse enough that a value is
+    // reproducible — a player who wants Medium-but-slightly-less can find it
+    // again, and 100 stops is more than the eye can separate on a line anyway.
+    range.step = '0.01'
+    range.setAttribute('aria-label', 'Steering sensitivity')
+
+    const ticks = el('div', 'range-ticks')
+    const tickFor = (name: Level, value: number): HTMLElement => {
+      const t = el('button', 'range-tick')
+      t.type = 'button'
+      // The thumb's centre travels from half a thumb in to half a thumb short
+      // of the far end, so a tick placed at a flat percentage of the track sits
+      // beside the value it names rather than under it.
+      t.style.left = `calc(${value * 100}% + ${((0.5 - value) * THUMB).toFixed(2)}px)`
+      t.textContent = name[0]!.toUpperCase() + name.slice(1)
+      t.title = `${t.textContent} — full lock ${Math.round(fullLockOffset(value) * 100)}% of the way to the edge`
+      t.addEventListener('click', () => apply(value))
+      return t
+    }
+    for (const [name, value] of Object.entries(SENSITIVITY) as [Level, number][]) {
+      ticks.append(tickFor(name, value))
+    }
+
+    const hint = el('p', 'lock-hint')
+    hint.textContent = 'The lines are full lock. Slide them in for a flick of the wrist, out for more travel.'
+
+    // The slider and its ticks are one thing you point at; the sentence under
+    // them is not. Hovering a line of explanatory text is not reaching for a
+    // control, and a hit zone that runs to the bottom of the paragraph puts the
+    // lines on screen for a mouse that was only passing through the column.
+    const grip = el('div', 'lock-grip')
+    grip.append(range, ticks)
+    control.append(grip, hint)
+
+    const row = setRow('Sensitivity', control, false, () => apply(DEFAULT_SETTINGS.mouseSensitivity))
+    const reset = row.querySelector('.reset-btn') as HTMLElement
+
+    const apply = (v: number): void => {
+      this.settings = { ...this.settings, mouseSensitivity: v }
+      this.onSettingsChange(this.settings)
+      show(v)
+      syncResetAll()
+    }
+    /** Paint the control at a value, without telling anyone it changed. */
+    const show = (v: number): void => {
+      range.value = String(v)
+      // The filled part of the track is drawn from this, so it cannot disagree
+      // with the thumb the way a second element would.
+      range.style.setProperty('--v', String(v))
+      range.setAttribute(
+        'aria-valuetext',
+        `full lock ${Math.round(fullLockOffset(v) * 100)} percent of the way from the centre of the screen to its edge`,
+      )
+      reset.classList.toggle('is-idle', v === DEFAULT_SETTINGS.mouseSensitivity)
+      this.layoutLock()
+    }
+    show(this.settings.mouseSensitivity)
+
+    range.addEventListener('input', () => {
+      // Arrow keys on a slider a mouse click left focused: the value moves, so
+      // the lines have to be there to say what moved.
+      this.setTuning(true)
+      apply(Number(range.value))
+    })
+    range.addEventListener('pointerdown', () => { this.dragging = true })
+
+    this.tuningControl = grip
+    // The lines belong to the slider, so they come up on the slider and not on
+    // the row around it. Reaching the control is enough — you should be able to
+    // see what you are about to change before you change it.
+    grip.addEventListener('pointerenter', () => this.setTuning(true))
+    grip.addEventListener('focusin', () => this.setTuning(true))
+    // Off again as soon as you leave, except mid-drag and except while the
+    // slider is being driven from the keyboard.
+    grip.addEventListener('pointerleave', () => {
+      if (!this.dragging && !keyboardFocused(grip)) this.setTuning(false)
+    })
+    // The ticks are inside the grip and focusable, so Tab off the slider lands
+    // on one of them — still the same control, still worth showing.
+    grip.addEventListener('focusout', (e) => {
+      if (grip.contains(e.relatedTarget as Node) || grip.matches(':hover')) return
+      this.setTuning(false)
+    })
+    return row
+  }
+
+  /**
+   * Lines up, panel back — or the other way round.
+   *
+   * The preview exists only while the slider is in hand. Left on the screen the
+   * rest of the time it is decoration over a menu, and decoration that looks
+   * like an instrument is worse than none.
+   */
+  private setTuning(on: boolean): void {
+    if (this.tuning === on || (on && !this.settingsOpen)) return
+    this.tuning = on
+    this.root.classList.toggle('is-tuning', on)
+    this.lock.root.hidden = !on
+    if (on) this.layoutLock()
+  }
+
+  /**
+   * Lay the preview over the picture and put the lines where full lock is.
+   *
+   * Re-read from the DOM every time rather than cached: the frame setting
+   * boxes the canvas, the window resizes, and a stale rect would draw the lines
+   * somewhere the wheel does not actually reach full lock.
+   */
+  private layoutLock(): void {
+    const f = this.readFrame()
+    const r = this.deps.picture.getBoundingClientRect()
+    const p = this.lock
+    p.root.style.left = `${(r.left - f.left) / f.scale}px`
+    p.root.style.top = `${(r.top - f.top) / f.scale}px`
+    p.root.style.width = `${r.width / f.scale}px`
+    p.root.style.height = `${r.height / f.scale}px`
+
+    const half = r.width / f.scale / 2
+    const lock = fullLockOffset(this.settings.mouseSensitivity) * half
+    // Held a pixel inside the picture at the far end of the slider, where full
+    // lock genuinely is the last pixel of the screen. A line drawn exactly on
+    // the edge is half of it off the edge, and the preview reads as broken at
+    // one end of its own travel — a pixel of untruth costs less than that.
+    const edge = (x: number): number => Math.min(Math.max(x, 1), half * 2 - 1)
+    p.left.style.left = `${edge(half - lock)}px`
+    p.right.style.left = `${edge(half + lock)}px`
+    p.dead.style.left = `${half - MOUSE_DEADZONE * half}px`
+    p.dead.style.width = `${MOUSE_DEADZONE * half * 2}px`
+    // Tags face inward, where there is always picture to write on — except at
+    // the sensitive end, where the lines close in on each other and the two
+    // labels would collide. Then they face out, which is where the room went.
+    // Measured on the glass, so the comparison is against real label widths.
+    p.root.classList.toggle('is-tight', lock * 2 * f.scale < TAG_ROOM)
+  }
+
+  /**
+   * The transform between window pixels and the menu's own coordinates.
+   *
+   * On anything from 901 to 1920 px wide the whole menu is laid out on a
+   * surface a third larger than the window and scaled back down — the density
+   * the interface was designed at, see the media query in `styles.css`. A
+   * transformed ancestor is also the containing block for anything fixed
+   * inside it, so the preview is positioned in that surface's pixels while
+   * every rect it works from is measured in the window's. Undo it here, once,
+   * and the rest of the drawing can be written in the units it is thinking in.
+   *
+   * Read rather than assumed: whatever that media query becomes, this stays
+   * true, and the lines cannot quietly start claiming full lock is somewhere it
+   * is not.
+   */
+  private readFrame(): { left: number; top: number; scale: number } {
+    const box = this.root.getBoundingClientRect()
+    const scale = this.root.offsetWidth > 0 ? box.width / this.root.offsetWidth : 1
+    this.frame = { left: box.left, top: box.top, scale: scale || 1 }
+    return this.frame
   }
 
   private renderTracks(): HTMLElement {
@@ -941,6 +1188,69 @@ function sep(): HTMLElement {
 const text = (s: string): Text => document.createTextNode(s)
 
 /**
+ * Does something inside `el` hold the keyboard, as the browser sees it?
+ *
+ * `:focus-visible` rather than plain focus, and the difference is the whole
+ * point: clicking a slider focuses it, so "keep the preview up while the
+ * control has focus" meant the lines stayed on screen after a drag, on a
+ * control the mouse had already left. The browser is already deciding which
+ * focus is worth showing a ring for; this asks it the same question.
+ */
+function keyboardFocused(el: HTMLElement): boolean {
+  const active = document.activeElement
+  return active instanceof HTMLElement && el.contains(active) && active.matches(':focus-visible')
+}
+
+/** Is a point inside an element's box? Null never contains anything. */
+function hits(el: HTMLElement | null, x: number, y: number): boolean {
+  if (!el) return false
+  const r = el.getBoundingClientRect()
+  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom
+}
+
+/** Slider thumb width, matching `.range` in the stylesheet — see `tickFor`. */
+const THUMB = 16
+/** Pixels between the two lines below which the tags stop facing inward. */
+const TAG_ROOM = 240
+
+/**
+ * The full-lock preview: what sensitivity looks like, drawn on the picture.
+ *
+ * Two lines either side of centre at the exact place the wheel hits its stop,
+ * the straight-ahead deadzone between them, and nothing else. It is
+ * `pointer-events: none` throughout: a drawing of the control, never part of
+ * it, and never in the way of the mouse it is describing.
+ */
+interface LockPreview {
+  root: HTMLDivElement
+  left: HTMLDivElement
+  right: HTMLDivElement
+  dead: HTMLDivElement
+}
+
+function buildLockPreview(): LockPreview {
+  const root = el('div', 'lock-preview')
+  root.hidden = true
+  root.setAttribute('aria-hidden', 'true')
+
+  const dead = el('div', 'lock-dead')
+  const centre = el('div', 'lock-centre')
+
+  const bar = (side: string): HTMLDivElement => {
+    const b = el('div', `lock-bar lock-bar-${side}`)
+    const tag = el('span', 'lock-tag')
+    tag.textContent = 'Full lock'
+    b.append(tag)
+    return b
+  }
+  const left = bar('l')
+  const right = bar('r')
+
+  root.append(dead, centre, left, right)
+  return { root, left, right, dead }
+}
+
+/**
  * One settings row: what it is on the left, the control on the right, and a
  * reset that appears only once there is something to undo.
  *
@@ -959,8 +1269,11 @@ function setRow(
   reset.append(icon('reset'))
   reset.title = `Reset ${label.toLowerCase()}`
   reset.setAttribute('aria-label', reset.title)
-  if (changed) reset.addEventListener('click', onReset)
-  else reset.tabIndex = -1
+  // Wired whatever the row is worth at build time. `is-idle` hides it with
+  // visibility, which already takes it out of the tab order and out of reach of
+  // the mouse, and a row whose control updates live rather than rebuilding
+  // (sensitivity) flips that class on a button that has to still be listening.
+  reset.addEventListener('click', onReset)
   // Label and reset occupy the first grid row; the control spans the row below.
   // Appending the control first made CSS grid auto-place Reset on a third line.
   row.append(name, reset, control)

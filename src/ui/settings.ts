@@ -1,11 +1,20 @@
 /**
  * Player settings — the things that are preferences rather than race choices.
  *
- * Every knob here is a short named scale, not a continuous slider. The sliders
- * that used to be here (speed FOV, kerb shake, and sensitivity as a percentage)
- * asked the player to tune a number they cannot see the effect of from the menu,
- * and the honest answer for all three is "a bit more" or "a bit less". So:
- * Low/Medium/High, and the fiddly numbers move together underneath.
+ * Almost every knob here is a short named scale rather than a continuous
+ * slider. The sliders that used to be here (speed FOV, kerb shake, and
+ * sensitivity as a percentage) asked the player to tune a number they cannot
+ * see the effect of from the menu, and the honest answer for all three is "a
+ * bit more" or "a bit less". So: Low/Medium/High, and the fiddly numbers move
+ * together underneath.
+ *
+ * Sensitivity is back to a slider, and it is the exception that proves the
+ * rule. What made it a bad slider was never that it was continuous — it was
+ * that a percentage is invisible. This one is not: the setting IS a distance on
+ * screen, so the settings screen draws that distance at true size while you
+ * drag it (see `fullLockOffset` and the lock preview in `menu.ts`). Once you
+ * can see where full lock lands, "a bit less than Medium" is a thing a player
+ * can actually want, and Low/Medium/High survive as ticks on the track.
  *
  * Speed FOV and kerb shake are gone as separate controls and now ride on
  * `effects` — they are camera effects, and splitting them out only made three
@@ -13,9 +22,12 @@
  *
  * Values are still stored as numbers rather than level names, so the renderer
  * keeps its 0..1 contract and a settings file written by an older build still
- * loads: anything off-scale snaps to the nearest level.
+ * loads: a named scale snaps an off-scale number to the nearest level, and the
+ * one slider clamps instead — snapping it would quietly throw away a setting
+ * the player had deliberately put between two ticks.
  */
 import { TC_LEVEL_DEFAULT, TC_LEVEL_MAX } from '../core/carParams'
+import { MOUSE_DEADZONE } from '../game/input'
 import type { CameraMode } from '../render/cameras'
 import { VIEWPORT_ORDER, type ViewportMode } from '../game/viewport'
 
@@ -66,7 +78,13 @@ export interface Settings {
 export type Level = 'low' | 'medium' | 'high'
 export type EffectsLevel = 'off' | Level
 
-/** Mouse sensitivity, as the three settings anyone actually wants. */
+/**
+ * Mouse sensitivity: the three named stops on a slider that moves freely.
+ *
+ * Kept as named values rather than raw numbers because they are still what the
+ * ticks are labelled, what Reset goes back to, and what a settings file from
+ * the segmented-picker build contains.
+ */
 export const SENSITIVITY: Record<Level, number> = { low: 0.25, medium: 0.5, high: 0.8 }
 
 /** Camera effects. `off` is the pygame image: clean render, fixed FOV, no shake. */
@@ -117,6 +135,20 @@ export function cameraFeel(effects: number): { fovKick: number; shake: number } 
 export const fullLockFraction = (sensitivity: number): number =>
   1.0 - 0.85 * Math.max(0, Math.min(1, sensitivity))
 
+/**
+ * Where full lock sits, measured from the centre of the picture, as a fraction
+ * of its half-width.
+ *
+ * `fullLockFraction` is travel measured from the edge of the deadzone, which is
+ * what the input code wants and is a distance from nowhere a player can see.
+ * This is the same setting stated as the thing you can point at: 0.34 means the
+ * wheel is on the stop a third of the way from the middle of the picture to its
+ * edge. The settings screen draws exactly this, so the two must agree — hence
+ * one function rather than the arithmetic being repeated over there.
+ */
+export const fullLockOffset = (sensitivity: number): number =>
+  MOUSE_DEADZONE + (1 - MOUSE_DEADZONE) * fullLockFraction(sensitivity)
+
 const KEY = 'car-racing:settings'
 
 export function loadSettings(): Settings {
@@ -127,7 +159,10 @@ export function loadSettings(): Settings {
     // Field-by-field, so a stored file from an older build cannot inject
     // nonsense or leave a new field undefined.
     return {
-      mouseSensitivity: snap(parsed.mouseSensitivity, SENSITIVITY, DEFAULT_SETTINGS.mouseSensitivity),
+      // Clamped, not snapped: the slider is free, so a value between two ticks
+      // is a choice rather than a corrupt file. Anything the three-level build
+      // wrote is already on scale and survives untouched.
+      mouseSensitivity: unit(parsed.mouseSensitivity, DEFAULT_SETTINGS.mouseSensitivity),
       effects: snap(parsed.effects, EFFECTS, DEFAULT_SETTINGS.effects),
       volume: snap(parsed.volume, VOLUME, DEFAULT_SETTINGS.volume),
       performanceMode: parsed.performanceMode === true,
@@ -169,6 +204,12 @@ export function levelOf<K extends string>(value: number, scale: Record<K, number
   let best = entries[0]!
   for (const e of entries) if (Math.abs(e[1] - value) < Math.abs(best[1] - value)) best = e
   return best[0]
+}
+
+/** A stored 0..1 knob that is a slider rather than a scale: clamp and keep. */
+function unit(v: unknown, fallback: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return fallback
+  return Math.min(Math.max(v, 0), 1)
 }
 
 function snap<K extends string>(v: unknown, scale: Record<K, number>, fallback: number): number {
