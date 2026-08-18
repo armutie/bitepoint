@@ -648,7 +648,11 @@ html, body, #app {
   /* One flat scrim. The old two-layer gradient plus vignette was lighting the
      circuit like a poster; a scrim just makes the panel readable over it. */
   background: rgba(4, 6, 9, 0.82);
-  overflow: auto;
+  /* Hidden, not auto: the sensitivity overlay is a child of this node and is
+     sized to the picture. Auto would grow scrollbars from a pixel of box-shadow
+     or rounding once the lines come up, which resizes the whole page. Inner
+     scrolling lives on `.menu-body`. */
+  overflow: hidden;
   /* Lifts while the sensitivity lines are being read — see `.menu.is-tuning`. */
   transition: background 180ms ease;
 }
@@ -1351,6 +1355,9 @@ kbd {
   position: fixed;
   z-index: 5;
   pointer-events: none;
+  /* Bars carry a glow that would otherwise paint outside this box and, with a
+     transformed ancestor, count as scrollable overflow on `.menu`. */
+  overflow: hidden;
 }
 
 .lock-bar {

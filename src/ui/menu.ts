@@ -119,6 +119,12 @@ export class Menu {
    * is the one moment the lines must not go anywhere.
    */
   private dragging = false
+  /**
+   * Pending hover delay before the lines come up. Crossing the slider on the
+   * way to something else must not flash the preview; holding still for a beat
+   * is the signal that you mean to read it.
+   */
+  private hoverTune: ReturnType<typeof setTimeout> | null = null
   /** Window-to-menu transform, refreshed whenever the preview is laid out. */
   private frame = { left: 0, top: 0, scale: 1 }
   /** The slider block the lines belong to, or null outside the settings screen. */
@@ -760,13 +766,17 @@ export class Menu {
       this.setTuning(true)
       apply(Number(range.value))
     })
-    range.addEventListener('pointerdown', () => { this.dragging = true })
+    range.addEventListener('pointerdown', () => {
+      this.dragging = true
+      // A click is already a decision; do not wait out the hover delay.
+      this.setTuning(true)
+    })
 
     this.tuningControl = grip
     // The lines belong to the slider, so they come up on the slider and not on
-    // the row around it. Reaching the control is enough — you should be able to
-    // see what you are about to change before you change it.
-    grip.addEventListener('pointerenter', () => this.setTuning(true))
+    // the row around it. A short dwell is required so a mouse that is only
+    // crossing the column does not flash the picture.
+    grip.addEventListener('pointerenter', () => this.armTuningHover())
     grip.addEventListener('focusin', () => this.setTuning(true))
     // Off again as soon as you leave, except mid-drag and except while the
     // slider is being driven from the keyboard.
@@ -790,11 +800,27 @@ export class Menu {
    * like an instrument is worse than none.
    */
   private setTuning(on: boolean): void {
+    this.clearTuningHover()
     if (this.tuning === on || (on && !this.settingsOpen)) return
     this.tuning = on
     this.root.classList.toggle('is-tuning', on)
     this.lock.root.hidden = !on
     if (on) this.layoutLock()
+  }
+
+  /** Wait out a pass-through before treating the hover as a read. */
+  private armTuningHover(): void {
+    if (this.tuning || this.hoverTune !== null || !this.settingsOpen) return
+    this.hoverTune = setTimeout(() => {
+      this.hoverTune = null
+      this.setTuning(true)
+    }, 400)
+  }
+
+  private clearTuningHover(): void {
+    if (this.hoverTune === null) return
+    clearTimeout(this.hoverTune)
+    this.hoverTune = null
   }
 
   /**
