@@ -11,9 +11,9 @@
  * the server re-drives the inputs and derives the time itself, so a faked time
  * would need an input trace that genuinely drives that fast. See LapReplay.
  */
-import type { CarState } from '../core/car'
-import { lapUsedTc, type LapRecording, type LapTrace } from '../core/sim'
-import { ASSISTS_ADJUSTABLE } from '../features'
+import type { CarState } from '../core/car.ts'
+import { lapUsedTc, type LapRecording, type LapTrace } from '../core/sim.ts'
+import { ASSISTS_ADJUSTABLE } from '../features.ts'
 
 export interface LapRecord {
   trackId: string

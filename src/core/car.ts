@@ -13,9 +13,9 @@
  * choice lives in the Python docstrings; the notes here cover only what the
  * translation itself needs.
  */
-import { clamp, copysign, interp, wrapAngle } from './math'
-import type { CarParams } from './carParams'
-import { defaultParams, TC_LEVELS, wheelbase } from './carParams'
+import { clamp, copysign, interp, wrapAngle } from './math.ts'
+import type { CarParams } from './carParams.ts'
+import { defaultParams, TC_LEVELS, wheelbase } from './carParams.ts'
 
 export const G = 9.81
 

@@ -15,13 +15,13 @@
  * absent. Nothing here needs them, and the reward shaping is the part most
  * likely to keep changing on the Python side.
  */
-import { Barriers } from './barriers'
-import { Car, initialState, speedOf, type CarState } from './car'
-import type { CarParams } from './carParams'
-import { TC_LEVEL_DEFAULT, TC_LEVEL_MAX } from './carParams'
-import { gridPose, GRID_SLOTS } from './grid'
-import { clamp, wrapAngle } from './math'
-import type { Track } from './track'
+import { Barriers } from './barriers.ts'
+import { Car, initialState, speedOf, type CarState } from './car.ts'
+import type { CarParams } from './carParams.ts'
+import { TC_LEVEL_DEFAULT, TC_LEVEL_MAX } from './carParams.ts'
+import { gridPose, GRID_SLOTS } from './grid.ts'
+import { clamp, wrapAngle } from './math.ts'
+import type { Track } from './track.ts'
 
 /** Physics tick. Matches ``RacingEnv``'s default, and is not negotiable: the
  *  handling was tuned at this rate and the fixtures are generated at it. */

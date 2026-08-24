@@ -19,11 +19,11 @@
  *   walls come from. They cannot drift apart, because there is only one of
  *   them.
  */
-import type { CarState } from './car'
-import type { CarParams } from './carParams'
-import { carLength } from './carParams'
-import { carCorners, resolveStatic, type Contact } from './collision'
-import type { Track } from './track'
+import type { CarState } from './car.ts'
+import type { CarParams } from './carParams.ts'
+import { carLength } from './carParams.ts'
+import { carCorners, resolveStatic, type Contact } from './collision.ts'
+import type { Track } from './track.ts'
 
 /**
  * Concrete and carbon fibre: barely elastic, and grippy enough that a car

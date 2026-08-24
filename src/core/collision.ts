@@ -17,9 +17,9 @@
  * never conserved either: restitution below 1 makes contact lossy, as it should
  * be for steel.
  */
-import type { CarState } from './car'
-import type { CarParams } from './carParams'
-import { carLength } from './carParams'
+import type { CarState } from './car.ts'
+import type { CarParams } from './carParams.ts'
+import { carLength } from './carParams.ts'
 
 /**
  * Positional correction leaves this much overlap unresolved.

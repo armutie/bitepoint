@@ -1,4 +1,4 @@
-import type { Track } from './track'
+import type { Track } from './track.ts'
 
 /** Shared geometry for the painted starting grid and time-attack staging. */
 export const GRID_SPACING = 9.0

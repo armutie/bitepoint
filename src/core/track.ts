@@ -11,7 +11,7 @@
  * What *is* ported is everything the game asks of a track every tick: where am I
  * along the lap, how far off the centre, and how wide is the road here.
  */
-import { pyMod } from './math'
+import { pyMod } from './math.ts'
 
 /** The baked JSON written by ``export_web_assets.py``. */
 export interface TrackData {
