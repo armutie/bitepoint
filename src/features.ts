@@ -30,6 +30,9 @@ export const ASSISTS_ADJUSTABLE = false
 export const isLegacyTyrePath = (pathname: string): boolean =>
   /(?:^|\/)legacy(?:\/index\.html)?\/?$/.test(pathname)
 
+export const legacyTyreModeForLocation = (
+  browserLocation: Pick<Location, 'pathname'> | undefined,
+): boolean => browserLocation !== undefined && isLegacyTyrePath(browserLocation.pathname)
+
 /** The `/legacy` build keeps the tyre curve shipped before August 2026. */
-export const LEGACY_TYRE_MODE =
-  typeof window !== 'undefined' && isLegacyTyrePath(window.location.pathname)
+export const LEGACY_TYRE_MODE = legacyTyreModeForLocation(globalThis.location)
