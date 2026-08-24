@@ -64,20 +64,18 @@ interface LeaderboardPage {
   scope: 'global'
 }
 
-export default {
-  async fetch(request: Request): Promise<Response> {
-    const cors = corsHeaders(request)
-    if (!cors) return json({ error: 'Origin is not allowed.' }, 403)
-    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors })
+Deno.serve(async (request: Request): Promise<Response> => {
+  const cors = corsHeaders(request)
+  if (!cors) return json({ error: 'Origin is not allowed.' }, 403)
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors })
 
-    try {
-      return await route(request, cors)
-    } catch (reason) {
-      console.error('[leaderboard]', reason)
-      return json({ error: 'Leaderboard service failed.' }, 500, cors)
-    }
-  },
-}
+  try {
+    return await route(request, cors)
+  } catch (reason) {
+    console.error('[leaderboard]', reason)
+    return json({ error: 'Leaderboard service failed.' }, 500, cors)
+  }
+})
 
 async function route(request: Request, cors: Headers): Promise<Response> {
   const url = new URL(request.url)
