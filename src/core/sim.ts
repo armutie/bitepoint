@@ -226,6 +226,9 @@ export interface LapVerification {
   /** Present only for an accepted lap; always derived from the input count. */
   time?: number
   sectors?: (number | null)[]
+  /** Server-derived ghost data; client-supplied paths are never trusted. */
+  trace?: LapTrace
+  path?: Float64Array
   reason?: string
 }
 
@@ -698,6 +701,8 @@ export function verifyLapRecording(
         accepted: true,
         time: result.lapCompleted.time,
         sectors: result.lapCompleted.sectors,
+        trace: result.lapCompleted.trace,
+        path: result.lapCompleted.path,
       }
     }
   }

@@ -1,5 +1,9 @@
 node_modules/
 dist/
+dist-api/
 .vite/
 *.local
 *.log
+supabase/.temp/
+supabase/.branches/
+supabase/.env

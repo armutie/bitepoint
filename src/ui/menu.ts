@@ -27,6 +27,11 @@ import {
 import { CAMERA_LABEL, CAMERA_ORDER } from '../render/cameras'
 import { VIEWPORT_LABEL, VIEWPORT_ORDER } from '../game/viewport'
 import { MOUSE_DEADZONE } from '../game/input'
+import {
+  analyseSession, type SessionAnalysis, type SessionSummary,
+} from './sessionSummary'
+import { usernameHint } from '../shared/playerIdentity'
+import type { PlayerProfile, PlayerProfileClient } from '../storage/player'
 
 export interface Selection {
   trackId: string
@@ -71,6 +76,8 @@ export interface MenuDeps {
   /** Personal bests, keyed by `keyOf`, for showing what there is to beat. */
   bests: Map<string, LapRecord>
   leaderboard: LeaderboardClient
+  /** Null while the board is the browser-only fallback. */
+  profiles: PlayerProfileClient | null
   /**
    * The picture — the canvas, not the window.
    *
@@ -90,7 +97,9 @@ export class Menu {
   onStart: (s: Selection) => void = () => {}
   onResume: () => void = () => {}
   onRestart: () => void = () => {}
+  onEndSession: () => void = () => {}
   onQuit: () => void = () => {}
+  onProfileClaimed: () => void = () => {}
   onSelectionChange: (s: Selection) => void = () => {}
   onSettingsChange: (s: Settings) => void = () => {}
 
@@ -185,6 +194,7 @@ export class Menu {
     this.root.classList.remove('is-hidden')
     this.root.classList.toggle('menu-dialog', kind === 'dialog')
     this.root.classList.remove('menu-controls')
+    this.root.classList.remove('menu-session-summary')
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
@@ -348,6 +358,7 @@ export class Menu {
       // Do not paint a request that resolved after the user moved to another board.
       if (key.trackId !== this.selection.trackId || key.easy !== this.selection.easy) return
       body.replaceChildren()
+      if (this.deps.profiles) body.append(this.profilePanel())
       const scope = el('div', 'leaderboard-scope')
       scope.textContent = page.scope === 'global'
         ? 'Online records · select any available replay as your ghost'
@@ -537,9 +548,217 @@ export class Menu {
         this.hide()
         this.onRestart()
       }),
-      actionButton('menu', 'Menu', '', '', () => this.onQuit()),
+      actionButton('menu', 'End session', '', '', () => this.onEndSession()),
     )
     this.panel.append(actions, this.renderHelp(DRIVING_KEYS))
+  }
+
+  /** A public name is asked for here, never at boot and never before driving. */
+  private profilePanel(): HTMLElement {
+    const profiles = this.deps.profiles!
+    const wrap = el('section', 'leaderboard-profile')
+    const current = profiles.current
+    if (current) {
+      const label = el('span', 'leaderboard-profile-label')
+      label.textContent = 'Racing as'
+      const username = el('strong', 'leaderboard-profile-name')
+      username.textContent = current.username
+      const status = el('span', 'leaderboard-profile-status')
+      status.textContent = current.locked ? 'Locked in with Google' : 'Saved on this device'
+      wrap.append(label, username, status)
+      if (profiles.supportsGoogle && !current.locked) {
+        const lock = el('button', 'profile-mode')
+        lock.type = 'button'
+        lock.textContent = 'Lock in with Google'
+        lock.addEventListener('click', () => {
+          lock.disabled = true
+          status.textContent = 'Opening Googleâ€¦'
+          void profiles.lockWithGoogle().catch((reason: unknown) => {
+            status.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
+            lock.disabled = false
+          })
+        })
+        wrap.append(lock)
+      }
+      return wrap
+    }
+
+    const copy = el('div', 'leaderboard-profile-copy')
+    const title = el('strong', 'leaderboard-profile-title')
+    title.textContent = 'Claim your times'
+    const blurb = el('span', 'leaderboard-profile-blurb')
+    blurb.textContent = 'Choose one unique name. No email or account required.'
+    copy.append(title, blurb)
+
+    const form = document.createElement('form')
+    form.className = 'leaderboard-profile-form'
+    const username = el('input', 'profile-input') as HTMLInputElement
+    username.name = 'username'
+    username.placeholder = 'Username'
+    username.autocomplete = 'username'
+    username.maxLength = 16
+    username.spellcheck = false
+    username.setAttribute('aria-label', 'Username')
+
+    form.append(username)
+
+    const submit = el('button', 'btn btn-primary profile-submit')
+    submit.type = 'submit'
+    submit.textContent = 'Claim name'
+    form.append(submit)
+
+    const hint = el('span', 'leaderboard-profile-hint')
+    hint.textContent = usernameHint
+    const error = el('span', 'leaderboard-profile-error')
+    error.setAttribute('role', 'alert')
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      error.textContent = ''
+      submit.disabled = true
+      void profiles.claim(username.value).then((profile) => {
+        this.showProfileClaimed(wrap, profile)
+      }).catch((reason: unknown) => {
+        error.textContent = reason instanceof Error ? reason.message : 'Profile unavailable.'
+        submit.disabled = false
+      })
+    })
+
+    const help = el('div', 'leaderboard-profile-help')
+    help.append(hint, error)
+    if (profiles.supportsGoogle) {
+      const signIn = el('button', 'profile-mode')
+      signIn.type = 'button'
+      signIn.textContent = 'Use a Google-locked name'
+      signIn.addEventListener('click', () => {
+        signIn.disabled = true
+        error.textContent = 'Opening Googleâ€¦'
+        void profiles.signInWithGoogle().catch((reason: unknown) => {
+          error.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
+          signIn.disabled = false
+        })
+      })
+      help.append(signIn)
+    }
+    wrap.append(copy, form, help)
+    return wrap
+  }
+
+  private showProfileClaimed(wrap: HTMLElement, profile: PlayerProfile): void {
+    wrap.classList.add('is-claimed')
+    const copy = el('div', 'leaderboard-profile-copy')
+    const title = el('strong', 'leaderboard-profile-title')
+    title.textContent = `${profile.username} is yours`
+    const blurb = el('span', 'leaderboard-profile-blurb')
+    blurb.textContent = profile.locked
+      ? 'Protected with Google and available on your other devices.'
+      : 'Saved on this device. You can lock it in with Google whenever you want.'
+    copy.append(title, blurb)
+
+    const actions = el('div', 'leaderboard-profile-claimed-actions')
+    const profiles = this.deps.profiles!
+    if (profiles.supportsGoogle && !profile.locked) {
+      const lock = el('button', 'btn')
+      lock.textContent = 'Lock in with Google'
+      lock.addEventListener('click', () => {
+        lock.disabled = true
+        void profiles.lockWithGoogle().catch(() => { lock.disabled = false })
+      })
+      actions.append(lock)
+    }
+    const done = el('button', 'btn btn-primary')
+    done.textContent = 'Continue'
+    done.addEventListener('click', () => this.onProfileClaimed())
+    actions.append(done)
+    wrap.replaceChildren(copy, actions)
+  }
+
+  /**
+   * A debrief, not a dashboard: one picture of the run and only facts that
+   * help explain it. Empty sessions never arrive here; `main.ts` sends those
+   * straight to the menu so a quick setup check does not demand another click.
+   */
+  showSessionSummary(summary: SessionSummary): void {
+    this.show('dialog')
+    this.root.classList.add('menu-session-summary')
+    this.panel.replaceChildren()
+
+    const analysis = analyseSession(summary)
+    const header = el('header', 'menu-header session-header')
+    const eyebrow = el('div', 'eyebrow')
+    eyebrow.textContent = 'Session complete'
+    const title = el('h1', 'menu-title')
+    title.textContent = 'Run review'
+    const meta = el('div', 'pause-meta')
+    meta.append(chip(summary.trackLabel), sep(), chip(summary.carLabel))
+    if (summary.easy) {
+      const easy = el('span', 'tag tag-warn')
+      easy.textContent = 'EASY'
+      meta.append(easy)
+    }
+    header.append(eyebrow, title, meta)
+
+    const chart = sessionChart(summary, analysis)
+    const facts = el('div', 'session-facts')
+    const fastest = analysis.fastest
+    facts.append(
+      sessionFact(
+        'Fastest',
+        fastest ? formatTime(fastest.time) : '—',
+        fastest ? `Lap ${fastest.number}` : 'No clean lap',
+        'is-lead',
+      ),
+      sessionFact(
+        'Ideal lap',
+        analysis.theoreticalBest !== null ? formatTime(analysis.theoreticalBest) : '—',
+        analysis.theoreticalGain !== null && analysis.theoreticalGain >= 0.005
+          ? `${analysis.theoreticalGain.toFixed(2)}s left`
+          : analysis.theoreticalBest !== null ? 'Sectors aligned' : 'Not enough data',
+        '',
+      ),
+      sessionFact(
+        'Clean laps',
+        `${analysis.validLaps.length} / ${summary.laps.length}`,
+        analysis.validLaps.length === summary.laps.length ? 'Every lap stood' : 'Completed laps',
+        '',
+      ),
+    )
+
+    const sectors = el('div', 'session-sectors')
+    for (let index = 0; index < analysis.bestSectors.length; index++) {
+      const best = analysis.bestSectors[index]
+      const item = el('div', 'session-sector')
+      const label = el('span', `session-sector-label s${index + 1}`)
+      label.textContent = `S${index + 1}`
+      const time = el('span', 'session-sector-time')
+      time.textContent = best ? formatTime(best.time) : '—'
+      const lap = el('span', 'session-sector-lap')
+      lap.textContent = best ? `Lap ${best.lap}` : 'No time'
+      item.append(label, time, lap)
+      sectors.append(item)
+    }
+
+    const body = el('div', 'session-body')
+    body.append(chart, facts, sectors)
+    if (analysis.observation) {
+      const observation = el('p', 'session-observation')
+      observation.textContent = analysis.observation
+      body.append(observation)
+    }
+
+    const actions = el('div', 'menu-actions session-actions')
+    const continueButton = el('button', 'btn')
+    continueButton.textContent = 'Keep driving'
+    continueButton.addEventListener('click', () => {
+      this.hide()
+      this.onResume()
+    })
+    const done = el('button', 'btn btn-primary')
+    done.textContent = 'Main menu'
+    done.addEventListener('click', () => this.onQuit())
+    actions.append(continueButton, done)
+
+    this.panel.append(header, body, actions)
   }
 
   /**
@@ -1186,6 +1405,151 @@ function actionButton(
   }
   b.addEventListener('click', onClick)
   return b
+}
+
+/** A session figure: the number, where it came from, and no decorative copy. */
+function sessionFact(label: string, value: string, note: string, extra: string): HTMLElement {
+  const wrap = el('div', `session-fact ${extra}`.trim())
+  const l = el('span', 'session-fact-label')
+  l.textContent = label
+  const v = el('span', 'session-fact-value')
+  v.textContent = value
+  const n = el('span', 'session-fact-note')
+  n.textContent = note
+  wrap.append(l, v, n)
+  return wrap
+}
+
+/**
+ * A compact timing trace. Invalid laps keep their place on the x-axis but do
+ * not stretch the time scale or connect two clean laps across a broken one.
+ */
+function sessionChart(summary: SessionSummary, analysis: SessionAnalysis): HTMLElement {
+  const figure = el('figure', 'session-chart')
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 640 190')
+  svg.setAttribute('role', 'img')
+  svg.setAttribute(
+    'aria-label',
+    `${summary.laps.length} completed laps; ${analysis.validLaps.length} clean. ` +
+      (analysis.fastest
+        ? `Fastest was lap ${analysis.fastest.number} at ${formatTime(analysis.fastest.time)}.`
+        : 'No clean lap.'),
+  )
+
+  const W = 640
+  const H = 190
+  const LEFT = 64
+  const RIGHT = 18
+  const TOP = 16
+  const BOTTOM = 30
+  const plotW = W - LEFT - RIGHT
+  const plotH = H - TOP - BOTTOM
+  const times = analysis.validLaps.map((lap) => lap.time)
+  const rawMin = times.length > 0 ? Math.min(...times) : 0
+  const rawMax = times.length > 0 ? Math.max(...times) : 1
+  // A minimum one-second window keeps a 0.03 s wobble from looking dramatic.
+  const span = Math.max(1, rawMax - rawMin)
+  const min = rawMin - span * 0.18
+  const max = rawMax + span * 0.18
+  const x = (number: number): number => summary.laps.length <= 1
+    ? LEFT + plotW / 2
+    : LEFT + ((number - 1) / (summary.laps.length - 1)) * plotW
+  // Conventional timing plot: the smaller number sits lower. Improvement
+  // therefore falls toward the bottom of the chart, just as the clock does.
+  const y = (time: number): number => TOP + ((max - time) / (max - min)) * plotH
+
+  for (let step = 0; step < 3; step++) {
+    const value = min + ((max - min) * step) / 2
+    const py = y(value)
+    svg.append(
+      svgNode('line', {
+        x1: LEFT, y1: py, x2: W - RIGHT, y2: py, class: 'session-grid-line',
+      }),
+    )
+    const label = svgNode('text', {
+      x: LEFT - 10, y: py + 4, class: 'session-axis-time', 'text-anchor': 'end',
+    })
+    label.textContent = formatTime(value)
+    svg.append(label)
+  }
+
+  const baseline = summary.personalBestBefore
+  if (baseline !== null && baseline >= min && baseline <= max) {
+    const py = y(baseline)
+    svg.append(svgNode('line', {
+      x1: LEFT, y1: py, x2: W - RIGHT, y2: py, class: 'session-pb-line',
+    }))
+    const label = svgNode('text', {
+      x: W - RIGHT - 4, y: py - 6, class: 'session-pb-label', 'text-anchor': 'end',
+    })
+    label.textContent = 'PB BEFORE'
+    svg.append(label)
+  }
+
+  for (let index = 1; index < summary.laps.length; index++) {
+    const before = summary.laps[index - 1]!
+    const after = summary.laps[index]!
+    if (!before.valid || !after.valid) continue
+    svg.append(svgNode('line', {
+      x1: x(before.number), y1: y(before.time),
+      x2: x(after.number), y2: y(after.time),
+      class: 'session-lap-line',
+    }))
+  }
+
+  const labelEvery = Math.max(1, Math.ceil(summary.laps.length / 12))
+  for (const lap of summary.laps) {
+    const px = x(lap.number)
+    if ((lap.number - 1) % labelEvery === 0 || lap.number === summary.laps.length) {
+      const label = svgNode('text', {
+        x: px, y: H - 8, class: 'session-axis-lap', 'text-anchor': 'middle',
+      })
+      label.textContent = String(lap.number)
+      svg.append(label)
+    }
+
+    if (!lap.valid) {
+      // Invalid is not a quick time. Keep it on the upper failure rail rather
+      // than letting its cross occupy the faster, lower edge of the plot.
+      const py = TOP
+      const size = 4
+      svg.append(
+        svgNode('line', {
+          x1: px - size, y1: py - size, x2: px + size, y2: py + size,
+          class: 'session-invalid-mark',
+        }),
+        svgNode('line', {
+          x1: px + size, y1: py - size, x2: px - size, y2: py + size,
+          class: 'session-invalid-mark',
+        }),
+      )
+      continue
+    }
+
+    const best = analysis.fastest?.number === lap.number
+    const point = svgNode('circle', {
+      cx: px, cy: y(lap.time), r: best ? 5 : 3.5,
+      class: best ? 'session-lap-point is-best' : 'session-lap-point',
+    })
+    const title = document.createElementNS('http://www.w3.org/2000/svg', 'title')
+    title.textContent = `Lap ${lap.number}: ${formatTime(lap.time)}${best ? ', fastest' : ''}`
+    point.append(title)
+    svg.append(point)
+  }
+
+  const caption = el('figcaption', 'session-chart-caption')
+  caption.textContent = 'Lap time'
+  figure.append(svg, caption)
+  return figure
+}
+
+function svgNode(name: string, attributes: Record<string, string | number>): SVGElement {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', name)
+  for (const [attribute, value] of Object.entries(attributes)) {
+    node.setAttribute(attribute, String(value))
+  }
+  return node
 }
 
 /** One pause-screen figure: a quiet label over the number that matters. */

@@ -40,8 +40,9 @@ import { Hud } from './ui/hud'
 import {
   Menu, RELEASED_PRESETS, RELEASED_TRACKS, type PauseStatus, type Selection,
 } from './ui/menu'
+import type { SessionLap, SessionSummary } from './ui/sessionSummary'
 import { cameraFeel, fullLockFraction, loadSettings, saveSettings, type Settings } from './ui/settings'
-import { createLeaderboardClient, sameBoard } from './storage/leaderboard'
+import { createLeaderboardServices, sameBoard } from './storage/leaderboard'
 import { keyOf, LocalRecordStore, NamespacedStorage, type LapRecord } from './storage/records'
 import { decodePath, loadAttractLaps, pinnedAttractLaps } from './data/attractLaps'
 
@@ -74,7 +75,8 @@ async function boot(): Promise<void> {
     ? new NamespacedStorage(window.localStorage, 'car-racing:legacy-tyres:')
     : window.localStorage
   const store = new LocalRecordStore(recordStorage)
-  const leaderboard = createLeaderboardClient(store)
+  const { leaderboard, profiles } = createLeaderboardServices(store)
+  await profiles?.ready()
   const renderer = new Renderer(canvas)
   const sound = new Sound()
   const hud = new Hud()
@@ -91,6 +93,7 @@ async function boot(): Promise<void> {
       presets: PRESET_ORDER.map((p) => PRESET_INFO[p]),
       bests,
       leaderboard,
+      profiles,
       // The canvas, not the stage: mouse steering is measured against the
       // picture, and the sensitivity preview has to draw in the same frame.
       picture: canvas,
@@ -156,6 +159,10 @@ async function boot(): Promise<void> {
   let lastThrottle = 0
   let lastSteer = 0
   let running = false
+  /** Completed laps in this visit to the circuit, including invalid ones. */
+  let sessionLaps: SessionLap[] = []
+  /** Frozen at session start so a PB observation compares against the past. */
+  let sessionPersonalBestBefore: number | null = null
   /**
    * A session exists and is stopped, as opposed to there being no session.
    *
@@ -310,6 +317,8 @@ async function boot(): Promise<void> {
   async function start(sel: Selection): Promise<void> {
     current = sel
     persistSelection(sel)
+    sessionLaps = []
+    sessionPersonalBestBefore = null
 
     // Drive is authoritative. Normally the job already applied the scene; but
     // if a later preview superseded this job mid-flight, the scene could hold
@@ -344,6 +353,7 @@ async function boot(): Promise<void> {
 
     const boardKey = { trackId: sel.trackId, preset: sel.preset, easy: sel.easy }
     const personalBest = await store.best(boardKey)
+    sessionPersonalBestBefore = personalBest?.time ?? null
     ghostRecord = personalBest
     if (sel.ghostEntryId) {
       try {
@@ -428,8 +438,35 @@ async function boot(): Promise<void> {
     menu.showMain()
   }
 
+  /** Stop on the frozen circuit long enough to read the run, when there is one. */
+  function endSession(): void {
+    // A debrief with no clean timing has nothing useful to say. Leave it out
+    // rather than turning a quick test or abandoned run into an extra screen.
+    if (!sessionLaps.some((lap) => lap.valid)) {
+      quitToMenu()
+      return
+    }
+    running = false
+    paused = true
+    input.release()
+    const summary: SessionSummary = {
+      trackLabel: manifest.find((t) => t.id === current.trackId)?.label ?? current.trackId,
+      carLabel: presetLabel(current.preset),
+      easy: current.easy,
+      personalBestBefore: sessionPersonalBestBefore,
+      laps: sessionLaps.map((lap) => ({ ...lap, sectors: lap.sectors.slice() })),
+    }
+    menu.showSessionSummary(summary)
+  }
+
   async function onLapCompleted(lap: CompletedLap): Promise<void> {
     if (!sim) return
+    sessionLaps.push({
+      number: sessionLaps.length + 1,
+      time: lap.time,
+      valid: lap.valid,
+      sectors: lap.sectors.slice(),
+    })
     let isBest = false
     if (lap.valid) {
       const record: LapRecord = {
@@ -736,13 +773,16 @@ async function boot(): Promise<void> {
   menu.onResume = () => {
     if (sim) running = true
     paused = false
+    hud.root.classList.remove('is-hidden')
   }
   menu.onRestart = () => {
     restartLap()
     running = true
     paused = false
   }
+  menu.onEndSession = () => endSession()
   menu.onQuit = () => quitToMenu()
+  menu.onProfileClaimed = () => void menu.showLeaderboard()
   menu.onSettingsChange = (s) => applySettings(s)
   menu.onSelectionChange = (sel) => {
     persistSelection(sel)
@@ -801,6 +841,8 @@ async function boot(): Promise<void> {
         get fovKick() { return renderer.fovKick },
         get lastBuildMs() { return lastBuildMs },
         get buildCount() { return buildCount },
+        /** Visual-QA seam: render a debrief without driving five real laps. */
+        showSessionSummary(summary: SessionSummary) { menu.showSessionSummary(summary) },
       },
       configurable: true,
     })

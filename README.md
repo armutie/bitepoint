@@ -23,12 +23,18 @@ Requires Node.js 22 or newer.
 ```bash
 npm install
 npm run dev
+npm run api:dev
 npm test
 npm run build
 ```
 
 The production build is written to `dist/`. GitHub Pages deploys it automatically
 after changes reach `main`.
+
+The optional verified global leaderboard uses Supabase Auth, PostgreSQL, and an
+Edge Function that replays every submitted lap. The local Fastify service stays
+available for zero-setup UI work. Identity, verification, schema, and deployment
+are documented in [LEADERBOARD.md](LEADERBOARD.md).
 
 ## Legacy tyres
 

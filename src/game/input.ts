@@ -305,11 +305,22 @@ const DRIVING_KEYS = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
 ])
 
-/** Keys a focused control works with: moving a slider, ticking a box. */
+/** Keys a focused non-text control works with: moving a slider, ticking a box. */
 const CONTROL_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'Home', 'End', 'PageUp', 'PageDown', 'Space', 'Enter',
 ])
+
+/** Input types that act like controls rather than text editors. */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range',
+  'reset', 'submit',
+])
+
+/** Whether an `<input>` type should keep every keystroke away from the game. */
+export function inputTypeAcceptsText(type: string): boolean {
+  return !NON_TEXT_INPUT_TYPES.has(type.toLowerCase())
+}
 
 /**
  * Does the thing with the focus want this key for itself?
@@ -321,17 +332,21 @@ const CONTROL_KEYS = new Set([
  * quietly cancelling them, so the slider could be focused and not used. Space
  * on a switch or a button was going the same way.
  *
- * Narrow on purpose: only keys a control actually consumes, and only while one
- * has the focus. W and S are not on the list, so nothing here can take a pedal
- * away from the car.
+ * A text editor owns every key while it has focus. That matters for more than
+ * the driving keys: letters such as G, R and C are game shortcuts, but must
+ * still be typeable in a username. Non-text controls stay deliberately narrow:
+ * a slider or switch only owns the navigation/activation keys it consumes, so
+ * merely focusing one cannot take W and S away from the car.
  */
 function controlOwns(target: EventTarget | null, code: string): boolean {
+  if (target instanceof HTMLTextAreaElement
+    || (target instanceof HTMLInputElement && inputTypeAcceptsText(target.type))
+    || (target instanceof HTMLElement && target.isContentEditable)) return true
+
   if (!CONTROL_KEYS.has(code)) return false
   return target instanceof HTMLInputElement
     || target instanceof HTMLSelectElement
-    || target instanceof HTMLTextAreaElement
     || target instanceof HTMLButtonElement
-    || (target instanceof HTMLElement && target.isContentEditable)
 }
 
 /**

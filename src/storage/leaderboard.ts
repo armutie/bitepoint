@@ -5,18 +5,24 @@
  * the exact starting state and input stream already used by `LapReplay`; the
  * service replays those inputs with the named ruleset and derives the result.
  */
+import { createClient } from '@supabase/supabase-js'
+
 import { lapUsedTc } from '../core/sim'
 import { LEGACY_TYRE_MODE } from '../features'
 import type { LapRecord, RecordKey, RecordStore, SerializedLapRecord } from './records'
 import { deserializeLapRecord, keyOf, serializeLapRecord } from './records'
+import { CURRENT_PHYSICS_RULESET, LEGACY_PHYSICS_RULESET } from '../shared/ruleset'
+import {
+  DevicePlayerProfileClient, type PlayerProfileClient, SupabasePlayerProfileClient,
+} from './player'
 
 /**
  * Bump this whenever a physics, collision, track-boundary, or timing change can
  * alter a lap. Old boards remain readable, but never compete with the new sim.
  */
 export const PHYSICS_RULESET = LEGACY_TYRE_MODE
-  ? '2026-08-legacy-tyre-9p5-1p5-0p97'
-  : '2026-08-tyre-10p5-1p35-neg1'
+  ? LEGACY_PHYSICS_RULESET
+  : CURRENT_PHYSICS_RULESET
 
 export interface LeaderboardKey extends RecordKey {
   ruleset: string
@@ -143,7 +149,10 @@ export class PersonalLeaderboardClient implements LeaderboardClient {
 
 /** HTTP implementation of the contract documented in LEADERBOARD.md. */
 export class HttpLeaderboardClient implements LeaderboardClient {
-  constructor(private readonly baseUrl: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly profiles: PlayerProfileClient,
+  ) {}
 
   async list(key: RecordKey, limit = 50): Promise<LeaderboardPage> {
     const query = new URLSearchParams({
@@ -162,21 +171,25 @@ export class HttpLeaderboardClient implements LeaderboardClient {
     return deserializeLapRecord(body.lap)
   }
 
-  async submit(record: LapRecord, playerName: string): Promise<LeaderboardEntry> {
+  async submit(record: LapRecord, _playerName: string): Promise<LeaderboardEntry | null> {
+    if (!this.profiles.current) return null
     const body = await this.request<{ entry: LeaderboardEntry }>('/v1/laps', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         ruleset: PHYSICS_RULESET,
-        playerName: cleanPlayerName(playerName),
         lap: serializeLapRecord(record),
       }),
-    })
+    }, true)
     return body.entry
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}${path}`, init)
+  private async request<T>(path: string, init?: RequestInit, authenticated = false): Promise<T> {
+    const headers = new Headers(init?.headers)
+    for (const [name, value] of Object.entries(await this.profiles.headers(authenticated))) {
+      headers.set(name, value)
+    }
+    const response = await fetch(`${this.baseUrl.replace(/\/$/, '')}${path}`, { ...init, headers })
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
       throw new Error(detail || `Leaderboard request failed (${response.status})`)
@@ -186,8 +199,34 @@ export class HttpLeaderboardClient implements LeaderboardClient {
 }
 
 export function createLeaderboardClient(records: RecordStore): LeaderboardClient {
-  const url = import.meta.env.VITE_LEADERBOARD_API?.trim()
-  return url ? new HttpLeaderboardClient(url) : new PersonalLeaderboardClient(records)
+  return createLeaderboardServices(records).leaderboard
+}
+
+export interface LeaderboardServices {
+  leaderboard: LeaderboardClient
+  profiles: PlayerProfileClient | null
+}
+
+export function createLeaderboardServices(records: RecordStore): LeaderboardServices {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL?.trim()
+  const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY?.trim()
+  if (supabaseUrl && publishableKey) {
+    const supabase = createClient(supabaseUrl, publishableKey)
+    const functionUrl = `${supabaseUrl.replace(/\/$/, '')}/functions/v1/leaderboard`
+    const profiles = new SupabasePlayerProfileClient(
+      supabase, publishableKey, functionUrl,
+    )
+    return {
+      leaderboard: new HttpLeaderboardClient(functionUrl, profiles),
+      profiles,
+    }
+  }
+
+  const configured = import.meta.env.VITE_LEADERBOARD_API?.trim()
+  const url = configured || (import.meta.env.DEV ? 'http://127.0.0.1:8787' : '')
+  if (!url) return { leaderboard: new PersonalLeaderboardClient(records), profiles: null }
+  const profiles = new DevicePlayerProfileClient(url)
+  return { leaderboard: new HttpLeaderboardClient(url, profiles), profiles }
 }
 
 export const withRuleset = (key: RecordKey): LeaderboardKey => ({ ...key, ruleset: PHYSICS_RULESET })
