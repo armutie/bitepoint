@@ -21,6 +21,8 @@ export interface PlayerProfileClient {
   headers(authenticated?: boolean): Promise<Record<string, string>>
   lockWithGoogle(): Promise<void>
   signInWithGoogle(): Promise<void>
+  /** End the session on this browser without deleting the driver's profile or laps. */
+  signOut(): Promise<void>
 }
 
 interface DeviceProfile extends PlayerProfile {
@@ -83,6 +85,11 @@ export class DevicePlayerProfileClient implements PlayerProfileClient {
     throw new Error('Google sign-in is available when Supabase is configured.')
   }
 
+  async signOut(): Promise<void> {
+    this.profile = null
+    remove(this.storage, DEVICE_PROFILE_KEY)
+  }
+
   private load(): DeviceProfile | null {
     const value = load(this.storage, DEVICE_PROFILE_KEY)
     if (
@@ -118,7 +125,11 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
     private readonly storage: Storage = window.localStorage,
   ) {
     this.profile = this.load()
-    this.supabase.auth.onAuthStateChange((_event, session) => {
+    this.supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_OUT') {
+        this.forget()
+        return
+      }
       if (!this.profile || !session?.user) return
       this.remember({ ...this.profile, locked: isLocked(session.user) })
     })
@@ -177,6 +188,12 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
     if (error) throw new Error(error.message)
   }
 
+  async signOut(): Promise<void> {
+    const { error } = await this.supabase.auth.signOut({ scope: 'local' })
+    if (error) throw new Error(error.message)
+    this.forget()
+  }
+
   private async restoreFromSession(): Promise<void> {
     const session = await this.session(false)
     if (!session) return
@@ -211,6 +228,11 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
     this.profile = profile
     save(this.storage, SUPABASE_PROFILE_KEY, profile)
     return profile
+  }
+
+  private forget(): void {
+    this.profile = null
+    remove(this.storage, SUPABASE_PROFILE_KEY)
   }
 
   private load(): PlayerProfile | null {
@@ -251,6 +273,14 @@ function save(storage: Storage, key: string, value: unknown): void {
     storage.setItem(key, JSON.stringify(value))
   } catch {
     // The live identity still works; only persistence is unavailable.
+  }
+}
+
+function remove(storage: Storage, key: string): void {
+  try {
+    storage.removeItem(key)
+  } catch {
+    // Signing out still succeeds in memory when persistence is unavailable.
   }
 }
 
