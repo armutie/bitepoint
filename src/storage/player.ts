@@ -1,4 +1,4 @@
-import type { SupabaseClient, User } from '@supabase/supabase-js'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 import { parseUsername } from '../shared/playerIdentity'
 
@@ -15,6 +15,8 @@ export interface PlayerProfile {
 export interface PlayerProfileClient {
   readonly current: PlayerProfile | null
   readonly supportsGoogle: boolean
+  /** A failed attempt to reserve a local name after the Google redirect. */
+  readonly claimError: string | null
   ready(): Promise<void>
   claim(username: string): Promise<PlayerProfile>
   /** Headers expected by the leaderboard service, optionally requiring a session. */
@@ -40,6 +42,7 @@ interface DeviceProfileEnvelope {
  */
 export class DevicePlayerProfileClient implements PlayerProfileClient {
   readonly supportsGoogle = false
+  readonly claimError = null
   private profile: DeviceProfile | null
 
   constructor(
@@ -110,12 +113,14 @@ interface SupabaseProfileEnvelope {
 }
 
 /**
- * Production identity: an anonymous Supabase user is the device profile, then
- * Google is linked to that same auth user when the driver chooses to lock it in.
+ * Production identity: the browser keeps a provisional name locally. Google
+ * authentication is the point where the API reserves it and accepts laps.
+ * Existing anonymous sessions can still be linked during the transition.
  */
 export class SupabasePlayerProfileClient implements PlayerProfileClient {
   readonly supportsGoogle = true
   private profile: PlayerProfile | null
+  private claimProblem: string | null = null
   private readyPromise: Promise<void> | null = null
 
   constructor(
@@ -125,18 +130,19 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
     private readonly storage: Storage = window.localStorage,
   ) {
     this.profile = this.load()
-    this.supabase.auth.onAuthStateChange((event, session) => {
+    this.supabase.auth.onAuthStateChange((event) => {
       if (event === 'SIGNED_OUT') {
-        this.forget()
-        return
+        if (this.profile?.locked) this.forget()
       }
-      if (!this.profile || !session?.user) return
-      this.remember({ ...this.profile, locked: isLocked(session.user) })
     })
   }
 
   get current(): PlayerProfile | null {
     return this.profile
+  }
+
+  get claimError(): string | null {
+    return this.claimProblem
   }
 
   ready(): Promise<void> {
@@ -145,38 +151,46 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   }
 
   async claim(username: string): Promise<PlayerProfile> {
-    if (!parseUsername(username)) throw new Error('That username is not valid.')
-    const session = await this.session(true)
-    if (!session) throw new Error('Could not save a profile on this device.')
-    const envelope = await requestJson<SupabaseProfileEnvelope>(
-      `${trimSlash(this.functionUrl)}/v1/profiles`,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          apikey: this.publishableKey,
-          authorization: `Bearer ${session.access_token}`,
-        },
-        body: JSON.stringify({ username }),
-      },
-    )
-    return this.remember(envelope.profile)
+    const parsed = parseUsername(username)
+    if (!parsed) throw new Error('That username is not valid.')
+    this.claimProblem = null
+    const session = await this.session()
+    if (session && !session.user.is_anonymous) return this.claimRemote(parsed.username, session)
+    return this.remember({
+      id: this.profile?.id ?? `local:${crypto.randomUUID()}`,
+      username: parsed.username,
+      locked: false,
+    })
   }
 
   async headers(authenticated = false): Promise<Record<string, string>> {
     const headers: Record<string, string> = { apikey: this.publishableKey }
-    const session = await this.session(authenticated)
+    const session = await this.session()
+    if (authenticated && (!session || session.user.is_anonymous)) {
+      throw new Error('Sign in with Google to save laps to the leaderboard.')
+    }
     if (session) headers.authorization = `Bearer ${session.access_token}`
     return headers
   }
 
   async lockWithGoogle(): Promise<void> {
-    if (!this.profile) throw new Error('Choose a username before locking it in.')
+    if (!this.profile) throw new Error('Choose a driver name before signing in.')
     if (this.profile.locked) return
-    const { error } = await this.supabase.auth.linkIdentity({
-      provider: 'google',
-      options: { redirectTo: redirectUrl() },
-    })
+    const session = await this.session()
+    if (session && !session.user.is_anonymous) {
+      await this.claimRemote(this.profile.username, session)
+      return
+    }
+    const result = session?.user.is_anonymous
+      ? await this.supabase.auth.linkIdentity({
+          provider: 'google',
+          options: { redirectTo: redirectUrl() },
+        })
+      : await this.supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: { redirectTo: redirectUrl() },
+        })
+    const { error } = result
     if (error) throw new Error(error.message)
   }
 
@@ -189,14 +203,17 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   }
 
   async signOut(): Promise<void> {
-    const { error } = await this.supabase.auth.signOut({ scope: 'local' })
-    if (error) throw new Error(error.message)
+    const session = await this.session()
+    if (session) {
+      const { error } = await this.supabase.auth.signOut({ scope: 'local' })
+      if (error) throw new Error(error.message)
+    }
     this.forget()
   }
 
   private async restoreFromSession(): Promise<void> {
-    const session = await this.session(false)
-    if (!session) return
+    const session = await this.session()
+    if (!session || session.user.is_anonymous) return
     try {
       const envelope = await requestJson<SupabaseProfileEnvelope>(
         `${trimSlash(this.functionUrl)}/v1/me`,
@@ -207,31 +224,52 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
           },
         },
       )
-      this.remember({ ...envelope.profile, locked: isLocked(session.user) })
+      this.remember({ ...envelope.profile, locked: true })
+      return
     } catch {
-      // A valid anonymous session may simply not have chosen a username yet.
+      // A newly authenticated driver has no server profile until their local
+      // name is claimed below. A returning driver normally succeeds above.
+    }
+    if (!this.profile || this.profile.locked) return
+    try {
+      await this.claimRemote(this.profile.username, session)
+    } catch (error) {
+      this.claimProblem = error instanceof Error ? error.message : 'That name could not be reserved.'
     }
   }
 
-  private async session(required: boolean): Promise<Session | null> {
+  private async session(): Promise<Session | null> {
     const current = await this.supabase.auth.getSession()
     if (current.error) throw new Error(current.error.message)
-    if (current.data.session || !required) return current.data.session
-    const created = await this.supabase.auth.signInAnonymously()
-    if (created.error || !created.data.session) {
-      throw new Error(created.error?.message ?? 'Could not save a profile on this device.')
-    }
-    return created.data.session
+    return current.data.session
+  }
+
+  private async claimRemote(username: string, session: Session): Promise<PlayerProfile> {
+    const envelope = await requestJson<SupabaseProfileEnvelope>(
+      `${trimSlash(this.functionUrl)}/v1/profiles`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          apikey: this.publishableKey,
+          authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ username }),
+      },
+    )
+    return this.remember({ ...envelope.profile, locked: true })
   }
 
   private remember(profile: PlayerProfile): PlayerProfile {
     this.profile = profile
+    this.claimProblem = null
     save(this.storage, SUPABASE_PROFILE_KEY, profile)
     return profile
   }
 
   private forget(): void {
     this.profile = null
+    this.claimProblem = null
     remove(this.storage, SUPABASE_PROFILE_KEY)
   }
 
@@ -246,10 +284,6 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
 }
 
 type Session = NonNullable<Awaited<ReturnType<SupabaseClient['auth']['getSession']>>['data']['session']>
-
-function isLocked(user: User): boolean {
-  return user.is_anonymous === false
-}
 
 function redirectUrl(): string {
   return `${window.location.origin}${window.location.pathname}`

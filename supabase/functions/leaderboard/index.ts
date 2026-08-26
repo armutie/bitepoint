@@ -87,7 +87,9 @@ async function route(request: Request, cors: Headers): Promise<Response> {
 
   if (request.method === 'POST' && path === '/v1/profiles') {
     const user = await authenticatedUser(request)
-    if (!user) return json({ error: 'A device session is required.' }, 401, cors)
+    if (!user || user.is_anonymous) {
+      return json({ error: 'Sign in with Google to reserve a username.' }, 401, cors)
+    }
     const body = await bodyJson(request)
     if (!body.ok) return json({ error: body.error }, body.status, cors)
     const parsed = parseUsername(body.value.username)
@@ -155,7 +157,9 @@ async function route(request: Request, cors: Headers): Promise<Response> {
 
 async function submitLap(request: Request, cors: Headers): Promise<Response> {
   const user = await authenticatedUser(request)
-  if (!user) return json({ error: 'Claim a username before submitting laps.' }, 401, cors)
+  if (!user || user.is_anonymous) {
+    return json({ error: 'Sign in with Google before saving laps.' }, 401, cors)
+  }
   const current = await player(user.id)
   if (!current) return json({ error: 'Claim a username before submitting laps.' }, 401, cors)
 

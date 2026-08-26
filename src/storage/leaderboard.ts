@@ -172,7 +172,7 @@ export class HttpLeaderboardClient implements LeaderboardClient {
   }
 
   async submit(record: LapRecord, _playerName: string): Promise<LeaderboardEntry | null> {
-    if (!this.profiles.current) return null
+    if (!this.profiles.current?.locked) return null
     const body = await this.request<{ entry: LeaderboardEntry }>('/v1/laps', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

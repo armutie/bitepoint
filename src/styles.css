@@ -1807,18 +1807,19 @@ kbd {
   color: var(--behind);
   font-size: 10px;
 }
-.profile-signout {
+.profile-account-action {
   padding-inline: 14px;
   border-color: transparent;
   background: transparent;
   color: var(--muted);
   font-size: 10px;
 }
-.profile-signout:hover {
+.profile-account-action:hover {
   border-color: var(--edge);
   background: rgba(255, 255, 255, 0.035);
   color: var(--ink);
 }
+.profile-account-action.is-change-name { margin-left: auto; }
 .leaderboard-scope {
   color: var(--dim);
   font-size: 10px;

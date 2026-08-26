@@ -6,8 +6,8 @@ submitted inputs before any time reaches the global board.
 
 ```text
 Browser game
-  |-- anonymous Supabase Auth session (saved on this device)
-  |-- optional Google identity linked to that same user
+  |-- provisional driver name in localStorage
+  |-- Google session when the driver chooses to publish
   |-- recorded lap inputs
   v
 Supabase Edge Function
@@ -23,19 +23,25 @@ Supabase PostgreSQL
 
 ## Identity
 
-- The browser creates an anonymous Auth user only when a name is claimed.
-- Usernames are globally unique case-insensitively. Display case is preserved.
-- Names are 3â€“16 ASCII letters/numbers; `_` and `-` are allowed internally.
+- Choosing a name before signing in only saves that name on the current device.
+  It does not reserve the name or publish a lap.
+- Google sign-in reserves the chosen name and unlocks global lap submission.
+- Reserved usernames are globally unique case-insensitively. Display case is
+  preserved.
+- Names are 3-16 ASCII letters/numbers; `_` and `-` are allowed internally.
 - The Supabase session is persisted by `supabase-js`; no recovery code or
   password is shown to the player.
-- Linking Google upgrades the same anonymous user. Its username, laps, and ID
-  do not move or change.
-- Clearing browser storage loses an unlinked profile. A Google-linked profile
-  can be opened on another device.
+- Before sign-in the profile action is **Change name**, not **Log out**. A local
+  name can be changed freely because it owns nothing globally.
+- After sign-in the profile action is **Log out**. The reserved profile and its
+  laps remain recoverable through the same Google account.
+- Clearing browser storage loses only an unsigned local name. A Google profile
+  can be restored on another device.
 
-Supabase Anonymous Sign-Ins and Manual Identity Linking must be enabled in the
-project's Auth settings. Google itself can remain disabled until the lock-in UI
-is ready to be exercised against a configured OAuth client.
+The Edge Function rejects anonymous users on profile and lap writes, so direct
+anonymous Auth calls cannot squat usernames. Anonymous Sign-Ins and Manual
+Identity Linking may remain enabled only to upgrade profiles created by an
+earlier build; new clients do not create anonymous users.
 
 ## Lap trust and retention
 
@@ -70,8 +76,8 @@ POST /v1/laps
 GET  /health
 ```
 
-Board reads and ghosts are public. Profile and lap routes validate a Supabase
-Auth JWT inside the function. Database tables have RLS enabled and grant no
+Board reads and ghosts are public. Profile and lap routes require a
+non-anonymous Supabase Auth JWT. Database tables have RLS enabled and grant no
 direct browser access; official writes use the function's service role.
 
 ## Supabase deployment
@@ -81,14 +87,14 @@ The GitHub integration reads the `supabase/` directory:
 - `supabase/migrations/20260824000100_leaderboard.sql` creates the schema,
   transactional PB replacement, board query, and submission rate limit.
 - `supabase/functions/leaderboard/index.ts` is the verification API.
-- `supabase/config.toml` enables the function and local anonymous/manual-link
-  Auth behavior.
+- `supabase/config.toml` enables the function and keeps legacy anonymous/manual
+  linking available for local migration testing.
 
 Before enabling **Deploy to production** in the Supabase GitHub integration:
 
-1. enable Anonymous Sign-Ins and Manual Linking in the remote Auth settings;
-2. confirm the connected repository is `armutie/bitepoint`, branch
-   `bitepoint-lab`, working directory `.`;
+1. enable the Google provider in Supabase Auth and configure its OAuth client;
+2. confirm the connected repository is `armutie/bitepoint`, branch `main`,
+   working directory `.`;
 3. push the `supabase/` directory and let the integration apply the migration
    and deploy the function;
 4. set GitHub Actions variables `SUPABASE_URL` and
@@ -111,5 +117,5 @@ npm run api:dev
 Without Supabase browser variables, development uses
 `http://127.0.0.1:8787`. Without `DATABASE_URL`, that API uses temporary
 in-memory storage and resets when it exits. It mirrors the low-friction device
-profile but cannot test Google linking; use the Supabase local stack or the
-connected lab project for that flow.
+profile, but unlike production it reserves the name immediately and cannot test
+Google sign-in. Use the connected Supabase project for the real identity flow.

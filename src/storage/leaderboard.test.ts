@@ -1,15 +1,19 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { initialState } from '../core/car'
 import {
-  PHYSICS_RULESET, PersonalLeaderboardClient, cleanPlayerName, isClean, withRuleset,
+  HttpLeaderboardClient, PHYSICS_RULESET, PersonalLeaderboardClient,
+  cleanPlayerName, isClean, withRuleset,
 } from './leaderboard'
+import type { PlayerProfileClient } from './player'
 import type { LapRecord, RecordKey, RecordStore } from './records'
 import { keyOf } from './records'
 
 const KEY: RecordKey = { trackId: 'balanced_8', easy: false }
 /** The board no longer keys on setup, but a recording still names the one it used. */
 const PRESET = 'legacy'
+
+afterEach(() => vi.unstubAllGlobals())
 
 function lap(time: number, recordedAt: string): LapRecord {
   return {
@@ -76,6 +80,18 @@ describe('leaderboard identity', () => {
     expect(cleanPlayerName('   Ada    Lovelace   ')).toBe('Ada Lovelace')
     expect(cleanPlayerName(' '.repeat(10))).toBe('Driver')
     expect(cleanPlayerName('x'.repeat(30))).toHaveLength(24)
+  })
+
+  it('does not publish a lap for a provisional local name', async () => {
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const profiles = {
+      current: { id: 'local:1', username: 'ApexFox', locked: false },
+    } as unknown as PlayerProfileClient
+
+    await expect(new HttpLeaderboardClient('https://board.example', profiles)
+      .submit(lap(61.2, '2026-08-12T10:00:00.000Z'), 'ApexFox')).resolves.toBeNull()
+    expect(fetchSpy).not.toHaveBeenCalled()
   })
 })
 

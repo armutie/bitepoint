@@ -114,6 +114,9 @@ export class Menu {
   private controlsOpen = false
   private settingsOpen = false
   private profileOpen = false
+  /** Board filters are browsing state; changing them must not rebuild the 3D preview. */
+  private leaderboardTrackId: string
+  private leaderboardEasy: boolean
   /** A local PB the driver explicitly asked to publish after choosing a name. */
   private pendingLeaderboardLap: LapRecord | null
   /**
@@ -149,6 +152,8 @@ export class Menu {
     this.deps = deps
     this.selection = initial
     this.settings = settings
+    this.leaderboardTrackId = initial.trackId
+    this.leaderboardEasy = initial.easy
     this.pendingLeaderboardLap = restorePendingLeaderboardLap(deps.bests)
     this.root = el('div', 'menu')
     this.panel = el('div', 'menu-panel')
@@ -265,7 +270,7 @@ export class Menu {
     settingsBtn.addEventListener('click', () => this.showSettings())
     const leaderboardBtn = el('button', 'btn btn-menu-secondary')
     leaderboardBtn.append(icon('trophy'), text('Leaderboard'))
-    leaderboardBtn.addEventListener('click', () => void this.showLeaderboard())
+    leaderboardBtn.addEventListener('click', () => this.openLeaderboard())
     const controlsBtn = el('button', 'btn btn-menu-secondary btn-controls')
     controlsBtn.append(icon('keyboard'), text('Controls'))
     controlsBtn.addEventListener('click', () => this.showControls())
@@ -343,6 +348,12 @@ export class Menu {
     this.onStart(this.selection)
   }
 
+  private openLeaderboard(): void {
+    this.leaderboardTrackId = this.selection.trackId
+    this.leaderboardEasy = this.selection.easy
+    void this.showLeaderboard()
+  }
+
   /** One timing board, with circuit and rules visible where they are changed. */
   async showLeaderboard(): Promise<void> {
     this.show('full')
@@ -367,12 +378,12 @@ export class Menu {
     body.append(loading)
     this.panel.append(header, filters, body, this.leaderboardFooter())
 
-    const key = { trackId: this.selection.trackId, easy: this.selection.easy }
+    const key = { trackId: this.leaderboardTrackId, easy: this.leaderboardEasy }
     try {
       await this.publishPendingLeaderboardLap()
       const page = await this.deps.leaderboard.list(key)
       // Do not paint a request that resolved after the user moved to another board.
-      if (key.trackId !== this.selection.trackId || key.easy !== this.selection.easy) return
+      if (key.trackId !== this.leaderboardTrackId || key.easy !== this.leaderboardEasy) return
       body.replaceChildren()
       const scope = el('div', 'leaderboard-scope')
       scope.textContent = page.scope === 'global'
@@ -448,7 +459,7 @@ export class Menu {
   private async publishPendingLeaderboardLap(): Promise<void> {
     const lap = this.pendingLeaderboardLap
     const profile = this.deps.profiles?.current
-    if (!lap || !profile) return
+    if (!lap || !profile?.locked) return
     try {
       await this.deps.leaderboard.submit(lap, profile.username)
       this.pendingLeaderboardLap = null
@@ -465,7 +476,7 @@ export class Menu {
     if (scope !== 'global' || !this.deps.profiles) return null
     const local = this.deps.bests.get(keyOf(key)) ?? null
     if (!local) return null
-    if (!this.deps.profiles.current) return local
+    if (!this.deps.profiles.current?.locked) return local
     return this.pendingLeaderboardLap && keyOf(this.pendingLeaderboardLap) === keyOf(key) ? local : null
   }
 
@@ -479,13 +490,13 @@ export class Menu {
     if (current) {
       button.classList.add('is-signed-in')
       const label = el('span', 'leaderboard-login-label')
-      label.textContent = 'Racing as'
+      label.textContent = current.locked ? 'Racing as' : 'Local name'
       const name = el('strong', 'leaderboard-login-name')
       name.textContent = current.username
       button.append(label, name)
       button.title = current.locked
         ? 'Driver profile · protected with Google'
-        : 'Driver profile · saved on this device'
+        : 'Not saved to the leaderboard · sign in with Google to reserve it'
     } else {
       button.textContent = 'Log in to save laps'
     }
@@ -508,12 +519,11 @@ export class Menu {
       const option = document.createElement('option')
       option.value = track.id
       option.textContent = track.label
-      option.selected = track.id === this.selection.trackId
+      option.selected = track.id === this.leaderboardTrackId
       select.append(option)
     }
     select.addEventListener('change', () => {
-      this.selection = { ...this.selection, trackId: select.value, ghostEntryId: null }
-      this.onSelectionChange(this.selection)
+      this.leaderboardTrackId = select.value
       void this.showLeaderboard()
     })
     circuit.append(circuitLabel, select)
@@ -528,13 +538,12 @@ export class Menu {
       const button = el('button', 'leaderboard-mode-option')
       button.type = 'button'
       button.textContent = label
-      const selected = this.selection.easy === easy
+      const selected = this.leaderboardEasy === easy
       button.classList.toggle('is-selected', selected)
       button.setAttribute('aria-pressed', String(selected))
       button.addEventListener('click', () => {
-        if (this.selection.easy === easy) return
-        this.selection = { ...this.selection, easy, ghostEntryId: null }
-        this.onSelectionChange(this.selection)
+        if (this.leaderboardEasy === easy) return
+        this.leaderboardEasy = easy
         void this.showLeaderboard()
       })
       choices.append(button)
@@ -583,7 +592,13 @@ export class Menu {
     ghost.disabled = !entry.ghostAvailable || selected
     ghost.title = entry.ghostAvailable ? 'Use this verified replay as your ghost' : 'Replay unavailable'
     ghost.addEventListener('click', () => {
-      this.selection = { ...this.selection, ghost: true, ghostEntryId: entry.id }
+      this.selection = {
+        ...this.selection,
+        trackId: this.leaderboardTrackId,
+        easy: this.leaderboardEasy,
+        ghost: true,
+        ghostEntryId: entry.id,
+      }
       this.onSelectionChange(this.selection)
       void this.showLeaderboard()
     })
@@ -611,8 +626,8 @@ export class Menu {
     time.textContent = formatTime(record.time)
     const save = el('button', 'btn leaderboard-ghost leaderboard-save')
     save.type = 'button'
-    const signedIn = !!this.deps.profiles?.current
-    save.textContent = signedIn ? 'Retry save' : 'Save this lap'
+    const signedIn = this.deps.profiles?.current?.locked === true
+    save.textContent = signedIn ? 'Retry save' : 'Sign in to save'
     save.addEventListener('click', () => {
       this.pendingLeaderboardLap = record
       rememberPendingLeaderboardLap(record)
@@ -645,10 +660,20 @@ export class Menu {
     const footer = el('footer', 'menu-footer leaderboard-footer')
     const actions = el('div', 'menu-footer-actions')
     const personal = el('button', 'btn')
-    personal.textContent = this.selection.ghostEntryId === null ? 'Following personal best' : 'Use personal best'
-    personal.disabled = this.selection.ghostEntryId === null
+    const followingPersonal =
+      this.selection.trackId === this.leaderboardTrackId &&
+      this.selection.easy === this.leaderboardEasy &&
+      this.selection.ghostEntryId === null
+    personal.textContent = followingPersonal ? 'Following personal best' : 'Use personal best'
+    personal.disabled = followingPersonal
     personal.addEventListener('click', () => {
-      this.selection = { ...this.selection, ghost: true, ghostEntryId: null }
+      this.selection = {
+        ...this.selection,
+        trackId: this.leaderboardTrackId,
+        easy: this.leaderboardEasy,
+        ghost: true,
+        ghostEntryId: null,
+      }
       this.onSelectionChange(this.selection)
       void this.showLeaderboard()
     })
@@ -729,7 +754,7 @@ export class Menu {
   }
 
   /** A focused identity screen, opened only when the driver asks to save laps. */
-  private showProfile(lap?: LapRecord): void {
+  private showProfile(lap?: LapRecord, editName = false): void {
     if (lap) {
       this.pendingLeaderboardLap = lap
       rememberPendingLeaderboardLap(lap)
@@ -754,10 +779,11 @@ export class Menu {
     actions.append(back)
 
     const profiles = this.deps.profiles!
-    if (profiles.current?.locked) {
+    const currentProfile = profiles.current
+    if (currentProfile?.locked) {
       const signOutStatus = el('span', 'profile-signout-status')
       signOutStatus.setAttribute('role', 'status')
-      const signOut = el('button', 'btn profile-signout')
+      const signOut = el('button', 'btn profile-account-action')
       signOut.type = 'button'
       signOut.textContent = 'Log out'
       signOut.addEventListener('click', () => {
@@ -771,19 +797,26 @@ export class Menu {
         })
       })
       actions.append(signOutStatus, signOut)
+    } else if (currentProfile && !editName) {
+      const changeName = el('button', 'btn profile-account-action')
+      changeName.classList.add('is-change-name')
+      changeName.type = 'button'
+      changeName.textContent = 'Change name'
+      changeName.addEventListener('click', () => this.showProfile(undefined, true))
+      actions.append(changeName)
     }
 
-    const profile = this.profilePanel()
+    const profile = this.profilePanel(editName)
     this.panel.append(header, profile, actions)
     ;(profile.querySelector('.profile-input') as HTMLInputElement | null)?.focus()
   }
 
   /** A public name is asked for here, never at boot and never before driving. */
-  private profilePanel(): HTMLElement {
+  private profilePanel(editName = false): HTMLElement {
     const profiles = this.deps.profiles!
     const wrap = el('section', 'leaderboard-profile')
     const current = profiles.current
-    if (current) {
+    if (current && !editName) {
       const label = el('span', 'leaderboard-profile-label')
       label.textContent = 'Racing as'
       const username = el('strong', 'leaderboard-profile-name')
@@ -791,19 +824,19 @@ export class Menu {
       const status = el('span', 'leaderboard-profile-status')
       status.textContent = current.locked
         ? 'Protected with Google · available on your other devices'
-        : 'Saved on this device'
+        : 'Only on this device · not reserved'
       wrap.append(label, username, status)
       if (profiles.supportsGoogle && !current.locked) {
         const recovery = profileRecovery(
-          'Recovery',
-          'Use this profile on another device or after clearing browser data.',
+          'Save to leaderboard',
+          profiles.claimError ?? 'Sign in to reserve this name and publish your laps.',
         )
         const recoveryCopy = recovery.querySelector<HTMLElement>('.profile-recovery-copy')!
         const lock = googleSignInButton()
         lock.addEventListener('click', () => {
           lock.disabled = true
           recoveryCopy.textContent = 'Opening Google…'
-          void profiles.lockWithGoogle().catch((reason: unknown) => {
+          void profiles.lockWithGoogle().then(() => this.showProfile()).catch((reason: unknown) => {
             recoveryCopy.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
             lock.disabled = false
           })
@@ -816,11 +849,15 @@ export class Menu {
 
     const copy = el('div', 'leaderboard-profile-copy')
     const title = el('strong', 'leaderboard-profile-title')
-    title.textContent = this.pendingLeaderboardLap ? 'Save this lap' : 'Choose a driver name'
+    title.textContent = editName
+      ? 'Change driver name'
+      : this.pendingLeaderboardLap ? 'Save this lap' : 'Choose a driver name'
     const blurb = el('span', 'leaderboard-profile-blurb')
-    blurb.textContent = this.pendingLeaderboardLap
-      ? `${formatTime(this.pendingLeaderboardLap.time)} is safe on this device. Choose a name to publish it.`
-      : 'No password. Pick one unique name and this device remembers it automatically.'
+    blurb.textContent = editName
+      ? 'This name is local. It is not reserved until you sign in with Google.'
+      : this.pendingLeaderboardLap
+        ? `${formatTime(this.pendingLeaderboardLap.time)} is safe on this device. Choose a local name; Google sign-in publishes it.`
+        : 'Choose a local driver name. Nothing is published until you sign in with Google.'
     copy.append(title, blurb)
 
     const form = document.createElement('form')
@@ -832,18 +869,20 @@ export class Menu {
     username.maxLength = 16
     username.spellcheck = false
     username.setAttribute('aria-label', 'Username')
+    if (editName && current) username.value = current.username
 
     form.append(username)
 
     const submit = el('button', 'btn btn-primary profile-submit')
     submit.type = 'submit'
-    submit.textContent = 'Save name'
+    submit.textContent = editName ? 'Change name' : 'Use name'
     form.append(submit)
 
     const hint = el('span', 'leaderboard-profile-hint')
     hint.textContent = usernameHint
     const error = el('span', 'leaderboard-profile-error')
     error.setAttribute('role', 'alert')
+    error.textContent = profiles.claimError ?? ''
 
     form.addEventListener('submit', (event) => {
       event.preventDefault()
@@ -860,7 +899,7 @@ export class Menu {
     const help = el('div', 'leaderboard-profile-help')
     help.append(hint, error)
     wrap.append(copy, form, help)
-    if (profiles.supportsGoogle) {
+    if (profiles.supportsGoogle && !editName) {
       const recovery = profileRecovery(
         'Already have a profile?',
         'Bring back a driver name you protected with Google.',
@@ -885,27 +924,27 @@ export class Menu {
     wrap.classList.add('is-claimed')
     const copy = el('div', 'leaderboard-profile-copy')
     const title = el('strong', 'leaderboard-profile-title')
-    title.textContent = `${profile.username} is yours`
+    title.textContent = profile.locked ? `${profile.username} is yours` : `${profile.username} saved locally`
     const blurb = el('span', 'leaderboard-profile-blurb')
     blurb.textContent = profile.locked
       ? 'Protected with Google and available on your other devices.'
       : this.pendingLeaderboardLap
-        ? 'Your name is saved on this device. Continue to verify and publish your lap.'
-        : 'Saved on this device. Protect it with Google if you want to use it elsewhere.'
+        ? 'Your lap is still only on this device. Sign in with Google to reserve the name and publish it.'
+        : 'Nothing is published yet. Sign in with Google to reserve this name.'
     copy.append(title, blurb)
 
     const profiles = this.deps.profiles!
     if (profiles.supportsGoogle && !profile.locked) {
       const recovery = profileRecovery(
-        'Recovery',
-        'Make this driver profile available on your other devices.',
+        'Save to leaderboard',
+        'Reserve this name and publish your laps with Google.',
       )
       const recoveryCopy = recovery.querySelector<HTMLElement>('.profile-recovery-copy')!
       const lock = googleSignInButton()
       lock.addEventListener('click', () => {
         lock.disabled = true
         recoveryCopy.textContent = 'Opening Google…'
-        void profiles.lockWithGoogle().catch((reason: unknown) => {
+        void profiles.lockWithGoogle().then(() => this.showProfile()).catch((reason: unknown) => {
           recoveryCopy.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
           lock.disabled = false
         })
@@ -917,7 +956,9 @@ export class Menu {
     }
 
     const done = el('button', 'btn btn-primary')
-    done.textContent = this.pendingLeaderboardLap ? 'Save lap to leaderboard' : 'Continue to leaderboard'
+    done.textContent = profile.locked && this.pendingLeaderboardLap
+      ? 'Save lap to leaderboard'
+      : 'Continue to leaderboard'
     done.addEventListener('click', () => this.onProfileClaimed())
     this.panel.querySelector('.profile-actions')?.replaceChildren(done)
   }

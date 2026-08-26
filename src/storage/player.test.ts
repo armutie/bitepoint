@@ -53,7 +53,14 @@ describe('browser player profile', () => {
     }))
     const signOut = vi.fn(async () => ({ error: null }))
     const supabase = {
-      auth: { onAuthStateChange: vi.fn(), signOut },
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: 'jwt', user: { is_anonymous: false } } },
+          error: null,
+        })),
+        signOut,
+      },
     } as unknown as SupabaseClient
     const client = new SupabasePlayerProfileClient(
       supabase,
@@ -67,6 +74,59 @@ describe('browser player profile', () => {
     expect(signOut).toHaveBeenCalledOnce()
     expect(client.current).toBeNull()
     expect(storage.getItem('bitepoint:supabase-profile:v1')).toBeNull()
+  })
+
+  it('keeps a driver name local until Google is authenticated', async () => {
+    const storage = new MemoryStorage()
+    const fetchSpy = vi.fn()
+    vi.stubGlobal('fetch', fetchSpy)
+    const supabase = {
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({ data: { session: null }, error: null })),
+      },
+    } as unknown as SupabaseClient
+    const client = new SupabasePlayerProfileClient(
+      supabase,
+      'publishable-key',
+      'https://board.example',
+      storage,
+    )
+
+    await expect(client.claim('ApexFox')).resolves.toMatchObject({
+      username: 'ApexFox', locked: false,
+    })
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await expect(client.headers(true)).rejects.toThrow('Sign in with Google')
+  })
+
+  it('reserves the name through the API once Google is authenticated', async () => {
+    const storage = new MemoryStorage()
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      profile: { id: 'google-user', username: 'ApexFox', locked: true },
+    }), { status: 201, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const supabase = {
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: 'jwt', user: { is_anonymous: false } } },
+          error: null,
+        })),
+      },
+    } as unknown as SupabaseClient
+    const client = new SupabasePlayerProfileClient(
+      supabase,
+      'publishable-key',
+      'https://board.example',
+      storage,
+    )
+
+    await expect(client.claim('ApexFox')).resolves.toMatchObject({
+      id: 'google-user', username: 'ApexFox', locked: true,
+    })
+    expect(fetchSpy).toHaveBeenCalledOnce()
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe('https://board.example/v1/profiles')
   })
 })
 
