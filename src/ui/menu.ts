@@ -73,10 +73,6 @@ export const RELEASED_TRACKS: readonly string[] =
 export const RELEASED_PRESETS: readonly PresetName[] = ['legacy', 'classic']
 const CONTROLS_SEEN_KEY = 'car-racing:controls-seen'
 const PENDING_LEADERBOARD_LAP_KEY = 'bitepoint:pending-leaderboard-lap:v1'
-const LATEST_UPDATE_ID = '2026-08-global-leaderboards'
-const UPDATE_SEEN_KEY = 'bitepoint:update-seen:v1'
-/** Preliminary creator link; keep it in one place until the footer is approved. */
-const CREATOR_X_URL = 'https://x.com/armutie'
 
 export interface MenuDeps {
   tracks: TrackManifestEntry[]
@@ -119,7 +115,6 @@ export class Menu {
   private controlsOpen = false
   private settingsOpen = false
   private profileOpen = false
-  private updatesOpen = false
   /** Board filters are browsing state; changing them must not rebuild the 3D preview. */
   private leaderboardTrackId: string
   private leaderboardEasy: boolean
@@ -208,10 +203,6 @@ export class Menu {
       void this.showLeaderboard()
       return true
     }
-    if (this.updatesOpen) {
-      this.showMain()
-      return true
-    }
     if (!this.controlsOpen && !this.settingsOpen) return false
     this.showMain()
     return true
@@ -223,12 +214,10 @@ export class Menu {
     this.root.classList.remove('menu-controls')
     this.root.classList.remove('menu-profile')
     this.root.classList.remove('menu-session-summary')
-    this.root.classList.remove('menu-updates')
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
     this.profileOpen = false
-    this.updatesOpen = false
     // Every screen comes through here, so this is the one place the preview has
     // to be put away — including the case where the pointer left the slider by
     // way of a click that changed screens, which fires no `pointerleave`.
@@ -292,112 +281,11 @@ export class Menu {
     mainActions.append(secondaryActions, drive)
     footer.append(this.renderSetup(), mainActions)
 
-    this.panel.append(header, body, footer, this.creatorLinks())
+    this.panel.append(header, body, footer)
     // Reading scrollHeight forces the layout the assignment needs: set before
     // the browser has measured the new content, scrollTop clamps to 0.
     void body.scrollHeight
     body.scrollTop = priorScroll
-  }
-
-  /** Creator links stay below the controls: present, but never a fourth action. */
-  private creatorLinks(): HTMLElement {
-    const nav = el('nav', 'menu-creator-links')
-    nav.setAttribute('aria-label', 'Bite Point links')
-
-    const updates = el('button', 'menu-creator-link menu-update-link')
-    updates.type = 'button'
-    updates.textContent = "What's New"
-    if (!hasSeenLatestUpdate()) {
-      const badge = el('span', 'menu-update-badge')
-      badge.textContent = 'New'
-      updates.append(badge)
-    }
-    updates.addEventListener('click', () => this.showUpdates())
-
-    const divider = el('span', 'menu-creator-divider')
-    divider.setAttribute('aria-hidden', 'true')
-
-    const x = document.createElement('a')
-    x.className = 'menu-creator-link menu-x-link'
-    x.href = CREATOR_X_URL
-    x.target = '_blank'
-    x.rel = 'noopener noreferrer'
-    x.setAttribute('aria-label', 'Follow armutie on X (opens in a new tab)')
-    x.textContent = 'X'
-
-    nav.append(updates, divider, x)
-    return nav
-  }
-
-  /** Release notes are player-facing: what changed, and why it is useful. */
-  private showUpdates(): void {
-    markLatestUpdateSeen()
-    this.show('dialog')
-    this.root.classList.add('menu-updates')
-    this.updatesOpen = true
-    this.panel.replaceChildren()
-
-    const header = el('header', 'menu-header updates-header')
-    const eyebrow = el('div', 'eyebrow')
-    eyebrow.textContent = '26 Aug 2026 · Current release'
-    const title = el('h1', 'menu-title')
-    title.textContent = "What's New"
-    header.append(eyebrow, title)
-
-    const release = el('article', 'updates-release')
-    const releaseTitle = el('h2', 'updates-release-title')
-    releaseTitle.textContent = 'Global timing is live'
-    const intro = el('p', 'updates-intro')
-    intro.textContent =
-      'Your quickest laps can now leave the browser and compete on one verified leaderboard.'
-    const notes = el('ul', 'updates-list')
-    for (const [label, copy] of [
-      ['Verified laps', 'Every submitted replay is simulated again before its time reaches the board.'],
-      ['Race the field', 'Choose any available leaderboard lap and use it as your ghost.'],
-      ['Sign in when it matters', 'Drive locally first; Google only enters when you choose to reserve a name and publish.'],
-      ['Session review', 'A compact lap chart shows how the run developed and makes lower lap times read as better.'],
-    ] as const) {
-      const item = el('li', 'updates-item')
-      const itemLabel = el('strong', 'updates-item-label')
-      itemLabel.textContent = label
-      const itemCopy = el('span', 'updates-item-copy')
-      itemCopy.textContent = copy
-      item.append(itemLabel, itemCopy)
-      notes.append(item)
-    }
-    release.append(releaseTitle, intro, notes)
-
-    const creator = el('aside', 'updates-creator')
-    const creatorCopy = el('div', 'updates-creator-copy')
-    const creatorLabel = el('strong', 'updates-creator-label')
-    creatorLabel.textContent = 'Follow the build'
-    const creatorBlurb = el('span', 'updates-creator-blurb')
-    creatorBlurb.textContent = 'New circuits, handling work, and release notes from the person making Bite Point.'
-    creatorCopy.append(creatorLabel, creatorBlurb)
-    const creatorActions = el('div', 'updates-creator-actions')
-    const follow = document.createElement('a')
-    follow.className = 'btn updates-follow'
-    follow.href = CREATOR_X_URL
-    follow.target = '_blank'
-    follow.rel = 'noopener noreferrer'
-    follow.textContent = 'Follow on X'
-    const support = el('span', 'updates-support')
-    const supportLabel = el('span', 'updates-support-label')
-    supportLabel.textContent = 'Support development'
-    const supportState = el('span', 'updates-support-state')
-    supportState.textContent = 'Coming soon'
-    support.append(supportLabel, supportState)
-    creatorActions.append(follow, support)
-    creator.append(creatorCopy, creatorActions)
-
-    const actions = el('div', 'menu-actions updates-actions')
-    const back = el('button', 'btn btn-primary')
-    back.type = 'button'
-    back.textContent = 'Back'
-    back.addEventListener('click', () => this.showMain())
-    actions.append(back)
-
-    this.panel.append(header, release, creator, actions)
   }
 
   /** Full reference, deliberately one step away from the selection screen. */
@@ -1736,22 +1624,6 @@ function markControlsSeen(): void {
     window.localStorage.setItem(CONTROLS_SEEN_KEY, '1')
   } catch {
     // A blocked store may repeat the one-time card; controls still work.
-  }
-}
-
-function hasSeenLatestUpdate(): boolean {
-  try {
-    return window.localStorage.getItem(UPDATE_SEEN_KEY) === LATEST_UPDATE_ID
-  } catch {
-    return false
-  }
-}
-
-function markLatestUpdateSeen(): void {
-  try {
-    window.localStorage.setItem(UPDATE_SEEN_KEY, LATEST_UPDATE_ID)
-  } catch {
-    // The release notes still open; only the one-time New marker may return.
   }
 }
 
