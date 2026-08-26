@@ -78,3 +78,20 @@ describe('track geometry matches Python', () => {
     })
   }
 })
+
+describe('sector timing lines', () => {
+  it('keeps equal thirds as the fallback for existing baked tracks', () => {
+    const track = loadBaked('balanced_8')
+    expect(track.sectorBoundaries[0]).toBeCloseTo(track.length / 3, 9)
+    expect(track.sectorBoundaries[1]).toBeCloseTo((track.length * 2) / 3, 9)
+  })
+
+  it('uses Silverstone\'s authored FIA sector positions', () => {
+    const track = loadBaked('silverstone')
+    expect(track.sectorBoundaries).toEqual([1799.6, 4247.2])
+    expect(track.sectorAt(1799.5)).toBe(0)
+    expect(track.sectorAt(1799.6)).toBe(1)
+    expect(track.sectorAt(4247.1)).toBe(1)
+    expect(track.sectorAt(4247.2)).toBe(2)
+  })
+})

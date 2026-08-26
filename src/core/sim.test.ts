@@ -3,8 +3,8 @@
  *
  * The rules are ported from ``racing/env.py`` and are what make a browser lap
  * and a Python lap the same thing: the clock arms on the first crossing rather
- * than at the spawn, any wheel off the road voids the lap, sectors are thirds of
- * the arc length.
+ * than at the spawn, any wheel off the road voids the lap, and sectors close at
+ * the circuit's authored timing lines (or equal thirds on legacy tracks).
  *
  * The replay test is the important one. If a recorded lap re-runs to a different
  * result then ghosts drift, and a server could not check a submitted time by
@@ -126,6 +126,35 @@ describe('lap timing', () => {
       // same clock, so this is not an approximation.
       expect(Math.abs(sum - lap.time)).toBeLessThan(1e-9)
     }
+  })
+
+  it('closes Silverstone sectors at its authored timing lines', () => {
+    const track = loadTrack('silverstone')
+    const sim = new TimeAttackSim(track, handlingPreset('f1'), 'silverstone', 'f1')
+    const closures: { sector: number; s: number }[] = []
+    const laps = []
+
+    for (let i = 0; i < 45000 && laps.length < 1; i++) {
+      const [steer, throttle] = autopilot(sim)
+      const result = sim.step(steer, throttle)
+      if (result.sectorClosed !== null && !result.lapCompleted) {
+        closures.push({
+          sector: result.sectorClosed,
+          s: track.project(sim.car.s.x, sim.car.s.y).s,
+        })
+      }
+      if (result.lapCompleted) laps.push(result.lapCompleted)
+    }
+
+    expect(closures.map((entry) => entry.sector)).toEqual([0, 1])
+    for (const [index, boundary] of track.sectorBoundaries.entries()) {
+      const closedAt = closures[index]!.s
+      expect(closedAt).toBeGreaterThanOrEqual(boundary)
+      expect(closedAt - boundary).toBeLessThan(2)
+    }
+    expect(laps).toHaveLength(1)
+    expect(laps[0]!.valid).toBe(true)
+    expect(laps[0]!.sectors.every((sector) => sector !== null)).toBe(true)
   })
 
   it('tracks a personal best across laps, and only from valid ones', () => {

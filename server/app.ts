@@ -7,6 +7,7 @@ import balanced8 from '../public/tracks/balanced_8.json'
 import power3 from '../public/tracks/power_3.json'
 import power4 from '../public/tracks/power_4.json'
 import power8 from '../public/tracks/power_8.json'
+import silverstone from '../public/tracks/silverstone.json'
 import { applyEasyAids, handlingPreset, type PresetName } from '../src/core/carParams'
 import { lapUsedTc, verifyLapRecording } from '../src/core/sim'
 import { Track, type TrackData } from '../src/core/track'
@@ -19,7 +20,7 @@ import {
 import type { LeaderboardRepository, Player } from './repository'
 
 const TRACKS = new Map(
-  [balanced8, power3, power4, power8]
+  [balanced8, power3, power4, power8, silverstone]
     .map((data) => new Track(data as TrackData))
     .map((track) => [track.id, track]),
 )

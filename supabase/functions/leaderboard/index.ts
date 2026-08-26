@@ -4,6 +4,7 @@ import balanced8 from '../../../public/tracks/balanced_8.json' with { type: 'jso
 import power3 from '../../../public/tracks/power_3.json' with { type: 'json' }
 import power4 from '../../../public/tracks/power_4.json' with { type: 'json' }
 import power8 from '../../../public/tracks/power_8.json' with { type: 'json' }
+import silverstone from '../../../public/tracks/silverstone.json' with { type: 'json' }
 import { applyEasyAids, handlingPreset, type PresetName } from '../../../src/core/carParams.ts'
 import { lapUsedTc, verifyLapRecording } from '../../../src/core/sim.ts'
 import { Track, type TrackData } from '../../../src/core/track.ts'
@@ -14,7 +15,7 @@ import {
 } from '../../../src/storage/records.ts'
 
 const TRACKS = new Map(
-  [balanced8, power3, power4, power8]
+  [balanced8, power3, power4, power8, silverstone]
     .map((data) => new Track(data as TrackData))
     .map((track) => [track.id, track]),
 )

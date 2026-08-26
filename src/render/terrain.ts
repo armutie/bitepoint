@@ -254,7 +254,11 @@ export function buildTerrain(track: Track): Terrain {
     // far enough out that the wall base itself stays within centimetres.
     // Never lift the grass through the driving surface. Croft Bay's
     // sector-three bank previously left an 8 mm tail under the tarmac edge.
-    const bermEdgeFade = smooth(1, 12, d)
+    // Keep the inner tail flat for one coarse ground-mesh cell. Otherwise a
+    // raised vertex outside a tight bend can interpolate a grass wedge through
+    // the road even though the analytic height is exactly zero on the tarmac.
+    // The bank still reaches full height at its authored 30 m centre.
+    const bermEdgeFade = smooth(18, 30, d)
     for (const b of berms) {
       const r2 = (x - b.x) ** 2 + (y - b.y) ** 2
       h += b.amp * Math.exp(-r2 / (b.sigma * b.sigma)) * bermEdgeFade

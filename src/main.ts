@@ -681,9 +681,8 @@ async function boot(): Promise<void> {
           redlineRpm: p.redlineRpm,
           carX: sim.car.s.x,
           carY: sim.car.s.y,
-          // Which sector the car is in, from how far round it is. The sim keeps
-          // this privately for its splits; the map only needs the third.
-          sector: Math.min(2, Math.floor(sim.lapFraction * 3)),
+          // Keep the map tint on the same authored timing sectors as the sim.
+          sector: sim.track.sectorAt(sim.lapFraction * sim.track.length),
           ghostX: ghostDrawn ? ghostDrawn.x : null,
           ghostY: ghostDrawn ? ghostDrawn.y : null,
           tcLevel,
@@ -885,7 +884,7 @@ async function loadBests(store: LocalRecordStore): Promise<Map<string, LapRecord
 
 function restoreSelection(manifest: TrackManifestEntry[]): Selection {
   // Whatever was stored (or whatever the manifest offers) is clamped to the
-  // four released circuits. The default car is whatever leads
+  // released circuits. The default car is whatever leads
   // `RELEASED_PRESETS` — currently `legacy`/F1-Test, the tune the lap records
   // were set on.
   //

@@ -34,4 +34,31 @@ describe('terrain road clearance', () => {
     const y = pose.y + Math.cos(pose.yaw) * lateral
     expect(terrain.height(x, y)).toBeGreaterThan(4)
   })
+
+  it('keeps the Silverstone Becketts ground cell flat beside the road', () => {
+    const track = loadTrack('silverstone')
+    const terrain = buildTerrain(track)
+
+    // A coarse ground vertex about 14 m beyond the left edge used to inherit
+    // 60 cm of the spectator bank. Its triangle bridged that height back across
+    // the tarmac around s=4028, exposing a grass wedge on the driving surface.
+    for (let s = 3980; s <= 4080; s += 2) {
+      const pose = track.poseAt(s)
+      const half = track.halfAt(s)
+      for (const beyond of [0, 6, 12, 18]) {
+        const lateral = half + beyond
+        const x = pose.x - Math.sin(pose.yaw) * lateral
+        const y = pose.y + Math.cos(pose.yaw) * lateral
+        expect(terrain.height(x, y), `ground at s=${s}, beyond=${beyond}`).toBeLessThan(1e-9)
+      }
+    }
+
+    // The fix trims only the inward tail; the bank itself remains.
+    const corner = terrain.corners.find((candidate) => Math.abs(candidate.s - 4032) < 3)!
+    const pose = track.poseAt(corner.s)
+    const lateral = -Math.sign(corner.k) * (track.halfAt(corner.s) + 30)
+    const x = pose.x - Math.sin(pose.yaw) * lateral
+    const y = pose.y + Math.cos(pose.yaw) * lateral
+    expect(terrain.height(x, y)).toBeGreaterThan(4)
+  })
 })

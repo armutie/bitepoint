@@ -562,9 +562,11 @@ export class TimeAttackSim {
       this.beginSectors()
     } else if (this.timingArmed) {
       // Mid-lap sector boundary.
-      const boundary = (this.track.length / SECTORS) * (this.sector + 1)
-      if (this.sector < SECTORS - 1 && this.lapProgress >= boundary) {
-        sectorClosed = this.closeSector(this.currentLapTime)
+      if (this.sector < SECTORS - 1) {
+        const boundary = this.track.sectorBoundaries[this.sector]!
+        if (this.lapProgress >= boundary) {
+          sectorClosed = this.closeSector(this.currentLapTime)
+        }
       }
     }
 

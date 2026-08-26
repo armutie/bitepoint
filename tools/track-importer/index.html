@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d0f" />
+    <title>Track Trace — Bite Point Lab</title>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <a class="brand" href="/" aria-label="Back to Bite Point">
+          <span class="brand-mark">BP</span>
+          <span>Bite Point <em>Lab</em></span>
+        </a>
+        <div class="tool-title">
+          <span>Track tool 01</span>
+          <strong>Image trace</strong>
+        </div>
+      </header>
+
+      <section class="intro">
+        <p class="eyebrow">Reference in. Circuit out.</p>
+        <h1>Keep the shape.<br />Lose the guesswork.</h1>
+        <p class="lede">Upload a clean top-down circuit map. The tracer isolates its route, finds the centreline, and bakes it into Bite Point’s existing track format.</p>
+      </section>
+
+      <section class="workbench">
+        <div class="stage-column">
+          <div class="stage" id="drop-zone">
+            <canvas id="preview" aria-label="Track image and extracted centreline"></canvas>
+            <label class="empty-state" id="empty-state" for="image-file">
+              <span class="upload-icon" aria-hidden="true">↗</span>
+              <strong>Drop a circuit map here</strong>
+              <span>or choose a PNG / JPG</span>
+            </label>
+            <div class="busy" id="busy" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <strong>Tracing circuit</strong>
+              <span>Separating the route from labels and markers…</span>
+            </div>
+            <input id="image-file" type="file" accept="image/png,image/jpeg,image/webp" />
+          </div>
+
+          <div class="stage-bar">
+            <p id="stage-help">Use a clean top-down map with a high-contrast road or sector line.</p>
+            <button class="text-button" id="replace-image" type="button" disabled>Replace image</button>
+          </div>
+
+          <div class="readout" id="readout" hidden>
+            <div><span>Trace</span><strong id="trace-points">—</strong></div>
+            <div><span>Output</span><strong id="output-points">—</strong></div>
+            <div><span>Scale</span><strong id="scale-readout">—</strong></div>
+            <div><span>Direction</span><strong id="direction-readout">—</strong></div>
+          </div>
+        </div>
+
+        <form class="controls" id="controls">
+          <section class="control-section">
+            <div class="section-heading">
+              <span>01</span>
+              <div><strong>Find the route</strong><small>Tune only if the trace breaks.</small></div>
+            </div>
+            <label>
+              <span>Reference style</span>
+              <select id="mask-mode">
+                <option value="black-line" selected>Black line on light background</option>
+                <option value="coloured">Coloured sector line</option>
+                <option value="bright">Bright / white line</option>
+                <option value="dark-road">Dark road ribbon</option>
+              </select>
+            </label>
+            <div class="two-up">
+              <label>
+                <span>Join gaps <output id="gap-output">1 px</output></span>
+                <input id="gap-radius" type="range" min="0" max="10" value="1" />
+              </label>
+              <label>
+                <span>Smoothing <output id="smooth-output">4</output></span>
+                <input id="smoothing" type="range" min="0" max="8" value="4" />
+              </label>
+            </div>
+            <button class="secondary-button" id="trace-button" type="button" disabled>Trace again</button>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>02</span>
+              <div><strong>Set the lap</strong><small>Click the map to move start / finish.</small></div>
+            </div>
+            <div class="direction-control" role="group" aria-label="Lap direction">
+              <button class="direction active" data-direction="clockwise" type="button">↻ Clockwise</button>
+              <button class="direction" data-direction="counterclockwise" type="button">↺ Anti-clockwise</button>
+            </div>
+            <div class="three-up">
+              <label>
+                <span>Lap length</span>
+                <div class="unit-input"><input id="track-length" type="number" min="300" max="20000" value="5891" /><span>m</span></div>
+              </label>
+              <label>
+                <span>Road width</span>
+                <div class="unit-input"><input id="road-width" type="number" min="5" max="30" step="0.5" value="15" /><span>m</span></div>
+              </label>
+              <label>
+                <span>Turns</span>
+                <input id="corner-count" type="number" min="1" max="60" value="18" />
+              </label>
+            </div>
+          </section>
+
+          <section class="control-section">
+            <div class="section-heading">
+              <span>03</span>
+              <div><strong>Name and export</strong><small>Produces the same JSON the game already loads.</small></div>
+            </div>
+            <div class="two-up names">
+              <label><span>Track name</span><input id="track-name" type="text" value="Silverstone" /></label>
+              <label><span>Track id</span><input id="track-id" type="text" value="silverstone" spellcheck="false" /></label>
+            </div>
+            <label><span>Description</span><textarea id="track-blurb" rows="2">Fast, technical, and traced directly from the circuit reference.</textarea></label>
+            <p class="error" id="error" role="alert" hidden></p>
+            <button class="primary-button" id="download" type="button" disabled>
+              <span>Download track JSON</span><span aria-hidden="true">↓</span>
+            </button>
+            <button class="manifest-button" id="copy-manifest" type="button" disabled>Copy manifest entry</button>
+          </section>
+        </form>
+      </section>
+
+      <footer>
+        <span>Local development tool</span>
+        <span>Nothing is uploaded</span>
+      </footer>
+    </main>
+    <script type="module" src="/src/tools/trackImporterApp.ts"></script>
+  </body>
+</html>

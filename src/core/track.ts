@@ -22,6 +22,8 @@ export interface TrackData {
   seed: number
   width: number
   length: number
+  /** Arc-length positions of the S1/S2 and S2/S3 timing lines. */
+  sectorBoundaries?: [number, number]
   centerline: [number, number][]
   halfRing: number[]
   /** Per-vertex gap from painted edge to barrier wall. Absent in older bakes. */
@@ -68,6 +70,8 @@ export class Track {
   readonly seed: number
   readonly width: number
   readonly brakeMarkers: readonly BrakeMarker[]
+  /** Arc-length positions of the two intermediate timing lines. */
+  readonly sectorBoundaries: readonly [number, number]
 
   /** (N, 2) flattened as x0,y0,x1,y1,... — an open ring; last joins to first. */
   readonly cx: Float64Array
@@ -179,6 +183,19 @@ export class Track {
     }
     this.length = acc
 
+    const sectorBoundaries = data.sectorBoundaries ?? [acc / 3, (acc * 2) / 3]
+    const [sectorOneEnd, sectorTwoEnd] = sectorBoundaries
+    if (
+      !Number.isFinite(sectorOneEnd)
+      || !Number.isFinite(sectorTwoEnd)
+      || sectorOneEnd <= 0
+      || sectorOneEnd >= sectorTwoEnd
+      || sectorTwoEnd >= acc
+    ) {
+      throw new Error(`Invalid sector boundaries for track ${data.id}`)
+    }
+    this.sectorBoundaries = [sectorOneEnd, sectorTwoEnd]
+
     // Per-segment curvature (turn rate, rad/m): how fast the heading swings.
     this.curvature = new Float64Array(n)
     this.signedCurvature = new Float64Array(n)
@@ -211,6 +228,14 @@ export class Track {
       y: this.cy[0]!,
       yaw: Math.atan2(this.tanY[0]!, this.tanX[0]!),
     }
+  }
+
+  /** The authored timing sector at arc length `s` (0-based). */
+  sectorAt(s: number): 0 | 1 | 2 {
+    const w = pyMod(s, this.length)
+    if (w < this.sectorBoundaries[0]) return 0
+    if (w < this.sectorBoundaries[1]) return 1
+    return 2
   }
 
   /**
