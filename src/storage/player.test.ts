@@ -128,6 +128,71 @@ describe('browser player profile', () => {
     expect(fetchSpy).toHaveBeenCalledOnce()
     expect(String(fetchSpy.mock.calls[0]?.[0])).toBe('https://board.example/v1/profiles')
   })
+
+  it('signs out a legacy anonymous session before entering the existing Google account', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('bitepoint:supabase-profile:v1', JSON.stringify({
+      id: 'local:1', username: 'LocalName', locked: false,
+    }))
+    const signOut = vi.fn(async () => ({ error: null }))
+    const signInWithOAuth = vi.fn(async () => ({ data: { provider: 'google', url: null }, error: null }))
+    vi.stubGlobal('window', { location: { origin: 'https://armutie.github.io', pathname: '/bitepoint/' } })
+    const supabase = {
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: 'anonymous-jwt', user: { is_anonymous: true } } },
+          error: null,
+        })),
+        signOut,
+        signInWithOAuth,
+        linkIdentity: vi.fn(),
+      },
+    } as unknown as SupabaseClient
+    const client = new SupabasePlayerProfileClient(
+      supabase, 'publishable-key', 'https://board.example', storage,
+    )
+
+    await client.lockWithGoogle()
+
+    expect(signOut).toHaveBeenCalledWith({ scope: 'local' })
+    expect(signInWithOAuth).toHaveBeenCalledWith({
+      provider: 'google',
+      options: { redirectTo: 'https://armutie.github.io/bitepoint/' },
+    })
+    expect(supabase.auth.linkIdentity).not.toHaveBeenCalled()
+    expect(client.current).toMatchObject({ username: 'LocalName', locked: false })
+  })
+
+  it('restores the existing Google username over the provisional local name', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('bitepoint:supabase-profile:v1', JSON.stringify({
+      id: 'local:1', username: 'LocalName', locked: false,
+    }))
+    const fetchSpy = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({
+      profile: { id: 'google-user', username: 'OriginalName', locked: true },
+    }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const supabase = {
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: 'google-jwt', user: { is_anonymous: false } } },
+          error: null,
+        })),
+      },
+    } as unknown as SupabaseClient
+    const client = new SupabasePlayerProfileClient(
+      supabase, 'publishable-key', 'https://board.example', storage,
+    )
+
+    await client.ready()
+
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe('https://board.example/v1/me')
+    expect(client.current).toEqual({
+      id: 'google-user', username: 'OriginalName', locked: true,
+    })
+  })
 })
 
 class MemoryStorage implements Storage {

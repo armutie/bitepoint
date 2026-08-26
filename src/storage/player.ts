@@ -8,7 +8,7 @@ const SUPABASE_PROFILE_KEY = 'bitepoint:supabase-profile:v1'
 export interface PlayerProfile {
   id: string
   username: string
-  /** A linked identity makes the name recoverable on another device. */
+  /** A Google identity makes the name recoverable on another device. */
   locked: boolean
 }
 
@@ -115,7 +115,8 @@ interface SupabaseProfileEnvelope {
 /**
  * Production identity: the browser keeps a provisional name locally. Google
  * authentication is the point where the API reserves it and accepts laps.
- * Existing anonymous sessions can still be linked during the transition.
+ * A leftover anonymous session is discarded before OAuth so an existing
+ * Google identity can restore its original profile instead of failing to link.
  */
 export class SupabasePlayerProfileClient implements PlayerProfileClient {
   readonly supportsGoogle = true
@@ -181,16 +182,18 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
       await this.claimRemote(this.profile.username, session)
       return
     }
-    const result = session?.user.is_anonymous
-      ? await this.supabase.auth.linkIdentity({
-          provider: 'google',
-          options: { redirectTo: redirectUrl() },
-        })
-      : await this.supabase.auth.signInWithOAuth({
-          provider: 'google',
-          options: { redirectTo: redirectUrl() },
-        })
-    const { error } = result
+    if (session?.user.is_anonymous) {
+      // Earlier builds created an anonymous Auth user before Google. Linking
+      // that user fails when this Google identity already owns a Bitepoint
+      // profile. The local name/laps are browser data, so discard only the
+      // temporary Auth session and sign into the authoritative Google user.
+      const signedOut = await this.supabase.auth.signOut({ scope: 'local' })
+      if (signedOut.error) throw new Error(signedOut.error.message)
+    }
+    const { error } = await this.supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: redirectUrl() },
+    })
     if (error) throw new Error(error.message)
   }
 

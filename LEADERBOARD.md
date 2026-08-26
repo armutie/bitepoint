@@ -39,9 +39,10 @@ Supabase PostgreSQL
   can be restored on another device.
 
 The Edge Function rejects anonymous users on profile and lap writes, so direct
-anonymous Auth calls cannot squat usernames. Anonymous Sign-Ins and Manual
-Identity Linking may remain enabled only to upgrade profiles created by an
-earlier build; new clients do not create anonymous users.
+anonymous Auth calls cannot squat usernames. If an earlier build left an
+anonymous session on a device, the client signs it out before Google OAuth. An
+existing Google account therefore restores its original reserved username
+instead of trying to link that identity to the temporary user.
 
 ## Lap trust and retention
 
@@ -87,8 +88,8 @@ The GitHub integration reads the `supabase/` directory:
 - `supabase/migrations/20260824000100_leaderboard.sql` creates the schema,
   transactional PB replacement, board query, and submission rate limit.
 - `supabase/functions/leaderboard/index.ts` is the verification API.
-- `supabase/config.toml` enables the function and keeps legacy anonymous/manual
-  linking available for local migration testing.
+- `supabase/config.toml` enables the function. Its anonymous/manual-link flags
+  remain only for local compatibility; the current browser flow uses neither.
 
 Before enabling **Deploy to production** in the Supabase GitHub integration:
 
