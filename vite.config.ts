@@ -15,6 +15,9 @@ export default defineConfig({
     },
   },
   test: {
+    // The CPU-heavy simulation checks need thread workers to avoid fork RPC timeouts.
+    pool: 'threads',
+    maxWorkers: 2,
     environment: 'node',
     include: ['src/**/*.test.ts', 'server/**/*.test.ts'],
   },
