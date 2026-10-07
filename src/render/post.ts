@@ -88,11 +88,11 @@ const CompositeShader = {
       float dist = length(toC);
       float live = 1.0 - uFlat;
 
-      // Radial blur, quadratic in speed and EDGE-ONLY: starting the falloff
-      // near frame centre is the onset pattern of tunnel vision, and reads as
-      // about-to-faint rather than fast.
-      float spread = uSpeed * uSpeed * 0.05 * smoothstep(0.52, 1.05, dist) * live;
-      float ca = (0.0006 + 0.002 * uSpeed) * smoothstep(0.45, 1.0, dist) * live;
+      // Keep the lens effect subpixel where another car fills the image.
+      // The earlier speed-scaled smear spread its body and livery over several
+      // pixels at the frame edge even when it matched the camera's speed.
+      float spread = uSpeed * uSpeed * 0.005 * smoothstep(0.52, 1.05, dist) * live;
+      float ca = (0.0002 + 0.0005 * uSpeed) * smoothstep(0.45, 1.0, dist) * live;
 
       vec3 acc = vec3(0.0);
       const int TAPS = 6;

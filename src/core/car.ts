@@ -58,6 +58,63 @@ function engineTorque(rpm: number): number {
   return interp(rpm, TQ_RPM, TQ_NM)
 }
 
+/**
+ * Peak drive force at the wheels at a given road speed (N).
+ *
+ * The best any gear can do here: for each ratio, what rpm that road speed puts
+ * the engine at, and what force the torque there makes. The gearbox picks a
+ * gear on rpm rather than on force, so this is an upper bound rather than what
+ * the car is doing — which is exactly what a lap-time model wants, since it is
+ * asking what the car COULD pull, not what the box happens to have selected.
+ *
+ * Exported for `racingLine`, which needs the real engine to know where a fast
+ * car wants its exit straightened. Nothing in the simulation uses it: the sim
+ * runs the gear it is actually in.
+ */
+export function peakDriveForce(p: CarParams, speed: number): number {
+  let best = 0
+  for (const ratio of p.gearRatios) {
+    const total = ratio * p.finalDrive
+    const rpm = (Math.abs(speed) / p.wheelRadius) * total * RPM_PER_RADS
+    // A gear that would be past the limiter at this road speed is not a gear
+    // you can use, and clamping its rpm to the redline instead of skipping it
+    // was a real bug: at 105 m/s it reported FIRST gear delivering 14.7 kN,
+    // which is what first gear makes at 8200 rpm and not what it makes at the
+    // 25,000 rpm that road speed implies. The lap-time model then believed the
+    // car accelerated hard at any speed, which under-valued drag and top speed
+    // and quietly flattered whichever setup had the smaller wing... by pricing
+    // the straights wrong for both.
+    if (rpm > p.redlineRpm) continue
+    best = Math.max(
+      best,
+      (engineTorque(Math.max(rpm, p.idleRpm)) * p.torqueScale * total) / p.wheelRadius,
+    )
+  }
+  return best
+}
+
+/**
+ * Drive force available at FULL THROTTLE in the gear the car is in right now.
+ *
+ * Not `peakDriveForce`, which reports the best gear for a road speed and is
+ * what a lap-time model wants — the question here is what THIS car, in THIS
+ * gear, at THESE revs, will make if the pedal goes down.
+ *
+ * The distinction is not academic. `pedalFor` sized its pedal against the peak,
+ * so in any gear taller than the optimum a command of 0.37 delivered well under
+ * 37% of what was asked for; the controller then sat at part throttle believing
+ * it had asked for enough, and the car ran 8 km/h under its target for most of
+ * a lap. Returns zero mid-gearchange, because that is what the engine makes.
+ */
+export function currentDriveForce(p: CarParams, s: CarState): number {
+  if (s.shiftTimer > 0) return 0
+  const total = p.gearRatios[s.gear]! * p.finalDrive
+  const rpmWheel = (Math.abs(s.wheelVr) / p.wheelRadius) * total * RPM_PER_RADS
+  const rpm = Math.min(Math.max(rpmWheel, p.idleRpm), p.redlineRpm)
+  const force = (engineTorque(rpm) * p.torqueScale * total) / p.wheelRadius
+  return Math.max(0, force * revLimiter(rpmWheel, p.redlineRpm))
+}
+
 /** How far past the redline the fuel is fully cut, as a fraction of it. */
 const LIMITER_BAND = 0.03
 

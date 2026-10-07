@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Race lab — watch the AI drive</title>
+<style>
+  :root {
+    --bg: #06080b; --panel: #0e131a; --edge: #1e2836;
+    --ink: #dfe7f0; --dim: #7d8b9c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    display: flex; height: 100vh; overflow: hidden;
+  }
+  #stage { flex: 1; position: relative; min-width: 0; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #side {
+    width: 360px; flex: none; background: var(--panel);
+    border-left: 1px solid var(--edge); padding: 14px; overflow-y: auto;
+  }
+  h1 { font-size: 13px; margin: 0 0 2px; letter-spacing: .08em; text-transform: uppercase; }
+  .sub { color: var(--dim); margin: 0 0 12px; font-size: 11px; }
+  .grp { border-top: 1px solid var(--edge); padding-top: 10px; margin-top: 12px; }
+  .grp > label { display: block; color: var(--dim); font-size: 11px; margin-bottom: 4px; }
+  select, button, input[type=range] { font: inherit; width: 100%; }
+  select, button {
+    background: #16202c; color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 4px; padding: 5px 8px; cursor: pointer;
+  }
+  button:hover { background: #1e2b3a; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { color: var(--dim); font-weight: normal; text-align: right; font-size: 11px; }
+  th:first-child, td:first-child { text-align: left; }
+  td { text-align: right; padding: 1px 0; }
+  .chip { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+  .hit { color: #ff7a5c; }
+  .off { color: #ffd166; }
+  #banner {
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    background: rgba(6,8,11,.85); border: 1px solid var(--edge); border-radius: 6px;
+    padding: 6px 14px; font-size: 12px;
+  }
+  #err { position: absolute; inset: 12px; color: #ff8a7a; white-space: pre-wrap; }
+  label.chk { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 11px; }
+  label.chk input { width: auto; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="banner">building the racing line…</div>
+  <pre id="err" hidden></pre>
+</div>
+<div id="side">
+  <h1>Race lab</h1>
+  <p class="sub">Six LineFollowers, the real Race, live. Not a replay.</p>
+
+  <div class="grp">
+    <label for="track">Circuit</label>
+    <select id="track"></select>
+  </div>
+  <div class="grp">
+    <label for="spread">Field</label>
+    <select id="spread">
+      <option value="0.98,0.96,0.94,0.92,0.90,0.88">Six cars, 0.98 down to 0.88</option>
+      <option value="1.15,1.12,1.09,1.06,1.03,1.00">Six cars, 1.15 down to 1.00 (at the limit)</option>
+      <option value="1.10,1.10,1.10,1.10,1.10,1.10">Six cars, all identical</option>
+      <option value="1.12,1.00">Two cars, quick vs steady</option>
+    </select>
+  </div>
+  <div class="grp">
+    <label for="rate">Speed <span id="rateOut"></span></label>
+    <input id="rate" type="range" min="0" max="6" step="1" value="2">
+    <div class="row" style="margin-top:8px">
+      <button id="play">Pause</button>
+      <button id="restart">Restart</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label class="chk"><input type="checkbox" id="showLines"> racing lines</label>
+      <label class="chk"><input type="checkbox" id="showTrails" checked> trails</label>
+    </div>
+    <div class="grp" style="border:0;padding:0;margin-top:8px">
+      <label for="follow">Camera</label>
+      <select id="follow">
+        <option value="-1">Whole circuit</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="grp">
+    <table id="board">
+      <thead><tr>
+        <th>pos</th><th>lap</th><th>km/h</th><th>gap</th><th>last</th><th>off line</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="grp">
+    <div style="color:var(--dim);font-size:11px">
+      Trails are where a car actually went. Turn the lines on to see how far
+      that is from where it meant to go.
+    </div>
+  </div>
+</div>
+<script type="module" src="/src/dev/raceLab.ts"></script>
+</body>
+</html>

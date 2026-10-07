@@ -66,6 +66,14 @@ export interface SimOptions {
    */
   tc?: boolean
   /**
+   * Which painted grid slot this car stages in, zero-based.
+   *
+   * Time attack has one car and always stages in the same box, so this used to
+   * be a constant. A race is N sims sharing one `Track`, and the only thing
+   * that has to differ between them at the start is where they are standing.
+   */
+  slot?: number
+  /**
    * Anti-lock braking, chosen before the lap rather than during it.
    *
    * A flag on the lap, not a channel, because unlike the TC rotary it cannot be
@@ -252,6 +260,8 @@ export class TimeAttackSim {
   readonly trackId: string
   readonly preset: string
   readonly easy: boolean
+  /** Painted grid slot this car stages in. See SimOptions.slot. */
+  readonly slot: number
 
   private readonly offTrackGrip: number
   private readonly barriers: Barriers | null
@@ -343,12 +353,13 @@ export class TimeAttackSim {
     this.barriers = (opts.walls ?? true) ? new Barriers(track) : null
     this.car.manual = opts.manual ?? false
     this.tc = opts.tc ?? false
+    this.slot = opts.slot ?? STAGE_SLOT
     this.reset()
   }
 
   /** Put the car back on the grid and throw away the lap in progress. */
   reset(): void {
-    const pose = gridPose(this.track, STAGE_SLOT)
+    const pose = gridPose(this.track, this.slot)
     this.car.reset(pose.x, pose.y, pose.yaw)
 
     this.steps = 0
@@ -367,12 +378,26 @@ export class TimeAttackSim {
 
   /** Initialise an already-armed lap for the server verification path. */
   beginVerification(recording: LapRecording): void {
-    this.car.s = { ...recording.start }
+    this.beginFlyingLap(recording.start)
+  }
+
+  /** A rolling one-lap session, with the clock armed at the supplied pose. */
+  beginFlyingLap(start: CarState): void {
+    this.beginRolling(start, true)
+  }
+
+  /** A moving run-up; the first forward line crossing starts the timed lap. */
+  beginRollingApproach(start: CarState): void {
+    this.beginRolling(start, false)
+  }
+
+  private beginRolling(start: CarState, armed: boolean): void {
+    this.car.s = { ...start }
     this.steps = 0
     this.lapStartStep = 0
-    this.prevS = this.track.project(recording.start.x, recording.start.y).s
+    this.prevS = this.track.project(start.x, start.y).s
     this.lapProgress = 0
-    this.timingArmed = true
+    this.timingArmed = armed
     this.lapValid = true
     this.offTrack = false
     this.beginLapRecording()

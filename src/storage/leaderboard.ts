@@ -1,3 +1,4 @@
+import { LEGACY_TYRE_MODE } from '../features'
 /**
  * Verified leaderboard access, with a useful local fallback.
  *
@@ -8,7 +9,6 @@
 import { createClient } from '@supabase/supabase-js'
 
 import { lapUsedTc } from '../core/sim'
-import { LEGACY_TYRE_MODE } from '../features'
 import type { LapRecord, RecordKey, RecordStore, SerializedLapRecord } from './records'
 import { deserializeLapRecord, keyOf, serializeLapRecord } from './records'
 import { CURRENT_PHYSICS_RULESET, LEGACY_PHYSICS_RULESET } from '../shared/ruleset'

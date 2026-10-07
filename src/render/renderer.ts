@@ -29,6 +29,7 @@ import { wrapAngle } from '../core/math'
 import { indexAtDistance, type AttractLine } from './attractLine'
 import { CameraRig, type CameraMode, type Surface } from './cameras'
 import { buildCar, SKINS, type CarModel, type CarSkin } from './carModel'
+import { FIELD_LIVERIES } from './liveries'
 import { PALETTE } from './palette'
 import { PostPipeline } from './post'
 import { renderQuality } from './quality'
@@ -82,19 +83,8 @@ const SUS_TRAVEL_MAX = 0.05
 /** How many cars lap the circuit behind the menu. */
 const ATTRACT_COUNT = 10
 
-/** Liveries for the attract-mode field — one each, so no two look alike. */
-const ATTRACT_SKINS: readonly CarSkin[] = [
-  { body: 0xb03028, accent: 0xf2e9e4 },
-  { body: 0xc2c8d0, accent: 0x23262c },
-  { body: 0x24262b, accent: 0xe08a20 },
-  { body: 0xd8b23a, accent: 0x1e2126 },
-  { body: 0x2c6e4f, accent: 0xe8ecef },
-  { body: 0x2a4d8f, accent: 0xd9dee6 },
-  { body: 0x7c3f8c, accent: 0xf0e6f4 },
-  { body: 0xe0e4e8, accent: 0xb03028 },
-  { body: 0x1f6f78, accent: 0xe8d9a0 },
-  { body: 0xc2601c, accent: 0x1a1c20 },
-]
+/** Liveries for the attract-mode field and for a race grid — see `liveries.ts`. */
+const ATTRACT_SKINS: readonly CarSkin[] = FIELD_LIVERIES
 
 interface AttractCar {
   model: CarModel
@@ -139,14 +129,25 @@ export class Renderer {
   private attractWheelRadius = 0.33
   private playerCar: CarModel | null = null
   private ghostCar: CarModel | null = null
+  /** The AI field, one model per opponent. Empty outside a race. */
+  private opponents: CarModel[] = []
+  private opponentStates: readonly CarState[] = []
+  private debugLine: THREE.Line | null = null
   private sky: THREE.Mesh
   private performanceMode = false
   private pixelRatio = 1
 
   /** For the dive/squat estimate: vx last frame. */
-  private prevVx = 0
-  /** Per-wheel bump phases, advanced with distance so they never jump. */
-  private wheelPhase = [0.0, 1.7, 3.1, 4.9]
+  /**
+   * Per-car animation state, keyed by the model it belongs to.
+   *
+   * `animateSuspension` differentiates vx to get acceleration and carries a
+   * bump phase per wheel, and both are per CAR. They used to be plain fields on
+   * the renderer, which was safe only while exactly one car was ever animated —
+   * the note on `rollWheels` records that hazard. A grid of eight makes it real:
+   * shared, every car would differentiate the car before it in the loop.
+   */
+  private readonly anim = new WeakMap<CarModel, { prevVx: number; phase: number[] }>()
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
@@ -196,7 +197,29 @@ export class Renderer {
   }
 
   /** Swap in a circuit, disposing whatever was there. */
+  setDebugLine(points: { x: number; y: number }[] | null): void {
+    if (this.debugLine) {
+      this.scene.remove(this.debugLine)
+      this.debugLine.geometry.dispose()
+      ;(this.debugLine.material as THREE.Material).dispose()
+      this.debugLine = null
+    }
+    if (!points || points.length < 2) return
+    const positions = new Float32Array((points.length + 1) * 3)
+    for (let i = 0; i <= points.length; i++) {
+      const point = points[i % points.length]!
+      positions.set([point.x, 0.12, -point.y], i * 3)
+    }
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    this.debugLine = new THREE.Line(geometry,
+      new THREE.LineBasicMaterial({ color: 0xff3b6b, depthTest: true }))
+    this.scene.add(this.debugLine)
+  }
+
+  /** Swap in a circuit, disposing whatever was there. */
   setTrack(track: Track): void {
+    this.setDebugLine(null)
     if (this.world) {
       this.scene.remove(this.world.root)
       this.world.dispose()
@@ -395,6 +418,43 @@ export class Renderer {
     }
   }
 
+  /**
+   * Build (or clear) the AI field for a race.
+   *
+   * Separate from `setCars` because the two have different lifetimes: the
+   * player's car and the ghost belong to the SESSION, and the opponents belong
+   * to one race. Rebuilding the player's car to add an opponent would drop the
+   * camera rig's target mid-frame.
+   *
+   * Liveries come from the attract field's, which already exist precisely so
+   * that a grid of identical cars is distinguishable — with the player's own
+   * blue deliberately not among them.
+   */
+  setOpponents(params: CarParams, count: number, driverIds?: readonly number[]): void {
+    for (const car of this.opponents) {
+      this.scene.remove(car.root)
+      car.dispose()
+    }
+    this.opponents = []
+    for (let i = 0; i < count; i++) {
+      const identity = driverIds?.[i] ?? i
+      const car = buildCar(params, ATTRACT_SKINS[identity % ATTRACT_SKINS.length]!)
+      this.scene.add(car.root)
+      this.opponents.push(car)
+    }
+  }
+
+  /**
+   * Where the opponents are this frame, in the same slot order as `setOpponents`.
+   *
+   * Set rather than passed to `render` because the player's slot is skipped by
+   * the caller: the renderer should not have to know which index of a race is
+   * the person playing it.
+   */
+  setOpponentStates(states: readonly CarState[]): void {
+    this.opponentStates = states
+  }
+
   /** Add the ghost model without rebuilding the player's car at the line. */
   ensureGhost(params: CarParams): void {
     if (this.ghostCar) return
@@ -465,6 +525,19 @@ export class Renderer {
       this.animateSuspension(this.playerCar, player, dtWall)
       this.rollWheels(this.playerCar, player.vx, player.wheelVr, params.wheelRadius, dtWall)
     }
+    // The AI field. Drawn with the same suspension travel and wheel roll as the
+    // player's car, because a grid of cars whose wheels do not turn reads as
+    // scenery sliding past rather than as cars being driven.
+    for (let i = 0; i < this.opponents.length; i++) {
+      const car = this.opponents[i]!
+      const s = this.opponentStates[i]
+      car.root.visible = s !== undefined
+      if (!s) continue
+      placeCar(car, s)
+      this.animateSuspension(car, s, dtWall, false)
+      this.rollWheels(car, s.vx, s.wheelVr, params.wheelRadius, dtWall)
+    }
+
     if (this.ghostCar) {
       // Computed fresh every frame from preference AND replay state — never
       // read back from itself.
@@ -557,17 +630,27 @@ export class Renderer {
   }
 
   /** See the suspension note in the module docs. */
-  private animateSuspension(model: CarModel, s: CarState, dtWall: number): void {
+  private animateSuspension(
+    model: CarModel, s: CarState, dtWall: number, ownSurface = true,
+  ): void {
+    let state = this.anim.get(model)
+    if (!state) {
+      state = { prevVx: s.vx, phase: [0.0, 1.7, 3.1, 4.9] }
+      this.anim.set(model, state)
+    }
     const speed = Math.hypot(s.vx, s.vy)
     // Longitudinal acceleration from the frame-to-frame change in vx — the
     // real number, not a guess from the pedal.
-    const ax = dtWall > 1e-4 ? clampN((s.vx - this.prevVx) / dtWall, 45) : 0
-    this.prevVx = s.vx
+    const ax = dtWall > 1e-4 ? clampN((s.vx - state.prevVx) / dtWall, 45) : 0
+    state.prevVx = s.vx
     const aLat = clampN(s.r * s.vx, 45)
 
+    // The camera rig tracks the PLAYER's surface, so only the player's car may
+    // read kerb and grass off it. An opponent gets the smooth-road amplitude
+    // rather than a bump because the car being followed is on a kerb.
     const baseAmp =
       0.0035 * Math.min(speed / 45, 1) +
-      (this.rig.onGrass ? 0.013 : this.rig.onKerb ? 0.006 : 0)
+      (ownSurface ? (this.rig.onGrass ? 0.013 : this.rig.onKerb ? 0.006 : 0) : 0)
 
     for (let i = 0; i < model.wheels.length; i++) {
       const rig = model.wheels[i]!
@@ -576,8 +659,8 @@ export class Renderer {
       const pitchTerm = rig.front ? -ax * SUS_DIVE : ax * SUS_SQUAT
       // A left turn (aLat > 0) loads the right side; sideZ is +1 on the right.
       const rollTerm = aLat * SUS_ROLL * rig.sideZ
-      this.wheelPhase[i]! += speed * dtWall * (2.0 + i * 0.13)
-      const bump = baseAmp * Math.sin(this.wheelPhase[i]!)
+      state.phase[i] = (state.phase[i] ?? 0) + speed * dtWall * (2.0 + i * 0.13)
+      const bump = baseAmp * Math.sin(state.phase[i]!)
 
       const travel = clampN(pitchTerm + rollTerm + bump, SUS_TRAVEL_MAX)
       rig.pivot.position.y = rig.baseY + travel
@@ -616,6 +699,7 @@ export class Renderer {
 
   /** Live camera FOV, for probes that check authentic mode is actually on. */
   get cameraFov(): number { return this.rig.camera.fov }
+
   get fovKick(): number { return this.rig.fovKick }
 
   /** three.js's own frame counters, for performance probes. */

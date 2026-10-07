@@ -23,13 +23,84 @@ import { formatDelta, formatTime } from '../storage/records'
 import { ASSISTS_ADJUSTABLE } from '../features'
 import { buildHudMap, type HudMap } from './hudMap'
 import type { Track } from '../core/track'
+import type { TrackLimits } from '../core/trackLimits'
+import { Proximity, type ProximityMarker } from './proximity'
 
 /** Shift lights, as an LED strip: green, amber, then red at the limit. */
 const SHIFT_LIGHTS = 12
 /** Fraction of the redline at which the first light comes on. */
 const LIGHTS_FROM = 0.6
 
+/**
+ * The race, when there is one. Absent in a time trial.
+ *
+ * Optional rather than a second HUD type: everything else on screen — speed,
+ * gear, the tyre lights, the map — is the same job in both sessions, and a
+ * parallel HUD would be that whole file again so that one card could differ.
+ */
+export interface HudRaceRow {
+  position: number
+  isPlayer: boolean
+  /**
+   * A stable name for this car.
+   *
+   * Stable is the whole point. It was derived from the position, so a car
+   * called "Car 3" became "Car 2" the moment it overtook — while its colour
+   * chip, which comes from the car itself, stayed put. Two identifiers for one
+   * car disagreeing is worse than either alone.
+   */
+  name: string
+  /** Seconds behind the car in front. Null when it cannot be known yet. */
+  interval: number | null
+  /** Metres behind the car in front — the fallback while the interval is null. */
+  intervalMetres: number
+  laps: number
+  finished: boolean
+  /** Livery colour, matching the car on track. */
+  colour: string
+}
+
+export interface HudRaceState {
+  position: number
+  size: number
+  /** Lap the player is ON, 1-based, capped at the race distance. */
+  lap: number
+  laps: number
+  /** Seconds to the car ahead and behind, null when there is nobody or no history. */
+  gapAhead: number | null
+  gapBehind: number | null
+  /** Seconds left on the lights, 0 once they are out. */
+  countdown: number
+  lights: number
+  starting: boolean
+  launchHint: string
+  finished: boolean
+  /** Last lap against the player's best of THIS RACE, or null on the first lap. */
+  lastVsBest: number | null
+  /**
+   * Which of the player's completed splits are the fastest ANYONE has gone
+   * this race. Overrides the sim's own purple, which only knows about itself.
+   *
+   * Two sets, because the pills show two things: the lap in progress, and — for
+   * a few seconds after the line — the lap just finished. The live array is
+   * wiped at the line, so reusing it during the hold would drop every purple
+   * exactly when you are looking at them.
+   */
+  purpleSectors: readonly boolean[]
+  purpleLastSectors: readonly boolean[]
+  /** The whole field, leader first. */
+  standings: readonly HudRaceRow[]
+  /** Where the other cars are, for the map. */
+  mapDots: readonly { x: number; y: number; leader?: boolean }[]
+}
+
 export interface HudState {
+  /** Present only in a race. */
+  race?: HudRaceState
+  trackLimits?: TrackLimits
+  proximity?: readonly ProximityMarker[]
+  qualifying?: boolean
+  qualifyingIntro?: { active: boolean; lights: number; hint: string }
   speedKmh: number
   gear: number
   rpm: number
@@ -86,8 +157,52 @@ export interface HudState {
   tcBite: number
 }
 
+/**
+ * The colour a completed split is shown in.
+ *
+ * PURPLE means different things in the two sessions, and that is the point. In
+ * a time trial it is your own fastest ever through that sector. In a race it is
+ * the fastest ANYBODY has gone through it today — the caller has already
+ * resolved which, because only it can see the other cars.
+ *
+ * The other difference is what a missing delta means. Alone, a split with
+ * nothing to compare against is neutral: there is genuinely no information. In
+ * a race there is, and it is good news — it is your first time through, so it
+ * is the best you have gone today by definition, and painting it grey (or
+ * worse, yellow against a personal best set on an empty circuit) tells you off
+ * for something you have not done.
+ */
+export function sectorPillState(
+  delta: number | null,
+  isPurple: boolean,
+  racing: boolean,
+): 'purple' | 'good' | 'warn' | 'neutral' {
+  if (isPurple) return 'purple'
+  if (delta === null) return racing ? 'good' : 'neutral'
+  return delta <= 0 ? 'good' : 'warn'
+}
+
+/** What a highlighted lap banner is claiming. */
+export type LapFlash = 'pb' | 'fastest'
+
+/** Seconds of lights before the start, matching `race.ts`. */
+
+/** A gap in metres, or a dash when there is nobody there. */
+function gapText(metres: number | null): string {
+  if (metres === null) return '—'
+  if (metres < 5) return 'CONTACT'
+  return metres < 1000 ? `${metres.toFixed(0)} m` : `${(metres / 1000).toFixed(1)} km`
+}
+
 export class Hud {
   readonly root: HTMLDivElement
+  private readonly proximity = new Proximity()
+  private readonly limitsNotice: HTMLElement
+  private readonly penaltyRow: HTMLElement
+  private readonly penaltyValue: HTMLElement
+  private activeLimits: TrackLimits | undefined
+  private shownOffence = 0
+  private limitsTimer: ReturnType<typeof setTimeout> | null = null
 
   private readonly speed: HTMLElement
   private readonly gear: HTMLElement
@@ -125,6 +240,18 @@ export class Hud {
   private readonly lapBannerTime: HTMLElement
   private readonly lapBannerLabel: HTMLElement
   private sectorHint!: HTMLElement
+  private readonly raceLights: HTMLElement
+  private readonly launchHint: HTMLElement
+  private readonly raceLap: HTMLElement
+  private readonly raceLapNum: HTMLElement
+  private readonly lastDelta: HTMLElement
+  /** The race card's own Last value — see where it is built. */
+  private readonly raceLast: HTMLElement
+  /** Rows of the timing card that only a race uses, and only a time trial uses. */
+  private readonly raceRows: HTMLElement
+  private readonly timeRows: HTMLElement
+  private readonly board: HTMLElement
+  private readonly boardRows: HTMLElement
   private bannerTimer: ReturnType<typeof setTimeout> | null = null
   private invalidTimer: ReturnType<typeof setTimeout> | null = null
   private chipsTimer: ReturnType<typeof setTimeout> | null = null
@@ -155,6 +282,7 @@ export class Hud {
       labelled('Last', this.last),
       labelled('Best', this.best),
     )
+    this.timeRows = rows
     card.append(this.sub, rows)
 
     // Sector pills, top centre — the pygame state machine, ported whole:
@@ -306,10 +434,184 @@ export class Hud {
       this.tcChip, this.absChip, this.easyBadge,
     )
 
-    this.root.append(card, sectorWrap, this.map, this.invalid, this.lapBanner, tele, this.chips)
+    // The race lives IN the timing card, not under it. The card is already the
+    // place you look for "how am I doing", and a race answers that with a
+    // position and the two gaps rather than with a delta to a ghost — so the
+    // rows swap over and the card keeps its position, its size and its
+    // meaning. A second panel below it was two cards competing to be the one
+    // you read first.
+    // ONE race panel, not two.
+    //
+    // It was a card of three numbers with an order board underneath, and the
+    // position appeared in both — two panels competing to be the one you read
+    // first, saying overlapping things. A broadcast timing tower does not do
+    // that: it is a header saying which lap, the order under it, and an
+    // interval on every row. That is strictly more information in less space,
+    // because the row you are on IS your position and the interval beside it IS
+    // your gap.
+    // The lap counter is the first thing you look for in a race and it was set
+    // in the same 10px uppercase as everything else on the sub-line. It gets to
+    // be a number you can read at a glance without taking your eyes off the
+    // road for long enough to matter.
+    this.raceLapNum = el('span', 'hud-lap-num')
+    this.raceLap = el('div', 'hud-lap is-hidden')
+    const lapWord = el('span', 'hud-lap-word')
+    lapWord.textContent = 'LAP'
+    this.raceLap.append(lapWord, this.raceLapNum)
+
+    this.boardRows = el('div', 'hud-board-rows')
+    this.board = el('div', 'hud-board is-hidden')
+    this.board.append(this.boardRows)
+    this.lastDelta = el('span', 'hud-value')
+    // Its own element, NOT the time trial's `last`. Appending one node to two
+    // rows does not copy it, it moves it — the race card quietly took the time
+    // trial's value span with it, and a time trial has been showing a LAST row
+    // with a label and nothing beside it ever since. Both are written on every
+    // frame; only one set of rows is ever on screen.
+    this.raceLast = el('span', 'hud-value')
+    this.raceRows = el('div', 'hud-rows is-hidden')
+    this.raceRows.append(labelled('Last', this.raceLast), labelled('vs best', this.lastDelta))
+    // All of it lives INSIDE the timing card, under its sub-line.
+    card.append(this.raceLap, this.board, this.raceRows)
+    this.penaltyValue = el('span', 'hud-value')
+    this.penaltyRow = labelled('Time penalty', this.penaltyValue)
+    this.penaltyRow.classList.add('hud-penalty', 'is-hidden')
+    card.append(this.penaltyRow)
+    this.limitsNotice = el('div', 'hud-track-limits is-hidden')
+    this.limitsNotice.setAttribute('role', 'status')
+
+    // The lights, centre screen, only while they are on.
+    // `hud-start-lights`, not `hud-lights`: the shift-light strip in the
+    // binnacle has owned that name since before there was a race to start, and
+    // sharing it dragged the rev strip out of the binnacle and blew its
+    // spacing up to gantry size.
+    this.raceLights = el('div', 'hud-start-lights is-hidden')
+    for (let i = 0; i < 5; i++) this.raceLights.append(el('span', 'hud-start-light'))
+    this.launchHint = el('div', 'hud-launch-hint is-hidden')
+
+
+    this.root.append(
+      card, sectorWrap, this.map, this.invalid, this.lapBanner,
+      this.raceLights, this.launchHint, tele, this.chips, this.proximity.root, this.limitsNotice,
+    )
   }
 
   /** Clear per-lap transient state. */
+  /**
+   * The race card and the start lights.
+   *
+   * Gaps are shown in METRES rather than seconds, which is the honest unit
+   * mid-race: a time gap needs both cars to have crossed the same point, and
+   * the number people actually want mid-corner is how much road is between
+   * them. Under a car length it says CONTACT, because at that range the exact
+   * figure has stopped being the useful information.
+   */
+  private updateRace(r: HudRaceState | undefined): void {
+    const racing = r !== undefined
+    // Swap the card's rows over rather than showing both. In a race "Delta" has
+    // nothing to compare against and "Best" is a number nobody is racing for.
+    this.timeRows.classList.toggle('is-hidden', racing)
+    this.raceRows.classList.toggle('is-hidden', !racing)
+    this.raceLap.classList.toggle('is-hidden', !racing)
+    this.board.classList.toggle('is-hidden', !racing)
+    if (!r) return
+
+    setText(this.sub, r.finished
+      ? `RACE · FINISHED P${r.position}/${r.size}`
+      : `RACE · P${r.position}/${r.size}`)
+    this.raceLap.classList.toggle('is-hidden', false)
+    setText(this.raceLapNum, `${Math.min(r.lap, r.laps)}/${r.laps}`)
+    setText(this.lastDelta, r.lastVsBest === null
+      ? '—'
+      : `${r.lastVsBest > 0 ? '+' : '-'}${Math.abs(r.lastVsBest).toFixed(3)}`)
+    this.lastDelta.classList.toggle('is-good', r.lastVsBest !== null && r.lastVsBest < 0)
+    this.lastDelta.classList.toggle('is-warn', r.lastVsBest !== null && r.lastVsBest > 0)
+    this.renderBoard(r)
+
+  }
+
+  private updateStartLights(s: HudState): void {
+    const starting = s.race?.starting ?? s.qualifyingIntro?.active ?? false
+    const count = s.race?.lights ?? s.qualifyingIntro?.lights ?? 0
+    const hint = s.race?.launchHint ?? s.qualifyingIntro?.hint ?? ''
+    this.raceLights.classList.toggle('is-hidden', !starting)
+    this.launchHint.classList.toggle('is-hidden', !hint)
+    setText(this.launchHint, hint)
+    for (let i = 0; i < this.raceLights.children.length; i++) {
+      this.raceLights.children[i]!.classList.toggle('is-lit', i < count)
+    }
+  }
+
+  /**
+   * The order board.
+   *
+   * Rows are created once and then only their text changes, because a race
+   * rebuilding eight rows of DOM sixty times a second is sixty times more
+   * layout than it needs and it makes the numbers flicker as they are replaced.
+   */
+  private renderBoard(r: HudRaceState): void {
+    while (this.boardRows.children.length < r.standings.length) {
+      const row = el('div', 'hud-board-row')
+      row.append(
+        el('span', 'hud-board-pos'),
+        el('span', 'hud-board-chip'),
+        el('span', 'hud-board-name'),
+        el('span', 'hud-board-gap'),
+      )
+      this.boardRows.append(row)
+    }
+    for (let i = 0; i < this.boardRows.children.length; i++) {
+      const row = this.boardRows.children[i] as HTMLElement
+      const entry = r.standings[i]
+      row.classList.toggle('is-hidden', entry === undefined)
+      if (!entry) continue
+      row.classList.toggle('is-player', entry.isPlayer)
+      const [pos, chip, name, gap] = row.children as unknown as HTMLElement[]
+      setText(pos!, String(entry.position))
+      chip!.style.background = entry.colour
+      setText(name!, entry.name)
+      // Gap to the LEADER on every row, which is the one comparison that is the
+      // same question for everybody. The gaps to the cars either side of you
+      // are in the card, because those are the two that are yours.
+      // The interval to the car IN FRONT on every row, which is the number
+      // that says whether a place is about to change. Metres until enough
+      // history exists for a real interval, because a wrong second is worse
+      // than an honest metre.
+      setText(gap!, entry.finished
+        ? 'FIN'
+        : entry.position === 1
+          ? 'LEADER'
+          : entry.interval !== null
+            ? `+${entry.interval.toFixed(1)}`
+            : gapText(entry.intervalMetres))
+    }
+  }
+
+  private updateTrackLimits(limits: TrackLimits | undefined): void {
+    if (limits !== this.activeLimits) {
+      this.activeLimits = limits
+      this.shownOffence = 0
+      if (this.limitsTimer) clearTimeout(this.limitsTimer)
+      this.limitsTimer = null
+      this.limitsNotice.classList.add('is-hidden')
+    }
+    this.penaltyRow.classList.toggle('is-hidden', !limits?.penaltySeconds)
+    setText(this.penaltyValue, `+${limits?.penaltySeconds ?? 0}s`)
+    const event = limits?.lastEvent
+    if (!event || event.offence === this.shownOffence) return
+    this.shownOffence = event.offence
+    this.limitsNotice.textContent = event.seconds > 0
+      ? `+${event.seconds}s time penalty · Track limits`
+      : `${event.offence === 1 ? 'First' : 'Second'} track limits warning`
+    this.limitsNotice.classList.toggle('is-penalty', event.seconds > 0)
+    this.limitsNotice.classList.remove('is-hidden')
+    if (this.limitsTimer) clearTimeout(this.limitsTimer)
+    this.limitsTimer = setTimeout(() => {
+      this.limitsNotice.classList.add('is-hidden')
+      this.limitsTimer = null
+    }, 4500)
+  }
+
   resetLap(): void {
     this.sectorHoldUntil = 0
     this.lapWasInvalid = false
@@ -321,8 +623,16 @@ export class Hud {
 
   /** Show a lap result without stopping anything. Fades on its own, and the
    *  sector pills hold the finished lap's numbers while it does. */
-  flashLap(time: number, valid: boolean, isBest: boolean): void {
-    this.lapBannerLabel.textContent = !valid ? 'Lap invalid' : isBest ? 'Personal best' : 'Lap time'
+  flashLap(time: number, valid: boolean, isBest: boolean, kind: LapFlash = 'pb'): void {
+    // "Personal best" is the wrong words in a race — the lap does not set one,
+    // and the thing worth shouting about is having gone quicker than everyone
+    // else out there. Same banner, same fade, different claim.
+    const label = !valid
+      ? 'Lap invalid'
+      : !isBest
+        ? 'Lap time'
+        : kind === 'fastest' ? 'Fastest lap' : 'Personal best'
+    this.lapBannerLabel.textContent = label
     this.lapBannerTime.textContent = formatTime(time)
     this.lapBanner.className = `lap-banner is-on ${!valid ? 'is-void' : isBest ? 'is-best' : ''}`
     if (this.bannerTimer) clearTimeout(this.bannerTimer)
@@ -363,12 +673,18 @@ export class Hud {
   }
 
   update(s: HudState): void {
+    this.proximity.update(s.proximity ?? [])
+    this.updateRace(s.race)
+    this.updateStartLights(s)
+    this.updateTrackLimits(s.race ? s.trackLimits : undefined)
+    this.invalid.classList.toggle('is-hidden', s.race !== undefined)
     setText(this.speed, String(Math.round(s.speedKmh)))
     setText(this.gear, s.speedKmh < 1 && s.gear === 0 ? 'N' : String(s.gear + 1))
 
     if (this.hudMap) {
       this.hudMap.setCar(s.carX, s.carY, s.sector)
       this.hudMap.setGhost(s.ghostX ?? 0, s.ghostY)
+      this.hudMap.setOpponents(s.race?.mapDots ?? [])
     }
 
     setText(this.mfdValue, s.tcLevel > 0 ? String(s.tcLevel) : 'OFF')
@@ -404,13 +720,20 @@ export class Hud {
       led.classList.toggle('is-limit', limit)
     }
 
-    setText(
-      this.sub,
-      `Lap ${s.lapCount + 1} · ${Math.round(s.lapFraction * 100)}% · ${s.validLaps} valid`,
-    )
+    // In a race `updateRace` owns this line — it says which lap of how many,
+    // which is the question a race asks. Writing both would mean whichever ran
+    // last wins, and that was the time-attack one.
+    if (!s.race) {
+      setText(
+        this.sub,
+        s.qualifying ? 'ONE-SHOT QUALIFYING'
+          : `Lap ${s.lapCount + 1} · ${Math.round(s.lapFraction * 100)}% · ${s.validLaps} valid`,
+      )
+    }
     setText(this.current, s.timingArmed ? formatTime(s.currentLap) : '--:--.---')
-    this.current.classList.toggle('is-void', !s.lapValid && s.timingArmed)
+    this.current.classList.toggle('is-void', !s.race && !s.lapValid && s.timingArmed)
     setText(this.last, formatTime(s.lastLap))
+    setText(this.raceLast, formatTime(s.lastLap))
     setText(this.best, formatTime(s.bestLap))
 
     // The delta is a row like the others now, so it keeps its slot rather than
@@ -429,7 +752,8 @@ export class Hud {
     const splits = holding ? s.lastSectors : s.sectors
     const deltas = holding ? s.lastSectorDeltas : s.sectorDeltas
     const purples = holding ? s.lastSectorBestFlags : s.sectorBestFlags
-    const invalid = holding ? !s.lastLapValid : s.timingArmed && !s.lapValid
+    const invalid = !s.race && (holding ? !s.lastLapValid
+      : s.timingArmed && !s.lapValid)
     const cur = holding ? 3 : s.timingArmed ? splits.findIndex((x) => x === null) : -1
     // Time already banked this lap, so the live pill counts only its own sector.
     let done = 0
@@ -439,7 +763,12 @@ export class Hud {
       const split = splits[i] ?? null
       if (split !== null) {
         const d = deltas[i] ?? null
-        const state = purples[i] ? 'purple' : d === null ? 'neutral' : d <= 0 ? 'good' : 'warn'
+        const racePurples = holding ? s.race?.purpleLastSectors : s.race?.purpleSectors
+        const state = sectorPillState(
+          d,
+          s.race ? (racePurples?.[i] ?? false) : (purples[i] ?? false),
+          s.race !== undefined,
+        )
         const dtxt = d === null ? '' : `${d > 0 ? '+' : '-'}${Math.abs(d).toFixed(3)}`
         this.setPill(i, state, split.toFixed(2), dtxt, invalid)
       } else if (i === cur) {
@@ -450,8 +779,10 @@ export class Hud {
       }
     }
     this.sectorHint.classList.toggle('is-on', !s.timingArmed)
+    setText(this.sectorHint, s.qualifying ? 'CROSS THE LINE TO START QUALIFYING' : 'cross the line')
+    setText(this.invalidAction, s.qualifying ? 'FINISH THE LAP · START AT THE BACK' : 'PRESS R TO RESTART')
 
-    const lapInvalid = s.timingArmed && !s.lapValid
+    const lapInvalid = !s.race && s.timingArmed && !s.lapValid
     if (lapInvalid && !this.lapWasInvalid) {
       this.invalid.classList.add('is-on')
       this.invalidAction.classList.add('is-on')

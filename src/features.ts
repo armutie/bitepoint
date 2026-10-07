@@ -36,3 +36,11 @@ export const legacyTyreModeForLocation = (
 
 /** The `/legacy` build keeps the tyre curve shipped before August 2026. */
 export const LEGACY_TYRE_MODE = legacyTyreModeForLocation(globalThis.location)
+
+/** Lab views are available on the local dev server only. */
+export const SHOW_REFERENCE_DRIVER = import.meta.env?.DEV === true && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('ref')
+export const SHOW_RACING_LINE = import.meta.env?.DEV === true && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('line')
+export const SHOW_FPS_OVERLAY = import.meta.env?.DEV === true && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('fps')

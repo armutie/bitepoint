@@ -25,6 +25,15 @@ export interface HudMap {
   setCar(x: number, y: number, sector: number): void
   /** Move the ghost's dot, or hide it with null. */
   setGhost(x: number, y: number | null): void
+  /**
+   * Place the rest of the field. An empty list hides them all.
+   *
+   * Dots are created lazily and kept, rather than rebuilt per frame: a race is
+   * at most seven opponents and they exist for the whole race, so the only
+   * per-frame cost should be two attribute writes each — the same deal the
+   * player's dot and the ghost's already get.
+   */
+  setOpponents(points: readonly { x: number; y: number; leader?: boolean }[]): void
 }
 
 export function buildHudMap(track: Track): HudMap {
@@ -87,7 +96,13 @@ export function buildHudMap(track: Track): HudMap {
   startLine.setAttribute('class', 'hud-map-start')
   flip.append(startLine)
 
-  // Ghost first, so the player's dot draws over it when they are together —
+  // Opponents under everything: on a busy map the dot you must never lose is
+  // your own, and the leader's is the next most useful.
+  const rivals: SVGCircleElement[] = []
+  const rivalGroup = document.createElementNS(NS, 'g')
+  flip.append(rivalGroup)
+
+  // Ghost next, so the player's dot draws over it when they are together —
   // the one you need to find at a glance is your own.
   const ghost = document.createElementNS(NS, 'circle')
   ghost.setAttribute('r', String(span * 0.014))
@@ -115,6 +130,29 @@ export function buildHudMap(track: Track): HudMap {
       ghost.style.display = ''
       ghost.setAttribute('cx', String(x))
       ghost.setAttribute('cy', String(y))
+    },
+    setOpponents(points) {
+      while (rivals.length < points.length) {
+        const dot = document.createElementNS(NS, 'circle')
+        dot.setAttribute('r', String(span * 0.015))
+        dot.setAttribute('class', 'hud-map-rival')
+        rivalGroup.append(dot)
+        rivals.push(dot)
+      }
+      for (let i = 0; i < rivals.length; i++) {
+        const dot = rivals[i]!
+        const p = points[i]
+        if (!p) {
+          dot.style.display = 'none'
+          continue
+        }
+        dot.style.display = ''
+        dot.setAttribute('cx', String(p.x))
+        dot.setAttribute('cy', String(p.y))
+        // The leader is worth telling apart at a glance; everyone else is
+        // traffic until you are next to them.
+        dot.setAttribute('data-leader', p.leader ? '1' : '0')
+      }
     },
   }
 }

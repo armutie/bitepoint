@@ -1,5 +1,5 @@
 /**
- * Menus: pick a circuit, pick a car, drive. Plus pause and results.
+ * Session choice, followed by the circuit and handling or a supported race.
  *
  * Two things keep this from reading as a settings dialog with a game attached.
  * Circuit cards draw the **actual shape of the lap** from the outline in the
@@ -15,9 +15,10 @@ import type { CarParams, MenuPresetName, PresetInfo, PresetName } from '../core/
 import { applyEasyAids, handlingPreset, PRESET_INFO } from '../core/carParams'
 import type { TrackManifestEntry } from '../core/track'
 import {
-  isClean, type Assists, type LeaderboardClient, type LeaderboardEntry,
-} from '../storage/leaderboard'
-import { ASSISTS_ADJUSTABLE } from '../features'
+  DIFFICULTIES, difficultyByName, MAX_OPPONENTS, MAX_RACE_LAPS,
+} from '../core/raceSession'
+import { isClean, type Assists, type LeaderboardClient, type LeaderboardEntry } from '../storage/leaderboard'
+import { ASSISTS_ADJUSTABLE, SHOW_REFERENCE_DRIVER } from '../features'
 import { formatTime, keyOf, type LapRecord, type RecordKey } from '../storage/records'
 import { carBars, carTags, powerToWeight } from './carStats'
 import { buildTrackMap } from './trackMap'
@@ -29,6 +30,17 @@ import {
 import { CAMERA_LABEL, CAMERA_ORDER } from '../render/cameras'
 import { VIEWPORT_LABEL, VIEWPORT_ORDER } from '../game/viewport'
 import { MOUSE_DEADZONE } from '../game/input'
+import { raceSelection, RACE_TRACK } from './sessionSetup'
+import type { RaceEvent } from '../core/qualifying'
+import { fieldLivery, liveryCss, PLAYER_LIVERY } from '../render/liveries'
+
+/**
+ * What the session is: a lap against the clock, or a race against a field.
+ *
+ * The session uses one selection type. The menu restricts races to the track
+ * and handling supported by the current AI.
+ */
+export type SessionMode = 'time' | 'race'
 import {
   analyseSession, type SessionAnalysis, type SessionSummary,
 } from './sessionSummary'
@@ -42,10 +54,18 @@ export interface Selection {
   ghost: boolean
   /** null follows the current personal best; an id pins a leaderboard lap. */
   ghostEntryId: string | null
+  mode: SessionMode
+  /** Race only. Ignored in a time trial, which never ends on its own. */
+  laps: number
+  opponents: number
+  /** Name of a `Difficulty` in `raceSession.ts`. */
+  difficulty: string
 }
 
 /** What the pause screen shows about the session it interrupted. */
 export interface PauseStatus {
+  race: boolean
+  qualifying?: boolean
   trackLabel: string
   carLabel: string
   easy: boolean
@@ -66,6 +86,7 @@ export interface PauseStatus {
  * traced from a real reference. The rest of the calendar stays
  * visible but locked: a menu that shows what is coming reads as a roadmap, one
  * that hides it reads as thin.
+ * Time-trial choices are separate from the supported race pairing.
  */
 export const RELEASED_TRACKS: readonly string[] =
   ['silverstone', 'power_8', 'power_4', 'balanced_8', 'power_3']
@@ -99,6 +120,9 @@ export class Menu {
   settings: Settings
 
   onStart: (s: Selection) => void = () => {}
+  onQualify: (s: Selection) => void = () => {}
+  onNewEvent: () => void = () => {}
+  raceEvent: RaceEvent | null = null
   onResume: () => void = () => {}
   onRestart: () => void = () => {}
   onEndSession: () => void = () => {}
@@ -111,6 +135,8 @@ export class Menu {
   private readonly panel: HTMLDivElement
   /** The two full-lock lines over the picture. Built once, moved as needed. */
   private readonly lock: LockPreview
+  private flowStep: 'mode' | 'circuit' | 'handling' | 'race' = 'mode'
+  private timeSelection: Pick<Selection, 'trackId' | 'preset'> = { trackId: 'power_8', preset: 'legacy' }
   private mainOpen = false
   private controlsOpen = false
   private settingsOpen = false
@@ -152,6 +178,7 @@ export class Menu {
   constructor(deps: MenuDeps, initial: Selection, settings: Settings) {
     this.deps = deps
     this.selection = initial
+    if (initial.mode === 'time') this.timeSelection = { trackId: initial.trackId, preset: initial.preset }
     this.settings = settings
     this.leaderboardTrackId = initial.trackId
     this.leaderboardEasy = initial.easy
@@ -164,7 +191,7 @@ export class Menu {
       if (!this.visible || event.key !== '?') return
       if (this.mainOpen || this.controlsOpen) {
         event.preventDefault()
-        this.controlsOpen ? this.showMain() : this.showControls()
+        this.controlsOpen ? this.renderFlow() : this.showControls()
       }
     })
     // Both wired ONCE, on things that outlive a rebuild. Choosing any setting
@@ -203,17 +230,16 @@ export class Menu {
       void this.showLeaderboard()
       return true
     }
-    if (!this.controlsOpen && !this.settingsOpen) return false
-    this.showMain()
+    if (this.controlsOpen || this.settingsOpen) this.renderFlow()
+    else if (this.mainOpen && this.flowStep !== 'mode') this.backFlow()
+    else return false
     return true
   }
 
   private show(kind: 'full' | 'dialog'): void {
     this.root.classList.remove('is-hidden')
     this.root.classList.toggle('menu-dialog', kind === 'dialog')
-    this.root.classList.remove('menu-controls')
-    this.root.classList.remove('menu-profile')
-    this.root.classList.remove('menu-session-summary')
+    this.root.classList.remove('menu-controls', 'menu-flow', 'menu-profile', 'menu-session-summary')
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
@@ -237,56 +263,238 @@ export class Menu {
   }
 
   showMain(): void {
+    this.flowStep = 'mode'
+    this.renderFlow()
+  }
+
+  showRaceEvent(): void {
+    this.flowStep = 'race'
+    this.renderFlow()
+  }
+
+  private renderFlow(): void {
+    const focused = document.activeElement
+    const keyboardFocus = focused instanceof HTMLElement && focused.matches(':focus-visible')
+    const focusedLabel = focused?.getAttribute('aria-label')
     this.show('full')
     this.mainOpen = true
-    // Selecting a card or row rebuilds this panel, and replaceChildren drops
-    // the scroll position with it — so picking a car you had scrolled down to
-    // snapped the list back to the top. Carry it across.
-    const priorScroll =
-      (this.panel.querySelector('.menu-body') as HTMLElement | null)?.scrollTop ?? 0
+    this.root.classList.add('menu-flow')
+    this.root.dataset.step = this.flowStep
     this.panel.replaceChildren()
 
-    const header = el('header', 'menu-header')
-    const eyebrow = el('div', 'eyebrow')
-    // The game's name on the title screen, with the mode as the eyebrow above
-    // it — the panel is the first thing anyone sees, and it was introducing
-    // itself by its genre.
-    eyebrow.textContent = 'Time attack'
-    const title = el('h1', 'menu-title')
-    title.textContent = 'Bite Point'
-    header.append(eyebrow, title)
-
-    const body = el('div', 'menu-body')
-    body.append(this.renderTracks(), this.renderCars())
-
-    const footer = el('footer', 'menu-footer')
-    const drive = el('button', 'btn btn-primary btn-drive')
-    drive.append(icon('play'), text('Drive'))
-    drive.addEventListener('click', () => {
-      if (hasSeenControls()) this.startDrive()
-      else this.showQuickStart()
+    const top = el('header', 'flow-top')
+    const wordmark = el('button', 'flow-wordmark')
+    wordmark.textContent = 'Bite Point'
+    wordmark.addEventListener('click', () => this.showMain())
+    const trail = el('nav', 'flow-trail')
+    trail.setAttribute('aria-label', 'Session setup')
+    const steps = this.flowStep === 'mode' ? ['Session']
+      : this.selection.mode === 'race' ? ['Session', 'Race setup']
+      : ['Session', 'Circuit', 'Handling']
+    const active = this.flowStep === 'mode' ? 0 : this.flowStep === 'handling' ? 2 : 1
+    steps.forEach((label, index) => {
+      const step = el('button', 'flow-trail-step')
+      step.textContent = `${String(index + 1).padStart(2, '0')} / ${label}`
+      step.disabled = index >= active
+      if (index === active) step.setAttribute('aria-current', 'step')
+      step.addEventListener('click', () => {
+        this.flowStep = index === 0 ? 'mode' : 'circuit'
+        this.renderFlow()
+      })
+      trail.append(step)
     })
-    const settingsBtn = el('button', 'btn btn-menu-secondary')
-    settingsBtn.append(icon('sliders'), text('Settings'))
-    settingsBtn.addEventListener('click', () => this.showSettings())
-    const leaderboardBtn = el('button', 'btn btn-menu-secondary')
-    leaderboardBtn.append(icon('trophy'), text('Leaderboard'))
-    leaderboardBtn.addEventListener('click', () => this.openLeaderboard())
-    const controlsBtn = el('button', 'btn btn-menu-secondary btn-controls')
-    controlsBtn.append(icon('keyboard'), text('Controls'))
-    controlsBtn.addEventListener('click', () => this.showControls())
-    const secondaryActions = el('div', 'menu-secondary-actions')
-    secondaryActions.append(leaderboardBtn, controlsBtn, settingsBtn)
-    const mainActions = el('div', 'menu-footer-actions')
-    mainActions.append(secondaryActions, drive)
-    footer.append(this.renderSetup(), mainActions)
+    top.append(wordmark, trail)
 
-    this.panel.append(header, body, footer)
-    // Reading scrollHeight forces the layout the assignment needs: set before
-    // the browser has measured the new content, scrollTop clamps to 0.
-    void body.scrollHeight
-    body.scrollTop = priorScroll
+    const body = el('main', 'flow-body')
+    const footer = el('footer', 'flow-footer')
+    const utilities = el('div', 'flow-utilities')
+    const records = el('button', 'flow-link')
+    records.textContent = 'Records'
+    records.addEventListener('click', () => this.openLeaderboard())
+    const controls = el('button', 'flow-link')
+    controls.textContent = 'Controls'
+    controls.addEventListener('click', () => this.showControls())
+    const settings = el('button', 'flow-link')
+    settings.textContent = 'Settings'
+    settings.addEventListener('click', () => this.showSettings())
+    if (this.flowStep !== 'race') utilities.append(records)
+    utilities.append(controls, settings)
+    footer.append(utilities)
+
+    if (this.flowStep === 'mode') {
+      const intro = el('div', 'flow-intro')
+      const kicker = el('p', 'flow-kicker')
+      kicker.textContent = 'A driving simulation'
+      const title = el('h1', 'flow-title flow-title-home')
+      title.setAttribute('aria-label', 'Bite Point')
+      title.innerHTML = 'Bite<br>Point<span class="flow-period">.</span>'
+      intro.append(kicker, title)
+      body.classList.add('flow-home')
+      body.append(intro, this.renderModePicker())
+      const hint = el('span', 'flow-footnote')
+      hint.textContent = 'Keyboard & mouse'
+      footer.append(hint)
+    } else {
+      const header = el('div', 'flow-heading')
+      const kicker = el('p', 'flow-kicker')
+      kicker.textContent = this.selection.mode === 'race' ? 'Race / event setup' : 'Time trial'
+      const title = el('h1', 'flow-title')
+      title.textContent = this.flowStep === 'circuit' ? 'Choose your circuit.'
+        : this.flowStep === 'handling' ? 'Set your balance.' : 'Croft Bay.'
+      header.append(kicker, title)
+      body.append(header)
+
+      if (this.flowStep === 'race') {
+        header.append(this.renderEventProgress())
+        body.append(this.renderRaceEvent())
+      }
+      else if (this.flowStep === 'circuit') body.append(this.renderTracks())
+      else {
+        const circuit = this.deps.tracks.find((track) => track.id === this.selection.trackId)
+        const location = el('p', 'flow-context')
+        location.textContent = circuit?.label ?? this.selection.trackId
+        header.append(location)
+        body.append(this.renderCars(), this.renderSetup())
+      }
+
+      const actions = el('div', 'flow-actions')
+      const back = el('button', 'flow-link flow-back')
+      const canReset = this.flowStep === 'race' && !!this.raceEvent?.qualifying && !this.raceEvent.completed
+      back.textContent = canReset ? 'New event' : '← Back'
+      back.addEventListener('click', () => {
+        if (canReset) { this.onNewEvent(); this.renderFlow() }
+        else this.backFlow()
+      })
+      const next = el('button', 'flow-continue')
+      next.textContent = this.flowStep === 'circuit' ? 'Continue'
+        : SHOW_REFERENCE_DRIVER ? 'Watch' : this.flowStep === 'race'
+          ? this.raceEvent?.completed ? 'New event' : this.raceEvent?.qualifying ? 'To the grid' : 'Start qualifying'
+          : 'Drive'
+      next.addEventListener('click', () => {
+        if (this.flowStep === 'circuit') {
+          this.flowStep = 'handling'
+          this.renderFlow()
+        } else if (this.flowStep === 'race' && this.raceEvent?.completed) {
+          this.onNewEvent()
+          this.renderFlow()
+        } else if (hasSeenControls()) this.startDrive()
+        else this.showQuickStart()
+      })
+      actions.append(back, next)
+      footer.append(actions)
+    }
+    this.panel.append(top, body, footer)
+    if (keyboardFocus) {
+      const restored = [...this.panel.querySelectorAll<HTMLButtonElement>('button')]
+        .find((button) => focusedLabel && button.getAttribute('aria-label') === focusedLabel && !button.disabled)
+      const heading = this.panel.querySelector<HTMLHeadingElement>('h1')
+      if (restored) restored.focus({ preventScroll: true })
+      else if (heading) {
+        heading.tabIndex = -1
+        heading.focus({ preventScroll: true })
+      }
+    }
   }
+
+  private backFlow(): void {
+    this.flowStep = this.flowStep === 'handling' ? 'circuit' : 'mode'
+    this.renderFlow()
+  }
+
+  private chooseMode(mode: SessionMode): void {
+    if (this.selection.mode === 'time') {
+      this.timeSelection = { trackId: this.selection.trackId, preset: this.selection.preset }
+    }
+    this.selection = mode === 'race'
+      ? raceSelection({ ...this.selection, mode })
+      : { ...this.selection, ...this.timeSelection, mode, ghostEntryId: null }
+    this.flowStep = mode === 'race' ? 'race' : 'circuit'
+    this.onSelectionChange(this.selection)
+    this.renderFlow()
+  }
+
+  private renderRaceEvent(): HTMLElement {
+    const event = el('div', 'flow-race-event')
+    const circuit = this.deps.tracks.find((track) => track.id === RACE_TRACK)
+    const venue = el('section', 'flow-venue')
+    venue.setAttribute('aria-label', 'Race circuit and handling')
+    if (circuit) {
+      const map = el('div', 'flow-venue-map')
+      map.append(buildTrackMap(circuit))
+      const facts = el('div', 'flow-venue-facts')
+      facts.textContent = `${(circuit.length / 1000).toFixed(2)} km / ${circuit.corners} corners`
+      venue.append(map, facts)
+    }
+    const trim = el('div', 'flow-fixed-trim')
+    const label = el('span', 'flow-kicker')
+    label.textContent = 'Handling'
+    const name = el('strong', '')
+    name.textContent = 'Low Drag'
+    const note = el('span', 'flow-trim-note')
+    note.textContent = 'The race setup'
+    trim.append(label, name, note)
+    venue.append(trim)
+    const setup = el('div', 'flow-race-setup')
+    if (this.raceEvent?.qualifying) setup.append(this.renderQualifyingResults())
+    else setup.append(this.renderRaceOptions(), this.renderSetup())
+    event.append(venue, setup)
+    return event
+  }
+
+  private renderEventProgress(): HTMLElement {
+    const progress = el('ol', 'flow-event-progress')
+    progress.setAttribute('aria-label', 'Race event progression')
+    const qualified = !!this.raceEvent?.qualifying
+    for (const [index, label] of ['One-shot qualifying', 'Race'].entries()) {
+      const step = el('li', 'flow-event-step')
+      const current = index === (qualified ? 1 : 0) && !this.raceEvent?.completed
+      step.classList.toggle('is-current', current)
+      if (current) step.setAttribute('aria-current', 'step')
+      const number = el('span', 'flow-event-number')
+      number.textContent = index === 0 && qualified || this.raceEvent?.completed ? '✓' : `0${index + 1}`
+      const title = el('span', '')
+      title.textContent = label
+      const status = el('span', 'flow-event-status')
+      status.textContent = index === 0 ? qualified ? 'Complete' : 'One flying lap'
+        : this.raceEvent?.completed ? 'Complete' : qualified ? 'Ready' : 'After qualifying'
+      step.append(number, title, status)
+      progress.append(step)
+    }
+    return progress
+  }
+
+  private renderQualifyingResults(): HTMLElement {
+    const result = this.raceEvent!.qualifying!
+    const section = el('section', 'flow-qualifying-results')
+    const label = el('p', 'flow-kicker')
+    label.textContent = 'Qualifying results'
+    const summary = el('div', 'flow-grid-position')
+    const place = el('strong', '')
+    place.textContent = `P${result.playerPosition}`
+    const time = el('span', '')
+    time.textContent = result.playerTime === null ? 'No valid lap · back of the grid' : formatTime(result.playerTime)
+    summary.append(place, time)
+    const table = el('ol', 'flow-qualifying-order')
+    for (const entry of result.entries) {
+      const row = el('li', 'flow-qualifying-row')
+      row.classList.toggle('is-player', entry.isPlayer)
+      const position = el('span', 'flow-grid-number')
+      position.textContent = String(result.entries.indexOf(entry) + 1).padStart(2, '0')
+      const colour = el('i', 'flow-grid-colour')
+      colour.style.background = liveryCss(entry.isPlayer ? PLAYER_LIVERY : fieldLivery(entry.driverId))
+      const name = el('span', 'flow-grid-driver')
+      name.textContent = entry.isPlayer ? 'You' : `Car ${entry.driverId + 1}`
+      const lap = el('span', 'flow-grid-time')
+      lap.textContent = entry.time === null ? 'No time' : formatTime(entry.time)
+      row.append(position, colour, name, lap)
+      table.append(row)
+    }
+    const format = el('p', 'flow-event-format')
+    format.textContent = `${this.selection.laps} laps / ${this.selection.opponents} opponents / ${difficultyByName(this.selection.difficulty).label}`
+    section.append(label, summary, table, format)
+    return section
+  }
+
 
   /** Full reference, deliberately one step away from the selection screen. */
   private showControls(): void {
@@ -304,12 +512,19 @@ export class Menu {
     header.append(eyebrow, title)
 
     const grid = el('div', 'controls-grid')
-    for (const group of CONTROL_GROUPS) grid.append(controlGroup(group.title, group.rows))
+    for (const group of CONTROL_GROUPS) {
+      const rows = group.rows.map(([key, label]) => [key,
+        key === 'R' && this.selection.mode === 'race'
+          ? this.raceEvent?.qualifying ? 'Clutch at start; restart race after launch' : 'End qualifying attempt'
+          : label,
+      ] as const)
+      grid.append(controlGroup(group.title, rows))
+    }
 
     const actions = el('div', 'menu-actions controls-actions')
     const back = el('button', 'btn btn-primary')
     back.textContent = 'Back'
-    back.addEventListener('click', () => this.showMain())
+    back.addEventListener('click', () => this.renderFlow())
     actions.append(back)
     this.panel.append(header, grid, actions)
   }
@@ -318,6 +533,7 @@ export class Menu {
   private showQuickStart(): void {
     this.show('dialog')
     this.root.classList.add('menu-controls')
+    this.controlsOpen = true
     this.panel.replaceChildren()
 
     const header = el('header', 'menu-header controls-header')
@@ -328,12 +544,18 @@ export class Menu {
     header.append(eyebrow, title)
 
     const quick = el('div', 'quick-controls')
-    for (const [key, label] of QUICK_CONTROLS) quick.append(controlRow(key, label))
+    for (const [key, label] of QUICK_CONTROLS) quick.append(controlRow(key,
+      key === 'R' && this.selection.mode === 'race'
+        ? this.raceEvent?.qualifying ? 'Clutch at start' : 'End qualifying attempt' : label))
+    const launch = this.selection.mode === 'race' ? el('p', 'quick-launch-tip') : null
+    if (launch) launch.textContent = this.raceEvent?.qualifying
+      ? 'Hold R to start the lights, then hold W. When all five red lights go out, release R while keeping W held.'
+      : 'The AI drives the sector 3 run-up for five seconds. One red light appears each second; take control when all five go out. Cross the line to begin your timed lap. An invalid or abandoned lap puts you at the back.'
 
     const actions = el('div', 'menu-actions quick-actions')
     const back = el('button', 'btn')
     back.textContent = 'Back'
-    back.addEventListener('click', () => this.showMain())
+    back.addEventListener('click', () => this.renderFlow())
     const start = el('button', 'btn btn-primary')
     start.textContent = 'Drive'
     start.addEventListener('click', () => {
@@ -341,12 +563,16 @@ export class Menu {
       this.startDrive()
     })
     actions.append(back, start)
-    this.panel.append(header, quick, actions)
+    this.panel.append(header, quick)
+    if (launch) this.panel.append(launch)
+    this.panel.append(actions)
   }
 
   private startDrive(): void {
+    if (this.selection.mode === 'race') this.selection = raceSelection(this.selection)
     this.hide()
-    this.onStart(this.selection)
+    if (this.selection.mode === 'race' && !this.raceEvent?.qualifying) this.onQualify(this.selection)
+    else this.onStart(this.selection)
   }
 
   private openLeaderboard(): void {
@@ -680,7 +906,7 @@ export class Menu {
     })
     const back = el('button', 'btn btn-primary')
     back.textContent = 'Back'
-    back.addEventListener('click', () => this.showMain())
+    back.addEventListener('click', () => this.renderFlow())
     actions.append(personal, back)
     footer.append(actions)
     return footer
@@ -745,7 +971,7 @@ export class Menu {
         this.hide()
         this.onResume()
       }),
-      actionButton('reset', 'Restart lap', 'R', '', () => {
+      actionButton('reset', status?.qualifying ? 'End qualifying' : status?.race ? 'Restart race' : 'Restart lap', 'R', '', () => {
         this.hide()
         this.onRestart()
       }),
@@ -1183,7 +1409,7 @@ export class Menu {
     const footer = el('footer', 'menu-footer')
     const back = el('button', 'btn btn-primary')
     back.textContent = 'Back'
-    back.addEventListener('click', () => this.showMain())
+    back.addEventListener('click', () => this.renderFlow())
     const acts = el('div', 'settings-actions')
     acts.append(back)
     footer.append(el('div', ''), acts)
@@ -1389,6 +1615,40 @@ export class Menu {
     return this.frame
   }
 
+
+  /**
+   * Time attack or race, as the first thing on the screen.
+   *
+   * It was a switch in the setup strip at the bottom, next to Easy mode, which
+   * said it was an option applied to a time trial. It is not — it changes what
+   * the session IS, what the rest of this panel asks you, what the HUD shows
+   * and whether a lap counts for anything. A choice that big is the first thing
+   * you make, not the last.
+   */
+  private renderModePicker(): HTMLElement {
+    const wrap = el('div', 'flow-modes')
+    for (const mode of [
+      { id: 'time' as const, label: 'Time Trial', description: 'One car. The clock. Your ghost.' },
+      { id: 'race' as const, label: 'Race', description: 'Take the grid. Race the field.' },
+    ]) {
+      const choice = el('button', 'flow-mode')
+      const number = el('span', 'flow-mode-number')
+      number.textContent = mode.id === 'time' ? '01' : '02'
+      const words = el('span', 'flow-mode-words')
+      const title = el('span', 'flow-mode-title')
+      title.textContent = mode.label
+      const description = el('span', 'flow-mode-description')
+      description.textContent = mode.description
+      words.append(title, description)
+      const selector = el('span', 'flow-mode-selector')
+      selector.setAttribute('aria-hidden', 'true')
+      choice.append(number, words, selector)
+      choice.addEventListener('click', () => this.chooseMode(mode.id))
+      wrap.append(choice)
+    }
+    return wrap
+  }
+
   private renderTracks(): HTMLElement {
     const section = el('section', 'menu-section')
     const released = RELEASED_TRACKS
@@ -1399,6 +1659,7 @@ export class Menu {
 
     for (const t of released) {
       const card = el('button', 'card')
+      card.setAttribute('aria-label', t.label)
       const selected = t.id === this.selection.trackId
       card.classList.toggle('is-selected', selected)
       card.setAttribute('aria-pressed', String(selected))
@@ -1430,21 +1691,10 @@ export class Menu {
       card.addEventListener('click', () => {
         this.selection = { ...this.selection, trackId: t.id, ghostEntryId: null }
         this.onSelectionChange(this.selection)
-        this.showMain()
+        this.renderFlow()
       })
       list.append(card)
     }
-
-    // The rest of the calendar, locked.
-    const teaser = el('div', 'card is-locked')
-    const name = el('div', 'card-title')
-    name.textContent = 'More circuits'
-    const blurb = el('div', 'card-blurb')
-    blurb.textContent = 'Additional layouts are in development.'
-    const tag = el('div', 'card-pb is-empty')
-    tag.textContent = 'Coming soon'
-    teaser.append(name, blurb, tag)
-    list.append(teaser)
 
     section.append(list)
     return section
@@ -1452,12 +1702,13 @@ export class Menu {
 
   private renderCars(): HTMLElement {
     const section = el('section', 'menu-section')
-    section.append(sectionTitle('Car', `${this.deps.presets.length}`))
+    section.append(sectionTitle('Handling', `${this.deps.presets.length}`))
     const list = el('div', 'menu-list')
 
     for (const info of this.deps.presets) {
       const locked = !RELEASED_PRESETS.includes(info.name)
       const row = el('button', 'row')
+      row.setAttribute('aria-label', info.label)
       row.classList.toggle('is-locked', locked)
       const selected = info.name === this.selection.preset
       row.classList.toggle('is-selected', selected)
@@ -1513,7 +1764,7 @@ export class Menu {
         row.addEventListener('click', () => {
           this.selection = { ...this.selection, preset: info.name, ghostEntryId: null }
           this.onSelectionChange(this.selection)
-          this.showMain()
+          this.renderFlow()
         })
       }
       list.append(row)
@@ -1533,10 +1784,43 @@ export class Menu {
       switchToggle('Easy mode', 'Aids wound up, grip on the grass. Times kept apart.', this.selection.easy, (v) => {
         this.selection = { ...this.selection, easy: v, ghostEntryId: null }
         this.onSelectionChange(this.selection)
-        this.showMain()
+        this.renderFlow()
       }),
     )
     return wrap
+  }
+
+  /** Laps, opponents and how hard they try. Race mode only. */
+  private renderRaceOptions(): HTMLElement {
+    const section = el('section', 'menu-section menu-section-wide')
+    const heading = el('h2', 'menu-section-title')
+    heading.textContent = 'Set the field'
+    const note = el('p', 'menu-section-note')
+    note.textContent =
+      'One flying lap sets your grid position.'
+    const wrap = el('div', 'menu-race')
+    const set = (patch: Partial<Selection>): void => {
+      this.selection = { ...this.selection, ...patch }
+      this.onSelectionChange(this.selection)
+      this.renderFlow()
+    }
+    wrap.append(
+      stepper('Laps', this.selection.laps, 1, MAX_RACE_LAPS, (v) => { set({ laps: v }) }),
+      stepper(
+        'Opponents', this.selection.opponents, 1, MAX_OPPONENTS,
+        (v) => { set({ opponents: v }) },
+      ),
+      labelledRow(
+        'Difficulty',
+        segmented(
+          DIFFICULTIES.map((d) => ({ id: d.name, label: d.label })),
+          difficultyByName(this.selection.difficulty).name,
+          (id) => { set({ difficulty: id }) },
+        ),
+      ),
+    )
+    section.append(heading, note, wrap)
+    return section
   }
 
   private renderHelp(keys: readonly (readonly [string, string])[]): HTMLElement {
@@ -2073,6 +2357,47 @@ function levels<K extends string>(
     current,
     (id) => onChange(scale[id as K]),
   )
+}
+
+/** A control with a label to its left, laid out like the steppers. */
+function labelledRow(label: string, control: HTMLElement): HTMLElement {
+  const row = el('div', 'menu-stepper')
+  const title = el('span', 'menu-stepper-label')
+  title.textContent = label
+  row.append(title, control)
+  return row
+}
+
+/**
+ * A number with a minus and a plus, and the value between them.
+ *
+ * A stepper rather than a slider or a text field: the ranges here are small
+ * (one to fifteen laps, one to seven opponents), every value is meaningful, and
+ * a stepper is the only one of the three that cannot produce an invalid state
+ * to validate afterwards.
+ */
+function stepper(
+  label: string, value: number, lo: number, hi: number, onChange: (v: number) => void,
+): HTMLElement {
+  const row = el('div', 'menu-stepper')
+  const title = el('span', 'menu-stepper-label')
+  title.textContent = label
+  const minus = el('button', 'menu-stepper-btn')
+  minus.type = 'button'
+  minus.textContent = '−'
+  minus.setAttribute('aria-label', `Decrease ${label.toLowerCase()}`)
+  minus.disabled = value <= lo
+  const shown = el('span', 'menu-stepper-value')
+  shown.textContent = String(value)
+  const plus = el('button', 'menu-stepper-btn')
+  plus.type = 'button'
+  plus.textContent = '+'
+  plus.setAttribute('aria-label', `Increase ${label.toLowerCase()}`)
+  plus.disabled = value >= hi
+  minus.addEventListener('click', () => { onChange(Math.max(lo, value - 1)) })
+  plus.addEventListener('click', () => { onChange(Math.min(hi, value + 1)) })
+  row.append(title, minus, shown, plus)
+  return row
 }
 
 function switchToggle(

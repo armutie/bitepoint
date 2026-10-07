@@ -76,6 +76,8 @@ export class InputState {
    */
   mode: InputMode = 'mouse'
   lookBack = false
+  get launchClutch(): boolean { return this.held.has('KeyR') }
+  get launchThrottle(): boolean { return this.held.has('KeyW') || this.held.has('ArrowUp') }
   /**
    * Fraction of the half-width at which the wheel hits full lock. 1.0 means
    * you drag to the very edge of the picture; 0.15 is a short flick.

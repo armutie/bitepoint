@@ -1,8 +1,8 @@
 # Bite Point
 
 A focused browser racing simulation built to feel good on keyboard and mouse.
-Chase clean laps across four circuits with two distinct car setups, personal
-bests, ghosts, sector timing and scalable graphics.
+Choose Time Trial across five circuits with two car setups, personal bests,
+ghosts and sector timing, or a race event at Croft Bay with the Low Drag setup.
 
 [Play Bite Point](https://armutie.github.io/bitepoint/)
 
@@ -15,6 +15,20 @@ bests, ghosts, sector timing and scalable graphics.
 - `Esc`: pause
 
 The complete control reference is available from the main menu.
+
+## Race events
+
+Choose the race distance, opponents and difficulty in the event menu. One-shot
+qualifying sets the starting grid: the AI drives the run-up for five seconds,
+with one red light each second. Take control when all five go out; the first
+line crossing starts the clock. An invalid or abandoned lap starts at the back.
+Qualifying returns to the event menu before you enter the race.
+
+In the race, hold `R` to start the lights, hold `W`, then release `R` at lights
+out. Track limits give two warnings, then a 3-second penalty, then 5 seconds for
+each further excursion. Penalties are included in final times and positions.
+Proximity chevrons show nearby cars behind in white and alongside in red across
+the full track width.
 
 ## Development
 
