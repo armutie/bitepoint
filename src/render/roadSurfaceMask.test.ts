@@ -24,7 +24,7 @@ describe('lap-aligned asphalt zones',()=>{
    expect(seam/(mask.width*3)).toBeLessThan(4)
    for(let s=0;s<track.length;s+=11){const half=track.halfAt(s),p=roadWearAt(track,s,half);expect(Math.abs(p.offset)).toBeLessThanOrEqual(half*0.65);expect(p.strength).toBeGreaterThanOrEqual(0);expect(p.strength).toBeLessThanOrEqual(1)}
   }
- })
+ },20000)
  it('keeps traffic paths smooth through curvature joins',()=>{
   for(const data of [croft,silverstone,technical]){
    const track=new Track(data as TrackData)

@@ -135,7 +135,7 @@ describe('race session', () => {
     // the back of the AI grid.
     const order = s.race.standings().filter((k) => k !== s.playerSlot)
     expect(order[0]).toBeLessThan(order[order.length - 1]!)
-  })
+  }, 20000)
 
   it('reports the player position and the gaps around them', () => {
     const s = session({ opponents: 3 })

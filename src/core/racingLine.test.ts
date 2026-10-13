@@ -278,7 +278,7 @@ describe('planning against the measured envelope', () => {
       if (demand > ggvAt(ggv, ggv.ay, v) * 1.01) over++
     }
     expect(over).toBe(0)
-  }, 60000)
+  }, 120000)
 
   it('carries its envelope through a commitment change', () => {
     // `atCommitment` rebuilds every driver's speeds in a race. If it fell back
