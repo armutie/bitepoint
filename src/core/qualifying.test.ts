@@ -88,6 +88,7 @@ describe('one-shot qualifying', () => {
     follower.flying = true
     const intro = new QualifyingIntro(sim, shape)
     let firstCrossing = 0
+    let startRemainder = 0
     let completed = false
     for (let tick = 1; tick <= 60 * 90; tick++) {
       const controls = intro.next() ?? follower.next(sim.car.s)
@@ -96,7 +97,9 @@ describe('one-shot qualifying', () => {
         firstCrossing = tick
         expect(firstCrossing * DT).toBeGreaterThan(5)
         expect(sim.timingArmed).toBe(true)
-        expect(sim.currentLapTime).toBe(0)
+        startRemainder = sim.currentLapTime
+        expect(startRemainder).toBeGreaterThanOrEqual(0)
+        expect(startRemainder).toBeLessThan(DT)
         expect(result.lapCompleted).toBeNull()
         expect(sim.currentSectors).toEqual([null, null, null])
       } else if (!firstCrossing) {
@@ -106,9 +109,9 @@ describe('one-shot qualifying', () => {
       }
       if (result.lapCompleted) {
         const lap = result.lapCompleted
-        expect(lap.time).toBeCloseTo((tick - firstCrossing) * DT)
+        expect(lap.time).toBe((tick - firstCrossing) * DT + startRemainder - (1 - result.finishFraction!) * DT)
         expect(lap.valid).toBe(true)
-        expect(lap.recording.inputs.length / 2).toBe(tick - firstCrossing)
+        expect(lap.recording.inputs.length / 2).toBe(tick - firstCrossing + 1)
         expect(sim.lapsCompleted).toBe(1)
         completed = true
         break

@@ -1,0 +1,28 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Bite Point · Kerb geometry review</title><style>html,body{margin:0;height:100%;background:#b6c8d9;font:14px system-ui}canvas{display:block;width:100%;height:100%}aside{position:absolute;top:16px;left:16px;padding:12px 16px;color:#eee;background:#17212de8;border-radius:6px}</style></head><body><aside id="result">Checking solid kerbs…</aside><script type="module">
+import * as THREE from 'three';
+import { Track } from './src/core/track.ts';
+import { buildWorld } from './src/render/world.ts';
+import { buildTerrain } from './src/render/terrain.ts';
+const track=new Track(await(await fetch('./tracks/power_8.json')).json());
+const scene=new THREE.Scene();scene.background=new THREE.Color(0xb6c8d9);
+const world=buildWorld(track,buildTerrain(track));scene.add(world.root);
+const renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(devicePixelRatio);renderer.setSize(innerWidth,innerHeight);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.3;document.body.append(renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xdce8ff,0x7c735b,2));const sun=new THREE.DirectionalLight(0xffe1b3,2.5);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);scene.add(sun,sun.target);
+let index=track.curvature.findIndex((k,i)=>k>0.0045&&track.curvature[(i+track.n-1)%track.n]<=0.0045);
+if(index<0)index=track.curvature.findIndex(k=>k>0.0045);
+const i=(index+1)%track.n;
+const x=track.cx[i],y=track.cy[i],j=(i+1)%track.n;
+const dx=track.cx[j]-x,dy=track.cy[j]-y,len=Math.hypot(dx,dy),nx=-dy/len,ny=dx/len;
+const edge=track.halfRing[i]+1.1;
+const tx=x+nx*edge,tz=-(y+ny*edge);
+const camera=new THREE.PerspectiveCamera(52,innerWidth/innerHeight,0.01,2000);
+camera.position.set(tx+nx*1.5-dx/len*2.7,0.36,tz-ny*1.5+dy/len*2.7);camera.lookAt(tx,0.055,tz);
+sun.position.set(tx+12,10,tz+8);sun.target.position.set(tx,0,tz);sun.shadow.camera.left=-12;sun.shadow.camera.right=12;sun.shadow.camera.top=12;sun.shadow.camera.bottom=-12;sun.shadow.camera.near=0.1;sun.shadow.camera.far=50;sun.shadow.normalBias=0.01;
+const kerbs=world.root.getObjectByName('solid-kerbs');const positions=kerbs.geometry.getAttribute('position');const edges=new Map();
+const key=i=>[positions.getX(i),positions.getY(i),positions.getZ(i)].map(v=>v.toFixed(5)).join(',');
+for(let t=0;t<positions.count;t+=3){for(const[a,b]of[[t,t+1],[t+1,t+2],[t+2,t]]){const edgeKey=[key(a),key(b)].sort().join('|');edges.set(edgeKey,(edges.get(edgeKey)||0)+1);}}
+const open=[...edges.values()].filter(count=>count!==2).length;
+document.querySelector('#result').textContent=`Kerb outer wall / closed end · ${open===0?'Closed mesh verified':open+' unmatched edges'}`;
+renderer.render(scene,camera);
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.render(scene,camera);});
+</script></body></html>

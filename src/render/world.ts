@@ -1,3 +1,4 @@
+import { chunkGeometry } from './meshChunks'
 /**
  * The circuit as three.js geometry.
  *
@@ -25,6 +26,10 @@ import * as THREE from 'three'
 
 import type { Track } from '../core/track'
 import { PALETTE } from './palette'
+import { applyRoadWear, makeRubberTexture, makeRoadScuffTexture, roadWearAt } from './roadWear'
+import { buildNearGrass } from './nearGrass'
+import { weatherKerb } from './kerbSurface'
+import { kerbPoint, KERB_CURVATURE, KERB_ACROSS, KERB_ALONG } from './trackSurface'
 import type { Terrain } from './terrain'
 
 export interface World {
@@ -33,15 +38,8 @@ export interface World {
 }
 
 /** Curvature above which a stretch of road is a corner worth kerbing. */
-const KERB_CURVATURE = 0.0045
-const KERB_WIDTH = 1.1
 const LINE_WIDTH = 0.18
 const BARRIER_HEIGHT = 1.05
-/** Transverse tarmac seam every N metres — the speed cue on straights. */
-const SEAM_SPACING = 8.0
-const SEAM_WIDTH = 0.14
-/** How much darker the rubbered centre of the road is than its edges. */
-const RUBBER_DARKEN = 0.86
 
 /** sim (x, y) -> three (x, z), with a height. */
 const vx = (x: number): number => x
@@ -176,44 +174,53 @@ function toTexture(size: number, value: (i: number) => number): THREE.CanvasText
   return tex
 }
 
-/**
- * Asphalt: patch-scale tonal drift, aggregate blotch, fine speckle, and a few
- * lighter repair patches with hard edges — the thing that most says "road
- * someone has maintained" rather than "grey fill".
- */
-function makeAsphaltTexture(): THREE.CanvasTexture {
-  const size = 512
-  const rand = lcg(0x9e3779b9)
-  const drift = octave(size, 6, rand)
-  const blotch = octave(size, 28, rand)
-  const speck = octave(size, 128, rand)
-
-  // Hard-edged repair patches: a handful of axis-aligned rectangles.
-  const patches = new Float32Array(size * size)
-  for (let p = 0; p < 7; p++) {
-    const px = Math.floor(rand() * size)
-    const py = Math.floor(rand() * size)
-    const pw = 30 + Math.floor(rand() * 90)
-    const ph = 18 + Math.floor(rand() * 46)
-    const lift = (rand() - 0.35) * 0.09
-    for (let y = 0; y < ph; y++) {
-      for (let x = 0; x < pw; x++) {
-        patches[((py + y) % size) * size + ((px + x) % size)] = lift
-      }
+/** Small embedded stones, dark interstices and separate physical surface maps. */
+function makeAsphaltTextures(): { color: THREE.CanvasTexture; normal: THREE.CanvasTexture; roughness: THREE.CanvasTexture } {
+  const size = 1024, cells = 256, rand = lcg(0x9e3779b9)
+  const drift = octave(size, 6, rand), blotch = octave(size, 28, rand)
+  const points = Array.from({ length: cells * cells }, () => [rand(), rand(), rand()] as const)
+  const colors = new Float32Array(size * size), heights = new Float32Array(size * size), roughness = new Float32Array(size * size)
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const gx = x / size * cells, gy = y / size * cells
+    const ix = Math.floor(gx), iy = Math.floor(gy)
+    let nearest = Infinity, second = Infinity, stoneTone = 0.5
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const point = points[((iy + dy + cells) % cells) * cells + (ix + dx + cells) % cells]!
+      const distance = (ix + dx + point[0] - gx) ** 2 + (iy + dy + point[1] - gy) ** 2
+      if (distance < nearest) { second = nearest; nearest = distance; stoneTone = point[2] }
+      else if (distance < second) second = distance
     }
+    const i = y * size + x
+    const gap = Math.min(1, Math.max(0, (second - nearest) * 3.0))
+    const shoulder = gap * gap * (3 - 2 * gap)
+    const stone = shoulder * (0.68 + 0.32 * Math.exp(-nearest * 1.6))
+    const pores = Math.max(0, 1 - stone * 4)
+    colors[i] = 0.92 + 0.06 * (drift[i]! - 0.5) + 0.045 * (blotch[i]! - 0.5)
+      + 0.035 * (stoneTone - 0.5) - 0.015 * pores + 0.006 * (rand() - 0.5)
+    heights[i] = stone * (0.82 + 0.18 * stoneTone)
+    roughness[i] = 0.78 + 0.15 * (1 - stone) + 0.04 * stoneTone
   }
-
-  return toTexture(size, (i) => {
-    const grit = rand() // per-pixel white noise, deterministic order
-    return (
-      0.8 +
-      0.1 * drift[i]! +
-      0.08 * blotch[i]! +
-      0.05 * speck[i]! +
-      0.04 * grit +
-      patches[i]!
-    )
-  })
+  const color = toTexture(size, i => colors[i]!), rough = toTexture(size, i => roughness[i]!)
+  // Bake millimetre-scale relief into normals, rather than relying on colour dots
+  // or screen derivatives of a height map at a shallow viewing angle.
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = size
+  const ctx = canvas.getContext('2d')!, image = ctx.createImageData(size, size)
+  const slopeScale = 0.0012 / (2 * 2.5 / size)
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const i = y * size + x
+    const dx = (heights[y * size + (x + 1) % size]! - heights[y * size + (x + size - 1) % size]!) * slopeScale
+    const dy = (heights[((y + 1) % size) * size + x]! - heights[((y + size - 1) % size) * size + x]!) * slopeScale
+    const inv = 1 / Math.hypot(dx, dy, 1)
+    image.data[i * 4] = Math.round((-dx * inv * 0.5 + 0.5) * 255)
+    image.data[i * 4 + 1] = Math.round((dy * inv * 0.5 + 0.5) * 255)
+    image.data[i * 4 + 2] = Math.round((inv * 0.5 + 0.5) * 255)
+    image.data[i * 4 + 3] = 255
+  }
+  ctx.putImageData(image, 0, 0)
+  const normal = new THREE.CanvasTexture(canvas)
+  normal.wrapS = normal.wrapT = THREE.RepeatWrapping; normal.colorSpace = THREE.NoColorSpace
+  for (const texture of [color, normal, rough]) texture.anisotropy = 8
+  return { color, normal, roughness: rough }
 }
 
 /**
@@ -268,33 +275,30 @@ export function buildWorld(track: Track, terrain: Terrain): World {
 
   const n = track.n
   const tarmac = newStrip()
+  const roadWear: number[] = []
+  let roadDistance = 0
   const lines = newStrip()
   const kerbs = newStrip()
-  const seams = newStrip()
+  const kerbSurface: number[] = []
   const barriers = newStrip()
 
   const cTarmac = new THREE.Color(PALETTE.TARMAC)
-  const cTarmacAlt = new THREE.Color(PALETTE.TARMAC).lerp(new THREE.Color(PALETTE.TARMAC_FAR), 0.35)
   const cLine = new THREE.Color(PALETTE.LIMIT)
   const cKerbA = new THREE.Color(PALETTE.KERB_A)
   const cKerbB = new THREE.Color(PALETTE.KERB_B)
-  const cSeam = new THREE.Color(PALETTE.SEAM)
   const cBarrierA = new THREE.Color(PALETTE.BARRIER_A)
   const cBarrierB = new THREE.Color(PALETTE.BARRIER_B)
   const cCrest = new THREE.Color(PALETTE.BARRIER_CREST)
 
-  let seamDebt = 0
 
   for (let i = 0; i < n; i++) {
     const j = (i + 1) % n
     const hi = track.halfRing[i]!
     const hj = track.halfRing[j]!
 
-    // Road surface, in two halves with the centre darkened: the rubbered-in
-    // line. Grip has no lateral variation in the sim — this is honest paint,
-    // not hidden physics. Subtle band shading gives straights a rhythm.
-    const shade = Math.floor(i / 6) % 2 === 0 ? cTarmac : cTarmacAlt
-    const centre = shade.clone().multiplyScalar(RUBBER_DARKEN)
+    // Continuous aggregate surface; lap-aligned rubber is applied in the material.
+    const shade = cTarmac
+    const centre = shade
     const li = offsetPoint(track, i, hi)
     const lj = offsetPoint(track, j, hj)
     const ri = offsetPoint(track, i, -hi)
@@ -309,7 +313,7 @@ export function buildWorld(track: Track, terrain: Terrain): World {
       vx(mj.x), 0, vz(mj.y),
       vx(mi.x), 0, vz(mi.y),
       shade, shade, centre, centre,
-      1 / 5,
+      1 / 2.5,
     )
     quad(
       tarmac,
@@ -318,8 +322,19 @@ export function buildWorld(track: Track, terrain: Terrain): World {
       vx(rj.x), 0, vz(rj.y),
       vx(ri.x), 0, vz(ri.y),
       centre, centre, shade, shade,
-      1 / 5,
+      1 / 2.5,
     )
+
+    const nextDistance = roadDistance + track.segLenAt(i)
+    const wi = roadWearAt(track, roadDistance, hi)
+    const wj = roadWearAt(track, nextDistance, hj)
+    const a = (d: number, w: typeof wi, distance: number) => [d, distance / track.length, w.strength]
+    const leftI = a(hi, wi, roadDistance), leftJ = a(hj, wj, nextDistance)
+    const midI = a(0, wi, roadDistance), midJ = a(0, wj, nextDistance)
+    const rightI = a(-hi, wi, roadDistance), rightJ = a(-hj, wj, nextDistance)
+    // Match quad's triangle winding exactly; lap coordinates stay continuous.
+    for (const p of [leftI, midJ, leftJ, leftI, midI, midJ, midI, rightJ, midJ, midI, rightI, rightJ]) roadWear.push(...p)
+    roadDistance = nextDistance
 
     // Painted edge lines, just inside the boundary.
     for (const side of [1, -1]) {
@@ -338,45 +353,40 @@ export function buildWorld(track: Track, terrain: Terrain): World {
       )
     }
 
-    // Transverse seams on the straights, spaced by arc length. Skipped in the
-    // corners where the kerbs already carry the speed read.
-    seamDebt += track.segLenAt(i)
-    if (seamDebt >= SEAM_SPACING && track.curvature[i]! <= KERB_CURVATURE) {
-      seamDebt = 0
-      const a = offsetPoint(track, i, hi - LINE_WIDTH * 1.6)
-      const b = offsetPoint(track, i, -(hi - LINE_WIDTH * 1.6))
-      const t = { x: track.cx[j]! - track.cx[i]!, y: track.cy[j]! - track.cy[i]! }
-      const tl = Math.max(Math.hypot(t.x, t.y), 1e-9)
-      const ux = (t.x / tl) * SEAM_WIDTH
-      const uy = (t.y / tl) * SEAM_WIDTH
-      quadFlat(
-        seams,
-        vx(a.x), 0.006, vz(a.y),
-        vx(a.x + ux), 0.006, vz(a.y + uy),
-        vx(b.x + ux), 0.006, vz(b.y + uy),
-        vx(b.x), 0.006, vz(b.y),
-        cSeam,
-        1 / 3,
-      )
-    }
-
+    const lenKerb = track.segLenAt(i)
     // Kerbs on the corners only, striped along the road, with a raised crest.
     if (track.curvature[i]! > KERB_CURVATURE) {
       const stripe = Math.floor(i / 2) % 2 === 0 ? cKerbA : cKerbB
       for (const side of [1, -1]) {
-        const oi = offsetPoint(track, i, side * hi)
-        const oj = offsetPoint(track, j, side * hj)
-        const ki = offsetPoint(track, i, side * (hi + KERB_WIDTH))
-        const kj = offsetPoint(track, j, side * (hj + KERB_WIDTH))
-        quadFlat(
-          kerbs,
-          vx(oi.x), 0.02, vz(oi.y),
-          vx(oj.x), 0.02, vz(oj.y),
-          vx(kj.x), 0.09, vz(kj.y),
-          vx(ki.x), 0.09, vz(ki.y),
-          stripe,
-          1 / 2,
-        )
+        // A rounded concrete bank, sampled across its width. Broad, continuous
+        // variations give different runs flatter, domed, or asymmetric shoulders.
+        type KerbVertex = { x: number; y: number; z: number; along: number; across: number }
+        const begin = roadDistance - lenKerb
+        const previous = (i + n - 1) % n
+        const starts = track.curvature[previous]! <= KERB_CURVATURE
+        const stops = track.curvature[j]! <= KERB_CURVATURE
+        const profile = (t: number, u: number, foot = false): KerbVertex => {
+          const p = kerbPoint(track, i, begin, side, t, u)
+          return { x: vx(p.x), z: vz(p.y), y: foot ? -0.035 : p.height, along: begin + t * lenKerb, across: u }
+        }
+        const face = (a: KerbVertex, b: KerbVertex, c: KerbVertex, d: KerbVertex, color: THREE.Color): void => {
+          quadFlat(kerbs, a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z, color, 1 / 2)
+          for (const v of [a, c, b, a, d, c]) kerbSurface.push(v.along, v.across, side)
+        }
+        const edgePaint = stripe.clone().multiplyScalar(0.92)
+        const acrossSteps = KERB_ACROSS, alongSteps = KERB_ALONG
+        for (let l = 0; l < alongSteps; l++) {
+          const t0 = l / alongSteps, t1 = (l + 1) / alongSteps
+          for (let c = 0; c < acrossSteps; c++) {
+            const u0 = c / acrossSteps, u1 = (c + 1) / acrossSteps
+            face(profile(t0, u0), profile(t1, u0), profile(t1, u1), profile(t0, u1), stripe)
+            face(profile(t0, u0, true), profile(t0, u1, true), profile(t1, u1, true), profile(t1, u0, true), edgePaint)
+            if (starts && l === 0) face(profile(t0, u0), profile(t0, u1), profile(t0, u1, true), profile(t0, u0, true), edgePaint)
+            if (stops && l === alongSteps - 1) face(profile(t1, u1), profile(t1, u0), profile(t1, u0, true), profile(t1, u1, true), edgePaint)
+          }
+          face(profile(t1, 0), profile(t0, 0), profile(t0, 0, true), profile(t1, 0, true), edgePaint)
+          face(profile(t0, 1), profile(t1, 1), profile(t1, 1, true), profile(t0, 1, true), edgePaint)
+        }
       }
     }
 
@@ -488,11 +498,18 @@ export function buildWorld(track: Track, terrain: Terrain): World {
     }
   }
 
-  const asphalt = makeAsphaltTexture()
+  const asphalt = makeAsphaltTextures()
+  const rubber = makeRubberTexture(track)
+  const scuffs = makeRoadScuffTexture()
+  disposables.push(rubber, scuffs)
   const wear = makeWearTexture()
-  disposables.push(asphalt, wear)
+  disposables.push(asphalt.color, asphalt.normal, asphalt.roughness, wear)
 
-  const surfaceMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: asphalt })
+  const surfaceMat = new THREE.MeshStandardMaterial({
+    vertexColors: true, map: asphalt.color, roughness: 0.88, roughnessMap: asphalt.roughness, metalness: 0,
+    normalMap: asphalt.normal, normalScale: new THREE.Vector2(0.85, 0.85), envMapIntensity: 0.80,
+  })
+  applyRoadWear(surfaceMat, rubber, track.length, scuffs)
   // DoubleSide is the fix for a subtle winding bug: the painted-line and kerb
   // quads are built by mirroring lateral offsets for the two sides of the
   // road, and the mirror flips the winding — so one side's paint faced
@@ -506,6 +523,16 @@ export function buildWorld(track: Track, terrain: Terrain): World {
     polygonOffsetFactor: -2,
     polygonOffsetUnits: -2,
   })
+  const concreteRand = lcg(0xc045e713)
+  const concreteCoarse = octave(512, 32, concreteRand)
+  const concrete = toTexture(512, i => 0.91 + 0.045 * concreteCoarse[i]! + 0.015 * concreteRand())
+  concrete.anisotropy = 8
+  const kerbMat = new THREE.MeshStandardMaterial({
+    vertexColors: true, map: concrete, bumpMap: concrete, bumpScale: 0.001,
+    roughness: 0.96, metalness: 0, envMapIntensity: 0.18, side: THREE.DoubleSide,
+  })
+  weatherKerb(kerbMat)
+  disposables.push(concrete, kerbMat)
   const barrierMat = new THREE.MeshLambertMaterial({
     vertexColors: true,
     map: wear,
@@ -525,20 +552,49 @@ export function buildWorld(track: Track, terrain: Terrain): World {
   for (const [strip, mat, shadow] of [
     [tarmac, surfaceMat, true],
     [lines, overlayMat, true],
-    [seams, overlayMat, true],
-    [kerbs, overlayMat, true],
+    [kerbs, kerbMat, true],
     [barriers, barrierMat, false],
     [posts, barrierMat, false],
     [skirts, skirtMat, false],
   ] as const) {
     if (strip.positions.length === 0) continue
     const mesh = stripToMesh(strip, mat, shadow)
-    disposables.push(mesh.geometry)
-    root.add(mesh)
+    if (strip === tarmac) mesh.geometry.setAttribute('roadWear', new THREE.Float32BufferAttribute(roadWear, 3))
+    if (strip === kerbs) {
+      mesh.name = 'solid-kerbs'
+      // Smooth lighting across profile facets and painted stripe boundaries.
+      // Keep the non-indexed colors/UVs, averaging only the shared-position normals.
+      const positions = mesh.geometry.getAttribute('position')
+      const normals = mesh.geometry.getAttribute('normal')
+      const sums = new Map<string, THREE.Vector3>()
+      const key = (v: number): string => `${positions.getX(v).toFixed(5)},${positions.getY(v).toFixed(5)},${positions.getZ(v).toFixed(5)}`
+      for (let v = 0; v < positions.count; v++) {
+        const k = key(v), sum = sums.get(k) ?? new THREE.Vector3()
+        sum.add(new THREE.Vector3(normals.getX(v), normals.getY(v), normals.getZ(v)))
+        sums.set(k, sum)
+      }
+      for (const normal of sums.values()) normal.normalize()
+      for (let v = 0; v < positions.count; v++) {
+        const normal = sums.get(key(v))!
+        normals.setXYZ(v, normal.x, normal.y, normal.z)
+      }
+      mesh.geometry.setAttribute('kerbSurface', new THREE.Float32BufferAttribute(kerbSurface, 3))
+      mesh.castShadow = false
+    }
+    if(strip===kerbs){
+      for(const geometry of chunkGeometry(mesh.geometry,64)){
+        const part=new THREE.Mesh(geometry,mat);part.name='solid-kerbs';part.receiveShadow=true
+        disposables.push(geometry);root.add(part)
+      }
+      mesh.geometry.dispose()
+    }else{disposables.push(mesh.geometry);root.add(mesh)}
   }
 
   root.add(buildStartLine(track, disposables))
   root.add(buildGround(track, terrain, disposables))
+  const nearGrass = buildNearGrass(track, terrain)
+  root.add(nearGrass.root)
+  disposables.push(nearGrass)
 
   return {
     root,

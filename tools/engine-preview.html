@@ -1,0 +1,56 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Bite Point — Gear changes</title>
+<style>body{font:17px system-ui;background:#101820;color:#eee;max-width:850px;margin:35px auto;padding:24px}button,a{color:#99dacb}button{background:#283941;padding:14px;border:1px solid #59766e;border-radius:8px;cursor:pointer}audio{display:block;margin:14px 0;width:100%}pre{font-size:13px;white-space:pre-wrap}.muted{color:#a1abb1}h2{font-size:20px;margin-top:24px}</style>
+<h1>Hear the gear changes</h1><p>Actual automatic gearbox: launch, acceleration, lift-off, hard braking and downshifts.</p>
+<p class="muted">Same driving sequence in both previews. Engine isolated; your game volume setting is additional.</p>
+<button id="render">Prepare comparison</button>
+<h2>Previous</h2><audio controls id="previous"></audio>
+<h2>New — connected shifts and rev blips</h2><audio controls id="new"></audio><a id="download" hidden>Download new preview</a>
+<details><summary>Checks and shift times</summary><pre id="result">Ready</pre></details>
+<p class="muted">Engine samples: DerMeehdrescher / Meehdrescher Studios, CC BY-SA 4.0. Exhaust catch: CeebFrack, CC0. <a href="/audio/engine/CREDITS.txt">Credits</a></p>
+<script type="module">
+import {EngineVoice} from '/src/audio/engine.ts'
+import {EngineVoice as Previous} from './audio-audition/engine-baseline.ts'
+import {Car} from '/src/core/car.ts'
+import {handlingPreset} from '/src/core/carParams.ts'
+const result=document.querySelector('#result')
+function wavURL(buffer){
+ const x=buffer.getChannelData(0),sr=buffer.sampleRate,wav=new ArrayBuffer(44+x.length*2),v=new DataView(wav)
+ const str=(at,s)=>[...s].forEach((c,i)=>v.setUint8(at+i,c.charCodeAt(0)))
+ str(0,'RIFF');v.setUint32(4,36+x.length*2,true);str(8,'WAVE');str(12,'fmt ');v.setUint32(16,16,true);v.setUint16(20,1,true);v.setUint16(22,1,true);v.setUint32(24,sr,true);v.setUint32(28,sr*2,true);v.setUint16(32,2,true);v.setUint16(34,16,true);str(36,'data');v.setUint32(40,x.length*2,true)
+ x.forEach((a,i)=>v.setInt16(44+i*2,Math.max(-1,Math.min(1,a))*32767,true))
+ let binary='';const bytes=new Uint8Array(wav);for(let i=0;i<bytes.length;i+=32768)binary+=String.fromCharCode(...bytes.subarray(i,i+32768));return 'data:audio/wav;base64,'+btoa(binary)
+}
+document.querySelector('#render').onclick=async()=>{
+try {
+result.textContent='Rendering…'
+const sr=48000,duration=25,car=new Car(handlingPreset('legacy')),trace=[]
+car.brakeAwareAuto=2
+for(let i=0;i<23*60;i++){
+ const t=i/60,throttle=t<1?0:t<13?1:t<15?0:t<21?-1:0
+ car.step(0,throttle,1/60)
+ trace.push({t,speed:Math.abs(car.s.vx),vx:car.s.vx,wheelVr:car.s.wheelVr,slipF:0,slipR:0,onKerb:false,onGrass:false,
+ rpm:car.s.engineRpm,idleRpm:car.p.idleRpm,redlineRpm:car.p.redlineRpm,gear:car.s.gear,shiftTimer:car.s.shiftTimer,throttle})
+}
+const checks={}
+for(const [label,Voice] of [['previous',Previous],['new',EngineVoice]]){
+ const started=performance.now(),ctx=new OfflineAudioContext(1,duration*sr,sr)
+ const engine=await Voice.create(ctx,ctx.destination),events=[]
+ for(const frame of trace){const m=engine.update(frame,frame.t);if(m?.event)events.push({at:Number(frame.t.toFixed(3)),gear:frame.gear+1,event:m.event,rpm:Math.round(frame.rpm)})}
+ if(label==='new')engine.idle(23);else engine.level.gain.setTargetAtTime(0,23,.22)
+ const buffer=await ctx.startRendering(),x=buffer.getChannelData(0)
+ let peak=0,sum=0,tail=0
+ for(let i=0;i<x.length;i++){peak=Math.max(peak,Math.abs(x[i]));sum+=x[i]*x[i];if(i>24.5*sr)tail=Math.max(tail,Math.abs(x[i]))}
+ const url=wavURL(buffer);document.getElementById(label).src=url
+ checks[label]={renderMs:Math.round(performance.now()-started),peak:Number(peak.toFixed(4)),rms:Number(Math.sqrt(sum/x.length).toFixed(4)),pausedTailPeak:tail,clipped:peak>=1,events}
+ if(label==='new'){const a=document.querySelector('#download');a.href=url;a.download='bitepoint-engine-shifts.wav';a.hidden=false}
+ engine.dispose()
+}
+// Inspect the transient's onset, to avoid selecting a silent sample fragment.
+const probe=new OfflineAudioContext(1,48000,48000),sample=await probe.decodeAudioData(await(await fetch('/audio/engine/exhaust-catch.mp3')).arrayBuffer())
+const data=sample.getChannelData(0);let peak=0,peakAt=0,first=-1
+for(let i=0;i<data.length;i++){const a=Math.abs(data[i]);if(first<0&&a>.025)first=i/sample.sampleRate;if(a>peak){peak=a;peakAt=i/sample.sampleRate}}
+checks.transient={peak,peakAt,first}
+result.textContent=JSON.stringify(checks,null,2)
+}catch(e){result.textContent=String(e);console.error(e)}
+}
+</script></html>

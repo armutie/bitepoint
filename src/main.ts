@@ -126,6 +126,7 @@ async function boot(): Promise<void> {
       `${record.path ? '' : ' (WARNING: no path recorded, comparison will be limited)'}`
   }
   const renderer = new Renderer(canvas)
+  if(import.meta.env.DEV)window.addEventListener('keydown',e=>{if(e.code==='F8'){e.preventDefault();renderer.toggleProfiling()}})
   const sound = new Sound()
   const hud = new Hud()
   const finish = new RaceFinish()
@@ -159,6 +160,7 @@ async function boot(): Promise<void> {
   const setViewport = (mode: ViewportMode): void => {
     viewport = mode
     applyViewport(stage, mode)
+    renderer.setClassicFraming(mode === 'classic')
     renderer.resize()
     // The steering centre is relative to the picture, so it moves with it.
     input.refreshBounds()
@@ -421,6 +423,7 @@ async function boot(): Promise<void> {
     const p = params(sel)
     const simOpts = {
       manual: false,
+      brakeAwareAuto: 2 as const,
       // Always on, not "on when TC is on". The rotary can be turned mid-lap, so
       // the channel has to exist from the first tick or a lap that started at
       // TC off and ended at TC 4 would have no room to say so.
@@ -565,6 +568,7 @@ async function boot(): Promise<void> {
     // and upload a whole car in the middle of the lap that follows it. It
     // stays invisible until a replay actually runs.
     renderer.setCars(p, true)
+    await renderer.prepare()
     renderer.ghostVisible = sel.mode === 'time' && sel.ghost
     ghost = null
 
@@ -574,6 +578,7 @@ async function boot(): Promise<void> {
     // AudioContext make a sound. Built here rather than at boot, so a player
     // who never presses it never has one.
     if (settings.volume > 0) sound.start()
+    loop.resumeSimulation(true)
     running = true
     paused = false
   }
@@ -587,7 +592,7 @@ async function boot(): Promise<void> {
       trackLabel: manifest.find((t) => t.id === current.trackId)?.label ?? current.trackId,
       carLabel: presetLabel(current.preset),
       easy: current.easy,
-      currentLap: sim.currentLapTime,
+      currentLap: sim.timingArmed ? sim.currentLapTime + loop.simulationRemainder : 0,
       bestLap: sim.bestLapTime,
       lapValid: race !== null || sim.lapValid,
       timingArmed: sim.timingArmed,
@@ -610,6 +615,7 @@ async function boot(): Promise<void> {
       return
     }
     sim.reset()
+    loop.resumeSimulation(true)
     prevState = { ...sim.car.s }
     ghost = null
     ghostPrev = null
@@ -624,6 +630,7 @@ async function boot(): Promise<void> {
     }
     finishState = 'none'
     finish.hide()
+    loop.resumeSimulation(true)
     running = false
     // Leaving the session, not stopping it: the menu gets its flyover back.
     paused = false
@@ -810,6 +817,7 @@ async function boot(): Promise<void> {
         fastestSectors: sim.fastestSectors.slice(),
         trace: lap.trace,
         path: lap.path,
+        ...(lap.pathStartTime !== undefined ? { pathStartTime: lap.pathStartTime } : {}),
         // Stamped here rather than inside the sim: the sim must not read a
         // clock, or a replay would not be a replay.
         recordedAt: new Date().toISOString(),
@@ -824,7 +832,8 @@ async function boot(): Promise<void> {
       if (becomesLiveBest) {
         ghostRecord = record
         sim.referenceTrace = lap.trace
-        ghost = new GhostPath(lap.path)
+        ghost = new GhostPath(lap.path, lap.pathStartTime)
+        if (ghost instanceof GhostPath) ghost.seekTime(sim.currentLapTime)
         ghostPrev = { ...ghost.car.s }
         renderer.ensureGhost(params(current))
         renderer.ghostVisible = race === null && current.ghost
@@ -932,7 +941,7 @@ async function boot(): Promise<void> {
         && (result.lapCompleted || (!before && result.timingArmed))
       ) {
         if (ghostRecord.path) {
-          ghost = new GhostPath(ghostRecord.path)
+          ghost = new GhostPath(ghostRecord.path, ghostRecord.pathStartTime)
         } else {
           // No path: a lap recorded before positions were stored, or one whose
           // path was shed to fit the storage quota. It has to be re-driven from
@@ -960,7 +969,9 @@ async function boot(): Promise<void> {
       }
       if (ghost && !ghost.finished) {
         ghostPrev = { ...ghost.car.s }
-        ghost.step()
+        if (ghost instanceof GhostPath && ghostRecord?.pathStartTime !== undefined) {
+          ghost.seekTime(sim.currentLapTime)
+        } else ghost.step()
       }
 
       // One thump per contact, driven off the fixed step rather than the frame
@@ -989,20 +1000,15 @@ async function boot(): Promise<void> {
       if (sim && prevState) {
         // Paused draws the physics state exactly, with no interpolation.
         //
-        // `alpha` keeps sweeping 0..1 with the physics stopped — the loop still
-        // drains its accumulator every frame, the fixed step just returns early
-        // — so interpolating would rock the car back and forth across one tick
-        // forever. A pause has to be a still frame, not a very short loop.
+        // Keep the picture on the stopped physics pose. Manual pause also
+        // holds the loop's fractional time; other frozen screens do not need
+        // to interpolate the last two car states.
         const drawn = paused ? sim.car.s : interpolate(prevState, sim.car.s, alpha)
         const p = params(current)
         // Where the car sits relative to the painted edge, so the camera can
         // rumble on the kerbs and shake on the grass.
         const proj = sim.track.project(sim.car.s.x, sim.car.s.y)
-        // The ghost freezes on the same terms the player does. `alpha` sweeps
-        // 0..1 whether or not the physics is running, so an interpolated ghost
-        // on a held frame rocks back and forth across one tick — the player car
-        // was fixed for this and the ghost was not, which is why only the ghost
-        // jittered while paused.
+        // The ghost holds the same stopped timeline as the player car.
         const ghostDrawn =
           ghost && !ghost.finished
             ? ghostPrev && !paused
@@ -1068,11 +1074,11 @@ async function boot(): Promise<void> {
           onKerb: renderer.rig.onKerb,
           onGrass: renderer.rig.onGrass,
           rpm: launchRev,
+          gear: cs.gear,
+          idleRpm: p.idleRpm,
           redlineRpm: p.redlineRpm,
           throttle: lastThrottle,
-          // Straight from the physics: the sim really does cut torque for
-          // 0.15 s on an upshift, so the hole in the sound is the gearchange
-          // rather than an effect timed to look like one.
+          // Torque interruption comes from physics; audio keeps the spinning engine audible.
           shiftTimer: cs.shiftTimer,
         })
 
@@ -1111,7 +1117,7 @@ async function boot(): Promise<void> {
           tcLevel,
           tcBite,
           absBite,
-          currentLap: sim.currentLapTime,
+          currentLap: sim.timingArmed ? sim.currentLapTime + alpha * DT : 0,
           lastLap: sim.lastLapTime,
           bestLap: sim.bestLapTime,
           lapValid: race !== null || sim.lapValid,
@@ -1166,14 +1172,23 @@ async function boot(): Promise<void> {
         break
       case 'pause':
         if (running) {
+          loop.pauseSimulation()
+          // A due tick can finish qualifying or open the race result screen.
+          if (!running || finishState !== 'none') {
+            loop.resumeSimulation()
+            break
+          }
           running = false
           paused = true
           input.release()
-          menu.showPause(pauseStatus())
+          const status = pauseStatus()
+          if (status) hud.setCurrentLapTime(status.currentLap, status.timingArmed)
+          menu.showPause(status)
         } else if (menu.handleEscape()) {
           break
         } else if (menu.visible && paused) {
           menu.hide()
+          loop.resumeSimulation()
           running = true
           paused = false
         }
@@ -1212,6 +1227,7 @@ async function boot(): Promise<void> {
     menu.raceEvent = weekend
   }
   menu.onResume = () => {
+    loop.resumeSimulation()
     if (sim) running = true
     paused = false
     hud.root.classList.remove('is-hidden')
@@ -1222,6 +1238,7 @@ async function boot(): Promise<void> {
       return
     }
     restartLap()
+    loop.resumeSimulation(true)
     running = true
     paused = false
   }

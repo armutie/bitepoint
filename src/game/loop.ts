@@ -17,6 +17,7 @@ export class GameLoop {
   private lastTime = 0
   private handle = 0
   private running = false
+  private simulationPaused = false
 
   /**
    * @param fixedUpdate advance the simulation by exactly DT
@@ -31,7 +32,6 @@ export class GameLoop {
     if (this.running) return
     this.running = true
     this.lastTime = performance.now() / 1000
-    this.accumulator = 0
     const frame = (): void => {
       if (!this.running) return
       const now = performance.now() / 1000
@@ -39,17 +39,46 @@ export class GameLoop {
       // debt and locking the page up trying to catch up.
       const dtWall = Math.min(now - this.lastTime, MAX_FRAME)
       this.lastTime = now
-      this.accumulator += dtWall
-
-      while (this.accumulator >= DT) {
-        this.fixedUpdate()
-        this.accumulator -= DT
-      }
+      if (!this.simulationPaused) this.advance(dtWall)
 
       this.render(this.accumulator / DT, dtWall)
       this.handle = requestAnimationFrame(frame)
     }
     this.handle = requestAnimationFrame(frame)
+  }
+
+  private advance(elapsed: number): void {
+    this.accumulator += elapsed
+    while (this.accumulator >= DT) {
+      this.fixedUpdate()
+      this.accumulator -= DT
+    }
+  }
+
+  /** Active simulation time between the last completed tick and now. */
+  get simulationRemainder(): number {
+    return this.accumulator
+  }
+
+  /** Capture the input event's time, then hold physics and its fractional phase. */
+  pauseSimulation(): void {
+    if (this.simulationPaused) return
+    if (this.running) {
+      const now = performance.now() / 1000
+      const elapsed = Math.min(Math.max(0, now - this.lastTime), MAX_FRAME)
+      this.lastTime = now
+      // Complete any due tick before controls are released. Only the remaining
+      // fraction belongs to the display clock; it is not another physics step.
+      this.advance(elapsed)
+    }
+    this.simulationPaused = true
+  }
+
+  /** Paused wall time never enters the simulation clock or its accumulator. */
+  resumeSimulation(resetFraction = false): void {
+    this.simulationPaused = false
+    this.lastTime = performance.now() / 1000
+    if (resetFraction) this.accumulator = 0
   }
 
   stop(): void {

@@ -201,6 +201,8 @@ export class Car {
    * it lives here and travels in the lap recording rather than in the setup.
    */
   manual = false
+  /** Recorded with new laps; false preserves pre-change replays and AI tuning. */
+  brakeAwareAuto: boolean | 2 = false
 
   /**
    * Wheel-rotary traction control, or null to leave the preset's TC alone.
@@ -276,7 +278,7 @@ export class Car {
     const steerRate = p.steerRateLo + (p.steerRateHi - p.steerRateLo) * speedFrac
 
     if (this.manual) this.manualShift(dt, shiftRequest)
-    else this.autoShift(dt)
+    else this.autoShift(dt, throttle)
     const h = dt / substeps
     for (let i = 0; i < substeps; i++) {
       this.integrate(targetSteer, throttle, h, steerRate, gripMult, rollingMult)
@@ -312,7 +314,7 @@ export class Car {
   }
 
   /** Pick a gear once per tick (road-speed rpm plus wide hysteresis). */
-  private autoShift(dt: number): void {
+  private autoShift(dt: number, throttle: number): void {
     const p = this.p
     const s = this.s
     s.engineRpm = this.engineRpmAt(s.vx, s.gear)
@@ -320,10 +322,23 @@ export class Car {
       s.shiftTimer = Math.max(0.0, s.shiftTimer - dt)
       return
     }
-    if (s.engineRpm > p.shiftUpRpm && s.gear < p.gearRatios.length - 1) {
+    const brakeIntent = this.brakeAwareAuto ? clamp((-throttle - 0.15) / 0.65, 0, 1) : 0
+    // Schedule 2 follows the usable rev band as speed falls, independently
+    // of pedal pressure. Keyboard taps and the gaps between them are one drive.
+    const roadSchedule = this.brakeAwareAuto === 2
+    const downRpm = roadSchedule
+      ? Math.max(p.shiftDownRpm, p.shiftUpRpm * 0.68)
+      : p.shiftDownRpm + brakeIntent * Math.max(0, p.shiftUpRpm - 900 - p.shiftDownRpm)
+    // Check the lower gear's RPM before selecting it. The margin prevents an
+    // immediate upshift if the driver releases the brake during engagement.
+    const lowerRpm = s.gear > 0 ? this.engineRpmAt(s.vx, s.gear - 1) : Infinity
+    const safeLower = lowerRpm < Math.min(p.redlineRpm - 650, p.shiftUpRpm - 650)
+    const mayUp = brakeIntent === 0 || s.engineRpm > p.redlineRpm
+    if (mayUp && s.engineRpm > p.shiftUpRpm && s.gear < p.gearRatios.length - 1) {
       s.gear += 1
       s.shiftTimer = p.shiftTime
-    } else if (s.engineRpm < p.shiftDownRpm && s.gear > 0) {
+    } else if (s.engineRpm < downRpm && s.gear > 0
+      && ((!roadSchedule && brakeIntent === 0) || safeLower)) {
       // Hold second rather than grabbing first at speed. Lugging briefly is a
       // far smaller cost than arriving at a corner exit in the one gear that
       // cannot put the power down.

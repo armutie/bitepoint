@@ -32,3 +32,27 @@ export function renderQuality(performanceMode: boolean, deviceRatio: number): Re
         postProcessing: true,
       }
 }
+
+/** Avoid a large window silently multiplying the scene and full-screen effects workload. HUD stays native. */
+export function viewportPixelRatio(width: number, height: number, ceiling: number): number {
+  const pixels=Math.max(1,width)*Math.max(1,height),budget=1_250_000
+  return Math.min(ceiling,Math.sqrt(budget/pixels))
+}
+
+/** Frame-time hysteresis: react to sustained overload, ignore isolated stalls, recover slowly. */
+export class AdaptivePixelRatio {
+  value: number
+  private slow=0
+  private fast=0
+  private cooldown=2
+  constructor(readonly ceiling: number){this.value=ceiling}
+  observe(dt: number): number | null {
+    if(!Number.isFinite(dt)||dt<0.003||dt>0.10)return null
+    this.cooldown=Math.max(0,this.cooldown-dt)
+    if(dt>0.021){this.slow+=dt;this.fast=0}else if(dt<0.018){this.fast+=dt;this.slow=Math.max(0,this.slow-dt*2)}else{this.slow=Math.max(0,this.slow-dt);this.fast=0}
+    const floor=this.ceiling*0.65
+    if(this.cooldown===0&&this.slow>0.8&&this.value>floor+0.001){this.value=Math.max(floor,this.value-this.ceiling*0.10);this.slow=0;this.cooldown=3;return this.value}
+    if(this.cooldown===0&&this.fast>8&&this.value<this.ceiling){this.value=Math.min(this.ceiling,this.value+this.ceiling*0.05);this.fast=0;this.cooldown=4;return this.value}
+    return null
+  }
+}

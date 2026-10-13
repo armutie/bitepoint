@@ -1,3 +1,4 @@
+import { RenderProfiler } from './renderProfiler'
 /**
  * The three.js layer: one renderer, one scene, and the handful of things in it.
  *
@@ -7,11 +8,14 @@
  *
  * **Lighting.** A directional sun with a shadow map that *follows the car* —
  * a map covering a whole 2.7 km circuit would be all resolution and no shadow,
- * so the shadow camera is a 130 m box re-centred on the car every frame. The
+ * so the shadow camera is a 60 m box re-centred on the car every frame. The
  * car's own shadow on the tarmac is the single strongest grounding cue there
  * is; without it the car reads as a decal sliding over the road.
  *
- * **Suspension.** The physics is a bicycle model — it has no spring travel to
+ * **Suspension.** The planar driving model remains unchanged. Tyre contact uses
+ * the actual kerb triangles; critically damped body heave, pitch and roll
+ * follow the four contacts. The cockpit camera follows that body transform.
+ * The previous animation used no spring travel to
  * read. What it does have is real accelerations, and suspension travel is a
  * function of exactly those: longitudinal (dive/squat, from the frame-to-frame
  * change in vx), lateral (roll, from r·vx), and the surface under the car.
@@ -31,11 +35,16 @@ import { CameraRig, type CameraMode, type Surface } from './cameras'
 import { buildCar, SKINS, type CarModel, type CarSkin } from './carModel'
 import { FIELD_LIVERIES } from './liveries'
 import { PALETTE } from './palette'
+
+// Shared by the visible sky, reflection capture and shadow-casting sunlight.
+const SUN_OFFSET = new THREE.Vector3(140, 20, 190)
 import { PostPipeline } from './post'
-import { renderQuality } from './quality'
+import { renderQuality, viewportPixelRatio, AdaptivePixelRatio } from './quality'
 import { buildScenery, type Scenery } from './scenery'
 import { buildTerrain } from './terrain'
 import { buildWorld, type World } from './world'
+import { TrackSurface } from './trackSurface'
+import { ContactSuspension } from './contactSuspension'
 
 /** Rough top speed, for normalising the post pipeline's speed input. */
 const TOP_SPEED = 75
@@ -75,10 +84,6 @@ function scuffBlur(omega: number): number {
 }
 
 /** Suspension animation gains. Travel is clamped to ±5 cm. */
-const SUS_DIVE = 0.0016
-const SUS_SQUAT = 0.001
-const SUS_ROLL = 0.0011
-const SUS_TRAVEL_MAX = 0.05
 
 /** How many cars lap the circuit behind the menu. */
 const ATTRACT_COUNT = 10
@@ -133,21 +138,25 @@ export class Renderer {
   private opponents: CarModel[] = []
   private opponentStates: readonly CarState[] = []
   private debugLine: THREE.Line | null = null
+  private readonly environment: THREE.WebGLRenderTarget
+  private profiler: RenderProfiler | null = null
+  toggleProfiling(): void {
+    if(this.profiler){this.profiler.dispose();this.profiler=null}
+    else this.profiler=new RenderProfiler(this.renderer.getContext() as WebGL2RenderingContext)
+  }
+
   private sky: THREE.Mesh
   private performanceMode = false
   private pixelRatio = 1
+  private adaptive=new AdaptivePixelRatio(1)
+  private viewportWidth=0
+  private viewportHeight=0
 
-  /** For the dive/squat estimate: vx last frame. */
-  /**
-   * Per-car animation state, keyed by the model it belongs to.
-   *
-   * `animateSuspension` differentiates vx to get acceleration and carries a
-   * bump phase per wheel, and both are per CAR. They used to be plain fields on
-   * the renderer, which was safe only while exactly one car was ever animated —
-   * the note on `rollWheels` records that hazard. A grid of eight makes it real:
-   * shared, every car would differentiate the car before it in the loop.
-   */
-  private readonly anim = new WeakMap<CarModel, { prevVx: number; phase: number[] }>()
+  private trackSurface: TrackSurface | null = null
+  private readonly contactSuspension = new ContactSuspension()
+  private readonly cameraTilt = new THREE.Quaternion()
+  private readonly cameraYawInverse = new THREE.Quaternion()
+  private readonly cameraOffset = new THREE.Vector3()
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas
@@ -164,35 +173,55 @@ export class Renderer {
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
 
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    this.renderer.toneMappingExposure = 1.36
     this.scene = new THREE.Scene()
     // Fog must start beyond the terrain hills (they peak around 520 m) or it
     // quietly erases them — which is exactly what the first tune did.
-    this.scene.fog = new THREE.Fog(PALETTE.SKY_BOT, 380, 2300)
+    this.scene.fog = new THREE.Fog(PALETTE.SKY_BOT, 540, 2900)
 
     this.sky = buildSky()
     this.scene.add(this.sky)
+    // Capture the same sky used by the backdrop into a filtered reflection map.
+    // One small precomputation gives paint, rubber and carbon coherent outdoor light.
+    const environmentScene = new THREE.Scene()
+    const environmentSky = buildSky()
+    environmentScene.add(environmentSky)
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(10000,10000),
+      new THREE.MeshBasicMaterial({color:0x525c48}))
+    ground.rotation.x = -Math.PI/2; ground.position.y = -4
+    environmentScene.add(ground)
+    const pmrem = new THREE.PMREMGenerator(this.renderer)
+    this.environment = pmrem.fromScene(environmentScene, 0.04, 0.1, 3000)
+    this.scene.environment = this.environment.texture
+    this.scene.environmentIntensity = 0.85
+    pmrem.dispose(); environmentSky.geometry.dispose()
+    ;(environmentSky.material as THREE.Material).dispose()
+    ground.geometry.dispose(); ground.material.dispose()
 
     // Ambient held low on purpose: the ratio of sun to ambient is what makes
     // faces facing the light pop and shadow sides fall away. With ambient near
     // the sun's level everything is lit the same and the world reads flat.
-    const hemi = new THREE.HemisphereLight(0xdfeaff, 0x2c5230, 0.5)
+    const hemi = new THREE.HemisphereLight(0xc3ccdc, 0x81735e, 1.25)
     this.scene.add(hemi)
 
-    this.sun = new THREE.DirectionalLight(0xfff2dd, 2.0)
+    this.sun = new THREE.DirectionalLight(0xffd49a, 2.5)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(1024, 1024)
     const sc = this.sun.shadow.camera
-    sc.left = -65
-    sc.right = 65
-    sc.top = 65
-    sc.bottom = -65
+    sc.left = -30
+    sc.right = 30
+    sc.top = 30
+    sc.bottom = -30
     sc.near = 20
     sc.far = 800
-    this.sun.shadow.bias = -0.0004
+    this.sun.shadow.bias = -0.00008
+    this.sun.shadow.normalBias = 0.015
     this.scene.add(this.sun, this.sun.target)
 
     this.rig = new CameraRig(1)
     this.post = new PostPipeline(this.renderer, this.scene, this.rig.camera)
+    this.post.setSunDirection(SUN_OFFSET)
     this.resize()
   }
 
@@ -220,6 +249,7 @@ export class Renderer {
   /** Swap in a circuit, disposing whatever was there. */
   setTrack(track: Track): void {
     this.setDebugLine(null)
+    this.trackSurface = new TrackSurface(track)
     if (this.world) {
       this.scene.remove(this.world.root)
       this.world.dispose()
@@ -239,7 +269,7 @@ export class Renderer {
     // wall and scenery that was the single largest JS cost in a CPU profile
     // of a driving session, all of it recomputing values that never change.
     this.scene.updateMatrixWorld(true)
-    this.world.root.traverse((o) => { o.matrixAutoUpdate = false })
+    this.world.root.traverse((o) => { o.matrixAutoUpdate = false; o.matrixWorldAutoUpdate = false })
     this.scenery.root.traverse((o) => { o.matrixAutoUpdate = false })
     this.buildAttractField(track)
   }
@@ -268,7 +298,7 @@ export class Renderer {
     this.attractWheelRadius = p.wheelRadius
     const L = track.length
     for (let i = 0; i < ATTRACT_COUNT; i++) {
-      const model = buildCar(p, ATTRACT_SKINS[i % ATTRACT_SKINS.length]!)
+      const model = buildCar(p, ATTRACT_SKINS[i % ATTRACT_SKINS.length]!, { detail: 'field' })
       model.root.visible = false
       this.attractGroup.add(model.root)
       // Fallback state: evenly round the lap, alternating lanes, and a pace
@@ -413,7 +443,7 @@ export class Renderer {
     this.playerCar = buildCar(params, SKINS.player)
     this.scene.add(this.playerCar.root)
     if (withGhost) {
-      this.ghostCar = buildCar(params, SKINS.ghost, { ghost: true })
+      this.ghostCar = buildCar(params, SKINS.ghost, { ghost: true, detail: 'field' })
       this.scene.add(this.ghostCar.root)
     }
   }
@@ -438,7 +468,7 @@ export class Renderer {
     this.opponents = []
     for (let i = 0; i < count; i++) {
       const identity = driverIds?.[i] ?? i
-      const car = buildCar(params, ATTRACT_SKINS[identity % ATTRACT_SKINS.length]!)
+      const car = buildCar(params, ATTRACT_SKINS[identity % ATTRACT_SKINS.length]!, { detail: 'field' })
       this.scene.add(car.root)
       this.opponents.push(car)
     }
@@ -485,6 +515,11 @@ export class Renderer {
   resize(): void {
     const w = this.canvas.clientWidth || window.innerWidth
     const h = this.canvas.clientHeight || window.innerHeight
+    const ceiling=viewportPixelRatio(w,h,renderQuality(this.performanceMode,window.devicePixelRatio).pixelRatio)
+    if(w!==this.viewportWidth||h!==this.viewportHeight||this.adaptive.ceiling!==ceiling){
+      this.viewportWidth=w;this.viewportHeight=h;this.adaptive=new AdaptivePixelRatio(ceiling);this.pixelRatio=ceiling
+    }
+    this.pixelRatio=Math.min(this.pixelRatio,ceiling)
     this.renderer.setPixelRatio(this.pixelRatio)
     this.renderer.setSize(w, h, false)
     this.post.setSize(w, h, this.pixelRatio)
@@ -506,6 +541,8 @@ export class Renderer {
     dtWall: number,
     surface: Surface | null = null,
   ): void {
+    if(!document.hidden&&!this.performanceMode){const ratio=this.adaptive.observe(dtWall);if(ratio!==null){this.pixelRatio=ratio;this.resize()}}
+    const profileStart=performance.now(); this.profiler?.begin()
     this.renderer.info.reset()
     if (this.scenery) {
       this.scenery.root.visible = true
@@ -523,6 +560,7 @@ export class Renderer {
       // bodywork. Every other view shows it; the halo cam exists to.
       this.playerCar.root.visible = this.rig.mode !== 'hood'
       this.animateSuspension(this.playerCar, player, dtWall)
+      this.playerCar.updateCockpitSteering(Math.hypot(player.vx, player.vy), dtWall)
       this.rollWheels(this.playerCar, player.vx, player.wheelVr, params.wheelRadius, dtWall)
     }
     // The AI field. Drawn with the same suspension travel and wheel roll as the
@@ -534,7 +572,8 @@ export class Renderer {
       car.root.visible = s !== undefined
       if (!s) continue
       placeCar(car, s)
-      this.animateSuspension(car, s, dtWall, false)
+      this.animateSuspension(car, s, dtWall)
+      car.updateCockpitSteering(Math.hypot(s.vx, s.vy), dtWall)
       this.rollWheels(car, s.vx, s.wheelVr, params.wheelRadius, dtWall)
     }
 
@@ -544,6 +583,8 @@ export class Renderer {
       this.ghostCar.root.visible = this.wantGhost && ghost !== null
       if (ghost) {
         placeCar(this.ghostCar, ghost)
+        this.animateSuspension(this.ghostCar, ghost, dtWall)
+        this.ghostCar.updateCockpitSteering(Math.hypot(ghost.vx, ghost.vy), dtWall)
         // Fade the ghost as the gap closes: at under ~0.05 s you are driving
         // inside it, and a solid car there is a windscreen sticker. The gap is
         // measured in TIME (distance over the player's speed), matching the
@@ -564,15 +605,27 @@ export class Renderer {
       }
     }
 
+    if (this.playerCar) {
+      const root = this.playerCar.root, camera = this.rig.camera
+      if (this.rig.mode === 'halo' || this.rig.mode === 'hood') {
+        this.cameraYawInverse.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, -player.yaw)
+        this.cameraTilt.copy(root.quaternion).multiply(this.cameraYawInverse)
+        this.cameraOffset.set(camera.position.x-player.x,camera.position.y,camera.position.z+player.y).applyQuaternion(this.cameraTilt)
+        camera.position.set(player.x+this.cameraOffset.x,root.position.y+this.cameraOffset.y,-player.y+this.cameraOffset.z)
+        camera.quaternion.premultiply(this.cameraTilt)
+      } else camera.position.y += root.position.y
+    }
     this.followWithSun(player.x, -player.y)
     this.sky.position.copy(this.rig.camera.position)
 
     const speed = Math.hypot(player.vx, player.vy)
     this.post.render(speed / TOP_SPEED)
+    this.profiler?.end(performance.now()-profileStart,dtWall,this.renderer)
   }
 
   /** Draw the circuit with the attract camera, for the menu to sit over. */
   renderFlyover(track: Track, t: number, dtWall: number): void {
+    const profileStart=performance.now(); this.profiler?.begin()
     this.renderer.info.reset()
     // The menu is allowed to remain fully dressed; Performance Mode is about
     // keeping the car responsive while the player is actually driving.
@@ -589,7 +642,15 @@ export class Renderer {
     this.followWithSun(eye.x, eye.z)
     this.sky.position.copy(eye)
     this.post.render(0)
+    this.profiler?.end(performance.now()-profileStart,dtWall,this.renderer)
   }
+
+  setClassicFraming(enabled: boolean): void {
+    this.rig.classicFraming = enabled
+  }
+
+  /** Compile new car/scenery materials during session setup, before driving. */
+  async prepare(): Promise<void> { await this.renderer.compileAsync(this.scene,this.rig.camera) }
 
   setCameraMode(mode: CameraMode): void {
     this.rig.mode = mode
@@ -611,7 +672,8 @@ export class Renderer {
     const ratioChanged = quality.pixelRatio !== this.pixelRatio
     const shadowChanged = quality.shadowMapSize !== this.sun.shadow.mapSize.width
     this.performanceMode = s.performanceMode
-    this.pixelRatio = quality.pixelRatio
+    this.adaptive=new AdaptivePixelRatio(viewportPixelRatio(this.canvas.clientWidth||window.innerWidth,this.canvas.clientHeight||window.innerHeight,quality.pixelRatio))
+    this.pixelRatio = this.adaptive.value
     if (shadowChanged) {
       this.sun.shadow.mapSize.set(quality.shadowMapSize, quality.shadowMapSize)
       this.sun.shadow.map?.dispose()
@@ -625,47 +687,14 @@ export class Renderer {
    * changes — only the box slides, so shadows stay put in the world.
    */
   private followWithSun(x: number, z: number): void {
-    this.sun.position.set(x - 140, 230, z + 90)
+    this.sun.position.set(x + SUN_OFFSET.x, SUN_OFFSET.y, z + SUN_OFFSET.z)
     this.sun.target.position.set(x, 0, z)
   }
 
-  /** See the suspension note in the module docs. */
-  private animateSuspension(
-    model: CarModel, s: CarState, dtWall: number, ownSurface = true,
-  ): void {
-    let state = this.anim.get(model)
-    if (!state) {
-      state = { prevVx: s.vx, phase: [0.0, 1.7, 3.1, 4.9] }
-      this.anim.set(model, state)
-    }
-    const speed = Math.hypot(s.vx, s.vy)
-    // Longitudinal acceleration from the frame-to-frame change in vx — the
-    // real number, not a guess from the pedal.
-    const ax = dtWall > 1e-4 ? clampN((s.vx - state.prevVx) / dtWall, 45) : 0
-    state.prevVx = s.vx
-    const aLat = clampN(s.r * s.vx, 45)
-
-    // The camera rig tracks the PLAYER's surface, so only the player's car may
-    // read kerb and grass off it. An opponent gets the smooth-road amplitude
-    // rather than a bump because the car being followed is on a kerb.
-    const baseAmp =
-      0.0035 * Math.min(speed / 45, 1) +
-      (ownSurface ? (this.rig.onGrass ? 0.013 : this.rig.onKerb ? 0.006 : 0) : 0)
-
-    for (let i = 0; i < model.wheels.length; i++) {
-      const rig = model.wheels[i]!
-      // Braking (ax < 0): the front compresses — wheels rise toward the body —
-      // and the rear extends. Power does the opposite, softer.
-      const pitchTerm = rig.front ? -ax * SUS_DIVE : ax * SUS_SQUAT
-      // A left turn (aLat > 0) loads the right side; sideZ is +1 on the right.
-      const rollTerm = aLat * SUS_ROLL * rig.sideZ
-      state.phase[i] = (state.phase[i] ?? 0) + speed * dtWall * (2.0 + i * 0.13)
-      const bump = baseAmp * Math.sin(state.phase[i]!)
-
-      const travel = clampN(pitchTerm + rollTerm + bump, SUS_TRAVEL_MAX)
-      rig.pivot.position.y = rig.baseY + travel
-    }
-    model.updateSuspension()
+  /** Independent tyre contact and damped body movement for every car. */
+  private animateSuspension(model: CarModel, s: CarState, dt: number): void {
+    if (this.trackSurface) this.contactSuspension.update(model, s, this.trackSurface, dt)
+    else model.updateSuspension()
   }
 
   /**
@@ -721,6 +750,7 @@ export class Renderer {
   }
 
   dispose(): void {
+    this.profiler?.dispose()
     if (this.world) this.world.dispose()
     if (this.scenery) this.scenery.dispose()
     for (const c of this.attract) c.model.dispose()
@@ -728,12 +758,12 @@ export class Renderer {
     this.ghostCar?.dispose()
     this.sky.geometry.dispose()
     ;(this.sky.material as THREE.Material).dispose()
+    this.environment.dispose()
     this.post.dispose()
     this.renderer.dispose()
   }
 }
 
-const clampN = (v: number, m: number): number => (v < -m ? -m : v > m ? m : v)
 
 /** sim (x, y, yaw) -> three placement. See the coordinate note in world.ts. */
 function placeCar(model: CarModel, s: CarState): void {
@@ -741,7 +771,6 @@ function placeCar(model: CarModel, s: CarState): void {
   model.root.rotation.y = s.yaw
   // The steering angle is already the road-wheel angle in radians.
   for (const w of model.frontWheels) w.rotation.y = s.steer
-  model.updateSuspension()
 }
 
 /**
@@ -765,13 +794,12 @@ function buildSky(): THREE.Mesh {
     uniforms: {
       horizon: { value: new THREE.Color(PALETTE.SKY_BOT) },
       zenith: { value: new THREE.Color(PALETTE.SKY_TOP) },
-      // Must match followWithSun's offset (-140, 230, 90), normalised, or the
-      // visible sun disagrees with where the shadows say it is.
-      sunDir: { value: new THREE.Vector3(-140, 230, 90).normalize() },
-      cloudLit: { value: new THREE.Color(252 / 255, 253 / 255, 255 / 255) },
-      cloudShade: { value: new THREE.Color(196 / 255, 209 / 255, 224 / 255) },
-      hillFar: { value: new THREE.Color(158 / 255, 178 / 255, 198 / 255) },
-      hillNear: { value: new THREE.Color(116 / 255, 144 / 255, 122 / 255) },
+      // The sky disc and shadows share the same low sun direction.
+      sunDir: { value: SUN_OFFSET.clone().normalize() },
+      cloudLit: { value: new THREE.Color(0xffe3bc) },
+      cloudShade: { value: new THREE.Color(0x8f9eaf) },
+      hillFar: { value: new THREE.Color(0x9faeb8) },
+      hillNear: { value: new THREE.Color(0x687268) },
     },
     vertexShader: /* glsl */ `
       varying vec3 vDir;
@@ -821,27 +849,40 @@ function buildSky(): THREE.Mesh {
         float az = atan(dir.z, dir.x);
 
         // Base gradient.
-        float t = clamp(pow(max(h, 0.0), 0.55), 0.0, 1.0);
+        float t = clamp(pow(max(h, 0.0), 0.38), 0.0, 1.0);
         vec3 col = mix(horizon, zenith, t);
 
-        // Sun: a hard disc inside a soft warm halo.
-        float d = dot(dir, sunDir);
-        col += vec3(1.0, 0.93, 0.8) * pow(max(d, 0.0), 350.0) * 0.55;
-        col += vec3(1.0, 0.98, 0.92) * smoothstep(0.99965, 0.99985, d) * 2.4;
-
-        // Clouds, on a projected sky plane so the noise has no azimuth seam.
-        if (h > 0.02) {
-          vec2 p = dir.xz / (h + 0.22) * 0.9;
+        float d = max(dot(dir, sunDir), 0.0);
+        // Blue sky remains clear; warmth is localized around the light source.
+        col += vec3(1.0, 0.61, 0.28) * pow(d, 18.0) * 0.065;
+        if (h > 0.015) {
+          vec2 p = dir.xz / (h + 0.30) * 2.15;
           float density = fbm(p);
-          float cover = smoothstep(0.52, 0.74, density);
-          // Sample toward the sun for cheap self-shading: thinner that way
-          // means a lit edge, thicker means a shaded base.
-          float toward = fbm(p + normalize(sunDir.xz + 1e-3) * 0.16);
-          float lit = clamp(0.5 + (density - toward) * 2.4, 0.0, 1.0);
+          float sunBank = pow(d, 70.0);
+          // A broken cloud bank veils the sun, without drawing a hard circle.
+          float bankShape = smoothstep(0.34, 0.60, fbm(p * 2.8 + 3.7));
+          float cover = max(smoothstep(0.43, 0.65, density), sunBank * bankShape);
+          float toward = fbm(p + normalize(sunDir.xz + 1e-3) * 0.12);
+          float lit = clamp(0.48 + (density - toward) * 3.2, 0.0, 1.0);
+          float band = smoothstep(0.015, 0.065, h) * (1.0 - smoothstep(0.7, 0.98, h));
+          float opacity = cover * band * 0.94;
           vec3 cloud = mix(cloudShade, cloudLit, lit);
-          // Thinner and hazier near the horizon, denser mid-sky.
-          float band = smoothstep(0.02, 0.1, h) * (1.0 - smoothstep(0.55, 0.9, h));
-          col = mix(col, cloud, cover * band * 0.85);
+          col = mix(col, cloud, opacity);
+          // HDR transmission and bright cloud edges feed the camera bloom.
+          float brokenLight = smoothstep(0.30, 0.66, fbm(p * 5.4 + 12.0));
+          float silver = pow(d, 280.0) * pow(max(4.0 * opacity * (1.0 - opacity), 0.0), 2.4);
+          float transmitted = pow(d, 950.0) * pow(1.0 - opacity, 3.0);
+          col += vec3(1.0, 0.86, 0.65) * (silver * 0.75 * brokenLight + transmitted * 2.0);
+          // Short, irregular shafts through gaps: cloud structure breaks up the fan.
+          vec3 sunRight = normalize(cross(vec3(0.0, 1.0, 0.0), sunDir));
+          vec3 sunUp = cross(sunDir, sunRight);
+          vec2 rayPlane = vec2(dot(dir, sunRight), dot(dir, sunUp));
+          float rayRadius = length(rayPlane);
+          float rayAngle = atan(rayPlane.y, rayPlane.x);
+          float shafts = pow(max(0.0, sin(rayAngle * 8.0 + sin(rayAngle * 3.0) * 1.7)), 9.0);
+          float rayReach = smoothstep(0.022, 0.045, rayRadius) * (1.0 - smoothstep(0.07, 0.20, rayRadius));
+          float gaps = smoothstep(0.24, 0.65, fbm(p * 3.0 + 9.2));
+          col += vec3(1.0, 0.85, 0.62) * shafts * rayReach * gaps * 0.13 * (1.0 - opacity * 0.55);
         }
 
         // Hill ridges. Integer harmonics of azimuth: seam-free by construction.

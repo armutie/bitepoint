@@ -21,7 +21,8 @@
  * verifiable, and why a physics change across versions invalidates them.
  */
 import { initialState, type CarState } from '../core/car'
-import { GHOST_FIELDS } from '../core/sim'
+import { DT, GHOST_FIELDS } from '../core/sim'
+import { wrapAngle } from '../core/math'
 
 export class GhostPath {
   /**
@@ -33,7 +34,7 @@ export class GhostPath {
 
   private index = 0
 
-  constructor(private readonly path: Float64Array) {
+  constructor(private readonly path: Float64Array, private readonly startTime = 0) {
     this.car = { s: initialState() }
     this.apply()
   }
@@ -52,6 +53,23 @@ export class GhostPath {
     if (this.finished) return
     this.index++
     this.apply()
+  }
+
+  /** Match the player's elapsed clock even when its start fraction differs. */
+  seekTime(time: number): void {
+    const sample = Math.max(0, Math.min(this.ticks - 1, (time - this.startTime) / DT))
+    this.index = Math.floor(sample)
+    this.apply()
+    if (this.index + 1 >= this.ticks) return
+    const alpha = sample - this.index
+    const next = (this.index + 1) * GHOST_FIELDS
+    const s = this.car.s
+    s.x += (this.path[next]! - s.x) * alpha
+    s.y += (this.path[next + 1]! - s.y) * alpha
+    s.yaw += wrapAngle(this.path[next + 2]! - s.yaw) * alpha
+    s.steer += (this.path[next + 3]! - s.steer) * alpha
+    s.vx += (this.path[next + 4]! - s.vx) * alpha
+    s.wheelVr += (this.path[next + 5]! - s.wheelVr) * alpha
   }
 
   reset(): void {

@@ -1,28 +1,12 @@
-/**
- * The car, built from primitives — but built to be *looked at* now.
- *
- * The halo camera changed the job. In a hood cam the car is invisible, so a
- * box-and-cylinder model was fine; from the halo the bodywork fills a third of
- * the frame for the whole lap. So: a tapered nose in three steps, front and
- * rear wings with endplates, the halo ring with its central strut, mirrors,
- * a helmet, a steering wheel, and suspension arms out to the wheels.
- *
- * The look-back view (Shift) and the chase cam then did the same to the rear:
- * a tapered engine cover with a shark fin, an airbox with a real intake mouth,
- * a beam wing under a pylon-mounted main plane, a diffuser, an exhaust, and a
- * rain light that catches the bloom — the things that say "F1" from behind.
- *
- * Modelled nose-along-+X in local space, which is what lets the renderer place
- * it with ``rotation.y = yaw`` straight from the sim. Dimensions come from
- * ``CarParams``, so the wheels sit at the real ``lf``/``lr`` and the body is
- * the real width — the thing you see is the size of the thing the physics
- * moves.
- *
- * Wheels hang from pivot groups whose rest height is recorded, so the renderer
- * can move them on their "suspension" (see the animation note in renderer.ts).
+import { buildFieldCar } from './fieldCar'
+/** Smooth formula-car bodywork with separate wheel, steering and suspension rigs.
+ * Authored nose-along +X; axle positions and width follow the simulation dimensions.
+ * Near detail is used for the player; the field shares the silhouette at fewer subdivisions.
  */
 import * as THREE from 'three'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
+
+import { shell, surfaceTexture, teamDecal, haloSurface } from './carSurface'
 
 import type { CarParams } from '../core/carParams'
 
@@ -72,6 +56,8 @@ export interface CarModel {
   scuffMaterial: THREE.MeshStandardMaterial
   /** Reconnect live suspension rods after steering or wheel travel changes. */
   updateSuspension(): void
+  /** Animate only the cockpit wheel; road-wheel steering stays exact. */
+  updateCockpitSteering(speed: number, dt: number): void
   dispose(): void
 }
 
@@ -81,7 +67,7 @@ export interface CarSkin {
 }
 
 export const SKINS = {
-  player: { body: 0x2f6fd0, accent: 0xe8eef7 },
+  player: { body: 0x174c91, accent: 0xf1eee4 },
   ghost: { body: 0x8892a0, accent: 0xc9d2dd },
 } satisfies Record<string, CarSkin>
 
@@ -158,6 +144,7 @@ function mergeStatic(
     disposables.push(geom)
     const mesh = new THREE.Mesh(geom, material)
     mesh.castShadow = castShadow
+    mesh.receiveShadow = castShadow
     // Baked in place: the merged mesh sits at its parent's origin forever, so
     // there is no matrix to keep recomposing.
     mesh.matrixAutoUpdate = false
@@ -166,10 +153,13 @@ function mergeStatic(
   if (merged.length > 0) parent.add(...merged)
 }
 
-export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } = {}): CarModel {
+export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; detail?: 'near' | 'field' } = {}): CarModel {
+  if(opts.detail==='field')return buildFieldCar(p,skin,opts.ghost??false)
   const root = new THREE.Group()
   const disposables: { dispose(): void }[] = []
   const ghost = opts.ghost ?? false
+  const detailed = true
+  const bodyShell = (sections: Parameters<typeof shell>[0], rings = 40) => shell(sections, detailed ? rings : Math.min(rings, 16))
 
   const materials: THREE.MeshStandardMaterial[] = []
   const mat = (color: number, extra: THREE.MeshStandardMaterialParameters = {}) => {
@@ -187,12 +177,18 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
     return m
   }
 
-  const bodyMat = mat(skin.body)
+  const carbonTexture = surfaceTexture('carbon')
+  const rubberTexture = surfaceTexture('rubber')
+  disposables.push(carbonTexture, rubberTexture)
+  const bodyMat = new THREE.MeshPhysicalMaterial({ color: skin.body, roughness: 0.29,
+    metalness: 0, clearcoat: 1, clearcoatRoughness: 0.18,
+    transparent: ghost, opacity: ghost ? 0.4 : 1, depthWrite: !ghost })
+  materials.push(bodyMat); disposables.push(bodyMat)
   const accentMat = mat(skin.accent, { roughness: 0.3 })
   const darkMat = mat(0x17191d, { roughness: 0.7, metalness: 0 })
-  const tyreMat = mat(0x141619, { roughness: 0.95, metalness: 0 })
+  const tyreMat = mat(0x24262a, { roughness: 0.76, metalness: 0, roughnessMap: rubberTexture, bumpMap: rubberTexture, bumpScale: 0.00035 })
   const rimMat = mat(0x3a3e46, { roughness: 0.5, metalness: 0.35 })
-  const carbonMat = mat(0x22252b, { roughness: 0.55, metalness: 0.2 })
+  const carbonMat = mat(0x30343b, { roughness: 0.43, metalness: 0, map: carbonTexture, bumpMap: carbonTexture, bumpScale: 0.00025 })
 
   const halfW = p.width / 2
   const wheelR = p.wheelRadius
@@ -250,6 +246,21 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
 
   const updateSuspension = (): void => {
     for (const rod of liveRods) placeRod(rod.mesh, rod.from, rod.sampleTo(rodTo))
+
+  }
+
+  const updateCockpitSteering = (speed: number, dt: number): void => {
+    // Gradually calm the visual motion from 30 to 200 km/h. This has no
+    // influence on the physics rack or front tyre angles.
+    const t = Math.max(0, Math.min(1, (Math.abs(speed) - 8) / 48))
+    const fast = t * t * (3 - 2 * t)
+    const input = Math.max(-1, Math.min(1, (frontWheels[0]?.rotation.y ?? 0) / p.maxSteer))
+    const target = -input * (Math.PI * 5 / 6) * (1 - 0.45 * fast)
+    const elapsed = Math.max(0, Math.min(dt, 0.1))
+    const eased = (target - cockpitWheel.rotation.x) * (1 - Math.exp(-elapsed / (0.035 + 0.075 * fast)))
+    const maxStep = (11 - 7 * fast) * elapsed
+    cockpitWheel.rotation.x += Math.max(-maxStep, Math.min(maxStep, eased))
+    updateWheelDisplay(speed, elapsed)
   }
 
   // --- floor and tub -------------------------------------------------------
@@ -286,44 +297,28 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
   const floorGeom = mergeVertices(rawFloorGeom)
   rawFloorGeom.dispose()
   add(floorGeom, carbonMat, 0, 0.12)
-  // Main tub around the cockpit.
-  add(new THREE.BoxGeometry(1.5, 0.4, halfW * 0.56), bodyMat, 0.0, 0.4)
-  // Sidepods sweeping back from the cockpit.
-  for (const z of [-1, 1]) {
-    add(new THREE.BoxGeometry(1.7, 0.3, halfW * 0.42), bodyMat, -0.55, 0.28, z * halfW * 0.66)
-    // Coke-bottle: a narrower, lower run continuing inboard of the rear tyre,
-    // so the flanks pinch toward the tail instead of just stopping.
-    add(new THREE.BoxGeometry(0.9, 0.22, halfW * 0.3), bodyMat, -1.55, 0.25, z * halfW * 0.42)
+  // Continuous skins replace stacked boxes. The cockpit stays open between the shoulders.
+  add(bodyShell([[-0.85,0.30,0.15,0.25],[-0.25,0.32,0.17,0.29],[0.45,0.36,0.17,0.25],[0.85,0.40,0.14,0.18]]), bodyMat, 0,0)
+  for (const side of [-1, 1]) {
+    add(bodyShell([[-0.70,0.50,0.13,0.12],[-0.38,0.58,0.10,0.12],[0.12,0.57,0.10,0.105],[0.53,0.50,0.12,0.10]]), accentMat,0,0,side*0.29)
+    add(bodyShell([[-1.62,0.23,0.06,0.075],[-1.12,0.33,0.12,0.16],[-0.55,0.38,0.19,0.205],[0.05,0.41,0.16,0.19],[0.37,0.40,0.075,0.14]]),bodyMat,0,0,side*0.50)
+    const inlet = add(new THREE.SphereGeometry(1,24,12),darkMat,0.33,0.42,side*0.50)
+    inlet.scale.set(0.018,0.059,0.128)
+    // A narrow painted shoulder stripe follows the body without a floating decal plane.
+    add(bodyShell([[-1.25,0.452,0.008,0.025],[-0.55,0.578,0.008,0.028],[0.05,0.568,0.008,0.024],[0.28,0.512,0.006,0.018]],24),accentMat,0,0,side*0.52)
   }
-
-  // --- engine cover: two shrinking steps, like the nose ---------------------
-  // Bulky over the engine, then a narrow tail reaching back under the wing.
-  add(new THREE.BoxGeometry(1.05, 0.32, halfW * 0.4), bodyMat, -0.92, 0.5)
-  add(new THREE.BoxGeometry(0.95, 0.2, halfW * 0.24), bodyMat, -1.78, 0.42)
-  // Shark fin along the spine — from the look-back view it is the one shape
-  // that carries the eye from the cockpit to the rear wing. Bottom edge buried
-  // in the tail cover so no gap shows between them.
-  add(new THREE.BoxGeometry(0.85, 0.3, 0.024), bodyMat, -1.72, 0.62)
-
-  // --- airbox / roll hoop, with an actual intake ----------------------------
-  add(new THREE.BoxGeometry(0.34, 0.3, 0.26), bodyMat, -0.55, 0.84)
-  // The intake mouth above the helmet: a stubby cylinder lying nose-along, its
-  // open end faced with a dark disc slightly smaller than the rim — a hole with
-  // a lip, which is what an intake is.
-  const intake = add(new THREE.CylinderGeometry(0.085, 0.095, 0.2, 12), bodyMat, -0.5, 1.0)
-  intake.rotation.z = Math.PI / 2
-  const mouth = add(new THREE.CircleGeometry(0.07, 12), darkMat, -0.398, 1.0)
-  mouth.rotation.y = Math.PI / 2
-
-  // --- nose, in three shrinking steps --------------------------------------
-  add(new THREE.BoxGeometry(0.8, 0.24, 0.42), bodyMat, 0.95, 0.42)
-  add(new THREE.BoxGeometry(0.72, 0.17, 0.3), bodyMat, 1.7, 0.38)
-  add(new THREE.BoxGeometry(0.6, 0.12, 0.19), bodyMat, 2.32, 0.35)
+  add(bodyShell([[-2.20,0.35,0.09,0.055],[-1.5,0.42,0.14,0.12],[-0.88,0.57,0.24,0.22],[-0.65,0.67,0.25,0.20]]),bodyMat,0,0)
+  const intake = add(new THREE.SphereGeometry(1,24,16),bodyMat,-0.64,0.96)
+  intake.scale.set(0.16,0.17,0.13)
+  const mouth = add(new THREE.CircleGeometry(0.08,24),darkMat,-0.485,0.995)
+  mouth.rotation.y=Math.PI/2
+  add(bodyShell([[0.35,0.49,0.17,0.30],[0.72,0.48,0.17,0.28],[1.20,0.44,0.13,0.23],[1.75,0.37,0.09,0.15],[2.30,0.27,0.06,0.105],[2.65,0.235,0.04,0.10]]),accentMat,0,0)
+  add(bodyShell([[0.38,0.662,0.004,0.045],[0.72,0.652,0.004,0.045],[1.20,0.572,0.004,0.04],[1.75,0.462,0.004,0.03],[2.30,0.332,0.003,0.027],[2.60,0.282,0.003,0.025]],32),bodyMat,0,0)
 
   // --- front wing -----------------------------------------------------------
   const wingX = p.lf + 0.75
-  add(new THREE.BoxGeometry(0.44, 0.045, p.width * 0.92), accentMat, wingX, 0.16)
-  add(new THREE.BoxGeometry(0.3, 0.04, p.width * 0.8), accentMat, wingX - 0.1, 0.25)
+  add(new THREE.BoxGeometry(0.44, 0.045, p.width * 0.92), carbonMat, wingX, 0.16)
+  add(new THREE.BoxGeometry(0.3, 0.04, p.width * 0.8), carbonMat, wingX - 0.1, 0.25)
   for (const z of [-1, 1]) {
     add(new THREE.BoxGeometry(0.5, 0.26, 0.03), bodyMat, wingX, 0.26, z * p.width * 0.46)
   }
@@ -375,39 +370,100 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
     strake.rotation.z = -0.3
   }
 
-  // --- cockpit: surround, halo, helmet, wheel, mirrors ----------------------
-  add(new THREE.BoxGeometry(0.9, 0.1, halfW * 0.6), darkMat, 0.0, 0.62)
-
-  // Helmet — bottom-centre of the halo cam frame, and most of what sells it.
-  const helmet = add(new THREE.SphereGeometry(0.15, 16, 12), accentMat, -0.18, 0.78)
-  helmet.scale.y = 0.92
-  add(new THREE.BoxGeometry(0.06, 0.05, 0.19), darkMat, -0.05, 0.76) // visor slot
-
-  // Steering wheel, tilted toward the driver.
-  const wheel = add(new THREE.BoxGeometry(0.05, 0.16, 0.26), carbonMat, 0.3, 0.66)
-  wheel.rotation.z = -0.35
-
-  // Halo: the ring around the cockpit plus the central strut down to the nose.
-  // Ring centre x=0.12 with an x-stretch of 1.3, so its front edge sits at
-  // x ≈ 0.56, y = 0.88; the strut runs from there down to the chassis top at
-  // (0.76, 0.52) — leaning forward as it descends, as the real one does.
-  const ringGeom = new THREE.TorusGeometry(0.34, 0.032, 8, 20)
-  const ring = add(ringGeom, bodyMat, 0.12, 0.88)
-  ring.rotation.x = Math.PI / 2
-  ring.scale.x = 1.3
-  const strutLen = Math.hypot(0.2, 0.36)
-  const strut = add(new THREE.CylinderGeometry(0.026, 0.03, strutLen, 8), bodyMat, 0.66, 0.7)
-  strut.rotation.z = Math.atan2(0.2, 0.36)
-
-  // Mirrors either side of the cockpit. Small and close-set: in the halo cam's
-  // wide view an outboard mirror lands in the corner of frame, and an oversized
-  // box there reads as a detached block rather than part of the car.
-  for (const z of [-1, 1]) {
-    add(new THREE.BoxGeometry(0.04, 0.06, 0.11), accentMat, 0.44, 0.66, z * halfW * 0.5)
-    const stalk = add(
-      new THREE.CylinderGeometry(0.014, 0.018, 0.13, 6), darkMat, 0.44, 0.58, z * halfW * 0.42,
-    )
-    stalk.rotation.x = z * 0.5 // leaning outward from the tub to the glass
+  // Recessed seat, padded cockpit edge and a carbon halo with a clear central opening.
+  const seat = add(new THREE.SphereGeometry(1,32,16),darkMat,-0.06,0.505)
+  seat.scale.set(0.52,0.07,0.25)
+  const tube = (points: number[][], radius: number, material: THREE.Material, parent = root): THREE.Mesh =>
+    add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points.map(v => new THREE.Vector3(v[0]!,v[1]!,v[2]!))),64,radius,12,false),material,0,0,0,parent)
+  tube([[-0.55,0.66,-0.245],[-0.12,0.64,-0.265],[0.38,0.59,-0.21],[0.46,0.59,0],[0.38,0.59,0.21],[-0.12,0.64,0.265],[-0.55,0.66,0.245]],0.024,darkMat)
+  const haloPoints = [[-0.61,0.70,-0.42],[-0.30,0.78,-0.46],[0.06,0.84,-0.46],[0.36,0.865,-0.37],[0.49,0.875,-0.18],[0.51,0.875,0],[0.49,0.875,0.18],[0.36,0.865,0.37],[0.06,0.84,0.46],[-0.30,0.78,0.46],[-0.61,0.70,0.42]]
+  add(haloSurface(haloPoints),carbonMat,0,0)
+  add(haloSurface(haloPoints,0.445,0.555,true),accentMat,0,0)
+  tube([[0.51,0.875,0],[0.58,0.76,0],[0.68,0.65,0]],0.024,carbonMat)
+  for (const side of [-1,1]) {
+    const mount=add(new THREE.SphereGeometry(1,20,12),bodyMat,-0.59,0.70,side*0.39)
+    mount.scale.set(0.11,0.055,0.095)
+  }
+  const helmetMat = mat(0xe9ac28,{roughness:0.28,metalness:0})
+  const helmet = add(new THREE.SphereGeometry(0.18,40,28),helmetMat,-0.13,0.72)
+  helmet.scale.set(1.08,1.05,0.96)
+  const visorMat = mat(0x192b38,{roughness:0.16,metalness:0.65})
+  const visor=add(new THREE.SphereGeometry(0.183,32,12,0.10,Math.PI-0.20,1.13,0.44),visorMat,-0.13,0.72)
+  visor.rotation.y=Math.PI/2; visor.scale.copy(helmet.scale)
+  const helmetStripe=add(new THREE.SphereGeometry(0.1815,32,24,0,0.20),accentMat,-0.13,0.72)
+  helmetStripe.rotation.y=Math.PI/2-0.10; helmetStripe.scale.copy(helmet.scale)
+  // Wheel and gloves turn together, independently of the merged body shell.
+  const cockpitWheel = new THREE.Group(); cockpitWheel.name = 'cockpit-steering'; cockpitWheel.position.set(0.29,0.79,0); root.add(cockpitWheel)
+  // Rounded butterfly plate and separate grips, with readable controls on the rear face.
+  const outline = new THREE.Shape()
+  outline.moveTo(-0.155,0.070); outline.quadraticCurveTo(-0.18,0.055,-0.165,-0.055)
+  outline.quadraticCurveTo(-0.155,-0.085,-0.11,-0.063); outline.lineTo(-0.05,-0.038)
+  outline.lineTo(0.05,-0.038); outline.lineTo(0.11,-0.063)
+  outline.quadraticCurveTo(0.155,-0.085,0.165,-0.055); outline.quadraticCurveTo(0.18,0.055,0.155,0.070)
+  outline.lineTo(0.075,0.047); outline.lineTo(-0.075,0.047); outline.closePath()
+  const rawPlate = new THREE.ExtrudeGeometry(outline,{depth:0.026,bevelEnabled:detailed,bevelSize:0.005,bevelThickness:0.005,bevelSegments:2,steps:1})
+  rawPlate.rotateY(Math.PI/2)
+  const plate=mergeVertices(rawPlate);rawPlate.dispose();add(plate,carbonMat,-0.018,0,0,cockpitWheel)
+  const gloveMat=detailed?mat(0x334b68,{roughness:0.86,metalness:0}):darkMat
+  const buttonMats=detailed?[mat(0xc4b761,{roughness:0.58,metalness:0}),mat(0x9d554a,{roughness:0.58,metalness:0}),mat(0x71999d,{roughness:0.58,metalness:0})]:[accentMat,accentMat,accentMat]
+  for(const side of [-1,1]) {
+    const grip=add(new THREE.SphereGeometry(1,20,12),darkMat,0.001,-0.007,side*0.155,cockpitWheel);grip.scale.set(0.035,0.083,0.029)
+    const glove=add(new THREE.SphereGeometry(1,20,12),gloveMat,-0.027,-0.012,side*0.158,cockpitWheel);glove.scale.set(0.044,0.063,0.035)
+    const thumb=add(new THREE.SphereGeometry(1,16,10),gloveMat,-0.041,0.019,side*0.132,cockpitWheel);thumb.scale.set(0.018,0.032,0.020)
+    for(const y of [-0.030,-0.010,0.010]) {
+      const seam=add(new THREE.BoxGeometry(0.003,0.002,0.035),accentMat,-0.069,y,side*0.161,cockpitWheel);seam.rotation.x=side*0.15
+    }
+    for(let i=0;i<3;i++) {
+      const control=add(new THREE.CylinderGeometry(0.007,0.007,0.009,10),buttonMats[i]!, -0.026,0.030-i*0.022,side*(0.084+i*0.005),cockpitWheel)
+      control.rotation.z=Math.PI/2
+    }
+    const dial=add(new THREE.CylinderGeometry(0.014,0.014,0.012,14),darkMat,-0.029,-0.048,side*0.061,cockpitWheel);dial.rotation.z=Math.PI/2
+    add(new THREE.BoxGeometry(0.002,0.010,0.002),accentMat,-0.036,-0.044,side*0.061,cockpitWheel)
+  }
+  let displayAge=1,displaySpeed=-1
+  const displayCanvas=!detailed||typeof document==='undefined'?null:document.createElement('canvas')
+  if(displayCanvas){displayCanvas.width=256;displayCanvas.height=128}
+  const displayTexture=displayCanvas?new THREE.CanvasTexture(displayCanvas):null
+  if(displayTexture){displayTexture.colorSpace=THREE.SRGBColorSpace;displayTexture.anisotropy=4;disposables.push(displayTexture)}
+  const dashMat=mat(0xe4edda,{...(displayTexture?{map:displayTexture,emissiveMap:displayTexture}:{}),roughness:0.38,metalness:0,emissive:0xb6c4a3,emissiveIntensity:0.24})
+  add(new THREE.BoxGeometry(0.010,0.057,0.107),darkMat,-0.026,0.012,0,cockpitWheel)
+  const display=add(new THREE.PlaneGeometry(0.096,0.048),dashMat,-0.032,0.012,0,cockpitWheel);display.rotation.y=-Math.PI/2
+  const updateWheelDisplay=(speed:number,dt:number)=>{
+    if(!displayCanvas||!displayTexture)return
+    displayAge+=dt;const kmh=Math.round(Math.abs(speed)*3.6)
+    if(displayAge<0.12||kmh===displaySpeed)return
+    displayAge=0;displaySpeed=kmh;const c=displayCanvas.getContext('2d')!
+    c.fillStyle='#142527';c.fillRect(0,0,256,128)
+    c.fillStyle='#9bbcad';c.font='600 18px sans-serif';c.textAlign='center';c.fillText('BITE POINT',128,23)
+    c.fillStyle='#e4efda';c.font='700 56px monospace';c.fillText(String(kmh).padStart(3,'0'),113,81)
+    c.font='600 15px sans-serif';c.fillStyle='#94bdb9';c.fillText('KM/H',205,72)
+    c.fillStyle='#677e67';c.fillRect(18,105,220,6);c.fillStyle='#c2b85d';c.fillRect(18,105,220*Math.min(1,kmh/320),6)
+    displayTexture.needsUpdate=true
+  }
+  updateWheelDisplay(0,1)
+  // Dark inner faces and padding make the shoulder shells read as a cockpit opening.
+  for(const side of [-1,1]) {
+    const inner=add(bodyShell([[-0.49,0.565,0.077,0.029],[-0.18,0.586,0.078,0.023],[0.18,0.56,0.064,0.023],[0.39,0.532,0.048,0.025]],24),carbonMat,0,0,side*0.211)
+    inner.name='cockpit-inner-wall'
+    tube([[-0.47,0.651,side*0.22],[-0.20,0.662,side*0.228],[0.14,0.635,side*0.216],[0.36,0.595,side*0.19]],0.017,darkMat)
+  }
+  for (const side of [-1,1]) {
+    const mirror=add(new THREE.SphereGeometry(1,28,16),bodyMat,0.30,0.71,side*0.66)
+    mirror.scale.set(0.075,0.046,0.135)
+    const glass=add(new THREE.SphereGeometry(1,20,12),visorMat,0.234,0.71,side*0.66)
+    glass.scale.set(0.007,0.033,0.102)
+    tube([[0.30,0.55,side*0.36],[0.31,0.58,side*0.52],[0.30,0.69,side*0.65]],0.012,carbonMat)
+  }
+  const labelTexture=teamDecal('BITE POINT')
+  if(labelTexture) {
+    disposables.push(labelTexture)
+    const labelMat=mat(0xffffff,{map:labelTexture,transparent:true,alphaTest:0.1,roughness:0.5,metalness:0,polygonOffset:true,polygonOffsetFactor:-2})
+    add(haloSurface(haloPoints,0.10,0.29,true),labelMat,0,0)
+    add(haloSurface(haloPoints,0.71,0.90,true),labelMat,0,0)
+    for(const side of [-1,1]) {
+      const label=add(new THREE.PlaneGeometry(0.34,0.085),labelMat,-0.04,0.69,side*0.31)
+      label.rotation.x=-Math.PI/2; label.rotation.z=-Math.PI/2
+    }
   }
 
   // --- wheels and suspension ------------------------------------------------
@@ -467,7 +523,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
   const SPOKES = 5
   // One tyre and one rim per axle, since the two are now different widths.
   const tyreGeoms = {
-    front: new THREE.LatheGeometry(tyreProfile(wheelR, TYRE_W.front / 2, SHOULDER), 22),
+    front: new THREE.LatheGeometry(tyreProfile(wheelR, TYRE_W.front / 2, SHOULDER), detailed ? 64 : 32),
     rear: new THREE.LatheGeometry(tyreProfile(wheelR, TYRE_W.rear / 2, SHOULDER), 22),
   }
   const rimGeoms = {
@@ -732,6 +788,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
   // rolling parts likewise (tyre, rim, band, and — kept apart by their fading
   // materials — spokes and scuffs). The live suspension links deliberately
   // stay separate because their endpoints change with the moving upright.
+  mergeStatic(cockpitWheel, disposables, !ghost)
   mergeStatic(root, disposables, !ghost)
   for (const w of wheels) {
     mergeStatic(w.pivot, disposables, !ghost)
@@ -749,6 +806,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean } 
     spokeMaterial: spokeMat,
     scuffMaterial: scuffMat,
     updateSuspension,
+    updateCockpitSteering,
     dispose(): void {
       for (const d of disposables) d.dispose()
     },

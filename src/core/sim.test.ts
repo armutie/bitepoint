@@ -423,7 +423,9 @@ describe('traction control rotary', () => {
     // when timing arms.
     while (!sim.timingArmed) {
       const [steer, throttle] = autopilot(sim)
-      sim.step(steer, throttle, 0, 4)
+      // Select the tested setting before the partial tick on the timed lap.
+      const nearLine = sim.track.project(sim.car.s.x, sim.car.s.y).s > sim.track.length - 5
+      sim.step(steer, throttle, 0, nearLine ? from : 4)
     }
     for (let i = 0; i < 60 * 60 * 4; i++) {
       const [steer, throttle] = autopilot(sim)
@@ -643,10 +645,14 @@ describe('ghost path', () => {
     const lap = driveLaps(new TimeAttackSim(track, p, 'balanced_8', 'legacy'), 1)[0]!
     const record = {
       trackId: 'balanced_8', preset: 'legacy', easy: false,
-      time: lap.time, sectors: lap.sectors, path: lap.path,
+      time: lap.time, sectors: lap.sectors, path: lap.path, pathStartTime: lap.pathStartTime!,
       recordedAt: '2026-01-01T00:00:00.000Z', recording: lap.recording,
     }
     const back = deserializeLapRecord(serializeLapRecord(record))
+    expect(back.recording.timing).toBe(2)
+    expect(back.recording.rollingStart).toBe(true)
+    expect(back.pathStartTime).toBe(lap.pathStartTime)
+    expect(verifyLapRecording(track, p, back.recording).time).toBe(lap.time)
     expect(back.path).toBeDefined()
     expect(back.path!.length).toBe(lap.path.length)
     // Float32 on the way through: sub-millimetre over a kilometre of circuit,
@@ -712,7 +718,11 @@ describe('lap replay', () => {
     // not a number that came along with them. A faked time needs a faked input
     // trace that genuinely drives that fast.
     const replay = new LapReplay(track, params, lap.recording)
-    expect(Math.abs(replay.duration - lap.time)).toBeLessThan(1e-9)
+    // Playback includes the crossing tick and the tail after the finish;
+    // the authoritative timer excludes both untimed portions.
+    expect(replay.duration - lap.time).toBeGreaterThan(0)
+    expect(replay.duration - lap.time).toBeLessThan(2 * DT)
+    expect(verifyLapRecording(track, params, lap.recording).time).toBe(lap.time)
   })
 
   it('replays back onto the line the lap was actually driven on', () => {
@@ -738,6 +748,31 @@ describe('lap replay', () => {
       )
     }
     expect(maxDrift).toBe(0)
-    expect(Math.abs(n * DT - lap.time)).toBeLessThan(1e-9)
+    expect(n * DT - lap.time).toBeGreaterThan(0)
+    expect(n * DT - lap.time).toBeLessThan(2 * DT)
+  })
+})
+
+describe('brake-aware automatic lap compatibility', () => {
+  it.each([true, 2] as const)('stores automatic schedule %s and reproduces the live lap', schedule => {
+    const track = loadTrack('balanced_8'), p = handlingPreset('legacy')
+    const sim = new TimeAttackSim(track, p, track.id, 'legacy', false, { brakeAwareAuto: schedule })
+    const lap = driveLaps(sim, 1)[0]!
+    expect(lap).toBeDefined()
+    expect(lap.recording.brakeAwareAuto).toBe(schedule)
+    const record = {
+      trackId: track.id, preset: 'legacy', easy: false,
+      time: lap.time, sectors: lap.sectors, recordedAt: '2026-10-13T00:00:00Z', recording: lap.recording,
+    }
+    const restored = deserializeLapRecord(serializeLapRecord(record))
+    expect(restored.recording.brakeAwareAuto).toBe(schedule)
+    const verified = verifyLapRecording(track, p, restored.recording)
+    expect(verified.accepted, verified.reason).toBe(true)
+    expect(verified.time).toBe(lap.time)
+    expect(new LapReplay(track, p, restored.recording).car.brakeAwareAuto).toBe(schedule)
+    const original = driveLaps(new TimeAttackSim(track, p, track.id, 'legacy'), 1)[0]!
+    expect(original.recording.brakeAwareAuto).toBeUndefined()
+    expect(new LapReplay(track, p, original.recording).car.brakeAwareAuto).toBe(false)
+    expect(verifyLapRecording(track, p, original.recording).time).toBe(original.time)
   })
 })

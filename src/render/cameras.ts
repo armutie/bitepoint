@@ -44,12 +44,12 @@ const CAM_PITCH = (9.0 * Math.PI) / 180
  * Mounted at ring height it stares through the hoop and the ring eats the
  * whole lower half of the frame.
  */
-const HALO_BACK = 0.52
-const HALO_HEIGHT = 1.38
-const HALO_PITCH = (11.5 * Math.PI) / 180
+const HALO_BACK = 0.90
+const HALO_HEIGHT = 1.45
+const HALO_PITCH = (14 * Math.PI) / 180
 
 /** Horizontal fields of view, in degrees. */
-const HFOV = { halo: 78, hood: 74, chase: 74, topDown: 60 }
+const HFOV = { halo: 76, hood: 74, chase: 74, topDown: 60 }
 
 /**
  * Attract-camera pace: how fast the menu shot travels the circuit (m/s), and
@@ -74,7 +74,6 @@ const AUTH_GRASS_RUMBLE = 0.025
 const AUTH_CHATTER = 0.02
 const ENV_SMOOTH = 0.16
 const PITCH_COUP = 0.5
-const LEAN_GAIN = 0.0016
 
 /** Where the car is relative to the painted edge, for the road feel. */
 export interface Surface {
@@ -89,6 +88,7 @@ export interface Surface {
 export class CameraRig {
   readonly camera: THREE.PerspectiveCamera
   mode: CameraMode = 'halo'
+  classicFraming = false
   lookBack = false
   /** Extra horizontal FOV, in degrees, at top speed. pygame has none. */
   fovKick = 8
@@ -181,7 +181,7 @@ export class CameraRig {
     const speedNow = Math.hypot(s.vx, s.vy)
     const onboard = this.mode === 'halo' || this.mode === 'hood'
     const kick = onboard ? this.fovKick * Math.min(speedNow / 75, 1) ** 2 : 0
-    this.applyHFov(HFOV[this.mode] + kick)
+    this.applyHFov(HFOV[this.mode] - (this.classicFraming && this.mode === 'halo' ? 5 : 0) + kick)
 
     // --- weight transfer -> nose pitch ---
     const target = throttle < 0 ? -throttle * p.divePitch : -throttle * p.squatPitch
@@ -212,7 +212,6 @@ export class CameraRig {
 
     const bob = this.bumpAmp * Math.sin(this.bumpPhase)
     const chatter = this.chatterAmp * Math.sin(this.bumpPhase * 2.7 + 1.3)
-    const lean = LEAN_GAIN * (s.r * s.vx)
     this.bob = bob
 
     const cos = Math.cos(s.yaw)
@@ -228,12 +227,13 @@ export class CameraRig {
       case 'halo':
       case 'hood': {
         const halo = this.mode === 'halo'
-        const fwd = halo ? -HALO_BACK : CAM_FWD
+        const fwd = halo ? -HALO_BACK + (this.classicFraming ? 0.14 : 0) : CAM_FWD
         const height = halo ? HALO_HEIGHT : CAM_HEIGHT
         const basePitch = halo ? HALO_PITCH : CAM_PITCH
 
         const dir = this.lookBack ? -1 : 1
-        const side = chatter + lean
+        // Rough-surface vibration remains; steering adds no independent sideways sway.
+        const side = chatter
         this.camera.position.set(
           px + fx * fwd + rx * side,
           height + bob,

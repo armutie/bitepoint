@@ -9,8 +9,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  combinedLevel, firingFrequency, impactGain, levelsFor, slipRatio, smoothstep,
-  engineWaveProfile, ENGINE_HARMONICS, ENGINE_MAX, ENGINE_TONAL_SHARE,
+  combinedLevel, impactGain, levelsFor, slipRatio, smoothstep,
   squealPitch, RASP_MAX_FRONT, RASP_MAX_REAR, SQUEAL_MAX_FRONT, SQUEAL_MAX_REAR,
   TYRE_GATE_LO, type AudioInput,
 } from './mix'
@@ -366,132 +365,6 @@ describe('the squeal is the pitched half, and it comes later', () => {
     // and much faster would start producing sidebands, which is a different
     // sound entirely. EXPERIMENT: 26-64 Hz, up from 17-41.
     expect(hard).toBeLessThan(80)
-  })
-})
-
-describe('the engine sits low, and knows on-throttle from off', () => {
-  const rev = (rpm: number, throttle: number, shiftTimer = 0): AudioInput =>
-    at({ speed: 60, vx: 60, wheelVr: 60, rpm, throttle, shiftTimer })
-
-  it('sings at the firing frequency, not at the crank speed', () => {
-    // A V6 four-stroke fires three times per revolution.
-    expect(firingFrequency(1200)).toBeCloseTo(60, 6)
-    expect(firingFrequency(8200)).toBeCloseTo(410, 6)
-  })
-
-  it('still keeps a real broadband share, so it cannot become a pure tone', () => {
-    // The anti-whine invariant survives the correction, at a different value.
-    // The first reference said 30% harmonic; that was a distant exterior mic.
-    // In-car it is far more tonal — but never ALL tonal, because 100% tonal at
-    // a frequency that tracks a pedal is the whine everybody complains about.
-    expect(ENGINE_TONAL_SHARE).toBeLessThan(0.85)
-    expect(ENGINE_TONAL_SHARE).toBeGreaterThan(0.5)
-  })
-
-  it('carries half-order content, which is what makes a vee engine lumpy', () => {
-    // A vee does not fire evenly, so there is real energy at half the firing
-    // frequency and its odd multiples. Building the wave from clean firing
-    // harmonics alone is what made it sound like an organ.
-    const profile = engineWaveProfile()
-    const even = profile.filter((_, i) => (i + 1) % 2 === 0)
-    const odd = profile.filter((_, i) => (i + 1) % 2 === 1)
-    expect(odd.every((a) => a > 0)).toBe(true)
-    // Present, but clearly subordinate to the firing orders.
-    expect(Math.max(...odd)).toBeLessThan(Math.max(...even) * 0.6)
-  })
-
-  it('drives harder under load, and is never entirely clean', () => {
-    const lift = levelsFor(rev(7000, 0)).engineDrive
-    const power = levelsFor(rev(7000, 1)).engineDrive
-    expect(power).toBeGreaterThan(lift * 1.8)
-    // Even on the overrun an exhaust is not a sine wave.
-    expect(lift).toBeGreaterThan(0.2)
-    expect(power).toBeLessThanOrEqual(1)
-  })
-
-  it('does not decay as a clean 1/n series', () => {
-    // MEASURED in-car: h2 sits level with h1. A 1/n series would put it at
-    // half, which is exactly why a naive additive engine sounds thin — it
-    // throws away the second order, and the second order is half the weight.
-    expect(ENGINE_HARMONICS[1]! / ENGINE_HARMONICS[0]!).toBeGreaterThan(0.8)
-    // And it is not perfectly monotonic either: a cabin has resonances.
-    let inversions = 0
-    for (let i = 1; i < ENGINE_HARMONICS.length; i++) {
-      if (ENGINE_HARMONICS[i]! > ENGINE_HARMONICS[i - 1]!) inversions++
-    }
-    expect(inversions).toBeGreaterThanOrEqual(1)
-  })
-
-  it('keeps almost all of its energy low, as a cabin does', () => {
-    // The failure this exists to catch. The reference has 99.2% of its energy
-    // below 500 Hz and a centroid of 154 Hz; the version measured against a
-    // distant exterior mic opened its filter to 5.2 kHz and put most of its
-    // effort in a band a real cabin has nothing in.
-    //
-    // Expressed against the fundamental, because that is what makes it follow
-    // the revs rather than being a fixed window.
-    // 9x rather than the reference's 6.3x: the saturation makes its grit in
-    // the low orders, and filtering at exactly the measured point shaves off
-    // the harmonics carrying the growl. Still an order of magnitude tighter
-    // than the 5.2 kHz absolute window this replaced.
-    for (const rpm of [1200, 3000, 5000, 8200]) {
-      for (const throttle of [0, 1]) {
-        const l = levelsFor(rev(rpm, throttle))
-        expect(l.engineCutoff / l.engineFreq).toBeLessThanOrEqual(9.1)
-      }
-    }
-    // Idling off the throttle should be genuinely deep, not merely quiet.
-    expect(levelsFor(rev(1200, 0)).engineCutoff).toBeLessThan(320)
-  })
-
-  it('is mostly tonal in the cabin, not mostly broadband', () => {
-    // Flatness 0.083 measured inside the car against 0.391 outside it. The
-    // 30%-harmonic figure came from the exterior mic and was wrong for the
-    // sound the player is sitting in.
-    expect(ENGINE_TONAL_SHARE).toBeGreaterThan(0.6)
-  })
-
-  it('goes dark on a lift without the pitch moving', () => {
-    // The thing rev-only mapping cannot do, and the reason it sounds like a
-    // siren on a slider. Same engine speed, completely different sound.
-    const power = rev(7000, 1)
-    const lift = rev(7000, 0)
-    expect(levelsFor(lift).engineFreq).toBeCloseTo(levelsFor(power).engineFreq, 6)
-    expect(levelsFor(lift).engineCutoff).toBeLessThan(levelsFor(power).engineCutoff * 0.75)
-    expect(levelsFor(lift).engineGain).toBeLessThan(levelsFor(power).engineGain)
-  })
-
-  it('cuts for the gearchange, because the physics really does', () => {
-    const inGear = levelsFor(rev(7800, 1)).engineGain
-    const shifting = levelsFor(rev(7800, 1, 0.1)).engineGain
-    expect(shifting).toBeLessThan(inGear * 0.3)
-  })
-
-  it('sits under the layers that come and go', () => {
-    // The engine is the only sound that is always there. A layer that never
-    // stops has to sit further back than one that is an event — kerbs and
-    // tyres are allowed to be louder than the thing they happen over.
-    const flat = levelsFor(rev(8000, 1))
-    const kerb = levelsFor(at({ speed: 50, vx: 50, wheelVr: 50, onKerb: true })).surfaceGain
-    expect(flat.engineGain).toBeLessThan(kerb)
-    expect(flat.engineGain).toBeLessThan(SQUEAL_MAX_REAR)
-  })
-
-  it('is never silent, and never louder than its ceiling', () => {
-    for (const rpm of [0, 1200, 4000, 8200, 12000]) {
-      for (const throttle of [-1, 0, 0.5, 1]) {
-        const l = levelsFor(rev(rpm, throttle))
-        expect(l.engineGain).toBeGreaterThan(0)
-        expect(l.engineGain).toBeLessThanOrEqual(ENGINE_MAX)
-        expect(l.engineFreq).toBeGreaterThanOrEqual(0)
-      }
-    }
-  })
-
-  it('wanders, so it is never mathematically periodic', () => {
-    const l = levelsFor(rev(6000, 1))
-    expect(l.engineJitter).toBeGreaterThan(0)
-    expect(l.engineJitter / l.engineFreq).toBeLessThan(0.02)
   })
 })
 

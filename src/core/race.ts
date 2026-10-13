@@ -229,10 +229,12 @@ export class Race {
       if (this.finishTime.has(i)) continue
       if (!results[i]!.lapCompleted) continue
       if (this.sims[i]!.lapsCompleted < this.laps) continue
-      this.finishTime.set(i, this.raceTime)
+      this.finishTime.set(i, this.raceTime - (1 - (results[i]!.finishFraction ?? 1)) * DT)
       this.finishDistance.set(i, this.distance[i]!)
       this.finishOrder.push(i)
     }
+    // Cars crossing within the same tick still have an on-road finish order.
+    this.finishOrder.sort((a, b) => this.finishTime.get(a)! - this.finishTime.get(b)!)
     if (this.finishTime.size === this.sims.length) this.phase = 'finished'
   }
 

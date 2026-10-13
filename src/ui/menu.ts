@@ -11,6 +11,7 @@
  * ``renderSetup``, which today writes the assist switch and could write a full
  * CarParams editor without anything around it changing.
  */
+import audioCreditsURL from '/audio/engine/CREDITS.txt?url'
 import type { CarParams, MenuPresetName, PresetInfo, PresetName } from '../core/carParams'
 import { applyEasyAids, handlingPreset, PRESET_INFO } from '../core/carParams'
 import type { TrackManifestEntry } from '../core/track'
@@ -1403,6 +1404,14 @@ export class Menu {
         VOLUME, s.volume, (v) => set({ volume: v }),
       ), off('volume'), revert('volume')),
     )
+
+    const audioCredit = document.createElement('a')
+    audioCredit.href = audioCreditsURL
+    audioCredit.textContent = 'Engine audio credits'
+    audioCredit.target = '_blank'
+    audioCredit.rel = 'noopener'
+    audioCredit.className = 'menu-hint'
+    system.append(audioCredit)
 
     body.append(driving, view, system)
 

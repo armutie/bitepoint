@@ -43,6 +43,8 @@ export const STAGE_SLOT = GRID_SLOTS - 1
 export const SECTORS = 3
 
 export interface SimOptions {
+  /** Earlier automatic downshifts under braking; stored with each new lap. */
+  brakeAwareAuto?: boolean | 2
   /**
    * Solid barrier walls. On by default, matching `play.py`.
    *
@@ -91,6 +93,8 @@ export interface SectorSplits {
 }
 
 export interface CompletedLap {
+  /** Time of the first ghost pose relative to the actual line crossing. */
+  pathStartTime?: number
   time: number
   valid: boolean
   sectors: (number | null)[]
@@ -152,10 +156,16 @@ export interface LapTrace {
  * makes ghosts exact and makes a submitted time checkable by re-running it.
  */
 export interface LapRecording {
+  /** Absent: original; true: brake-pressure schedule; 2: road-speed schedule. */
+  brakeAwareAuto?: true | 2
   trackId: string
   preset: string
   easy: boolean
-  /** Car state at the moment the lap started. */
+  /** 2 measures gate crossings between ticks; absent preserves legacy timing. */
+  timing?: 2
+  /** The first input crosses the start line, from the state just before it. */
+  rollingStart?: true
+  /** Car state at the beginning of the recording's first physics tick. */
   start: CarState
   /**
    * Two entries per tick — steer, throttle — or THREE when `manual`, the third
@@ -230,8 +240,9 @@ export function lapUsedTc(r: LapRecording): boolean {
 }
 
 export interface LapVerification {
+  pathStartTime?: number
   accepted: boolean
-  /** Present only for an accepted lap; always derived from the input count. */
+  /** Present only for an accepted lap; derived by replaying the gate crossings. */
   time?: number
   sectors?: (number | null)[]
   /** Server-derived ghost data; client-supplied paths are never trusted. */
@@ -243,6 +254,8 @@ export interface LapVerification {
 export interface StepResult {
   /** The car crossed the start/finish line going forwards this tick. */
   crossedFinish: boolean
+  /** Fraction of this tick at the forward finish crossing, or null. */
+  finishFraction: number | null
   /** A timed lap finished this tick. */
   lapCompleted: CompletedLap | null
   /** A sector boundary was crossed this tick (0-based index of the one closed). */
@@ -275,8 +288,14 @@ export class TimeAttackSim {
 
   /** Ticks since the sim was reset. */
   steps = 0
-  /** Ticks at which the current lap started. */
+  /** Tick ending the start crossing, plus its fractional remainder below. */
   private lapStartStep = 0
+  private lapStartRemainder = 0
+  private interpolatedTiming = true
+  private recordingRollingStart = false
+  private pathStartTime = 0
+  // Reused snapshot: no per-tick allocation, no extra physics steps.
+  private beforeStepState: CarState = initialState()
   private prevS = 0
   private lapProgress = 0
 
@@ -352,6 +371,7 @@ export class TimeAttackSim {
     this.offTrackGrip = easyGrass ? 1.0 : OFF_TRACK_GRIP
     this.barriers = (opts.walls ?? true) ? new Barriers(track) : null
     this.car.manual = opts.manual ?? false
+    this.car.brakeAwareAuto = opts.brakeAwareAuto ?? false
     this.tc = opts.tc ?? false
     this.slot = opts.slot ?? STAGE_SLOT
     this.reset()
@@ -362,8 +382,10 @@ export class TimeAttackSim {
     const pose = gridPose(this.track, this.slot)
     this.car.reset(pose.x, pose.y, pose.yaw)
 
+    this.interpolatedTiming = true
     this.steps = 0
     this.lapStartStep = 0
+    this.lapStartRemainder = 0
     this.prevS = this.track.project(pose.x, pose.y).s
     this.lapProgress = 0
     this.timingArmed = false
@@ -376,18 +398,21 @@ export class TimeAttackSim {
     this.recordingPath = []
   }
 
-  /** Initialise an already-armed lap for the server verification path. */
+  /** Replay legacy tick timing or derive both crossings from a new recording. */
   beginVerification(recording: LapRecording): void {
-    this.beginFlyingLap(recording.start)
+    this.interpolatedTiming = recording.timing === 2
+    this.beginRolling(recording.start, !recording.rollingStart)
   }
 
   /** A rolling one-lap session, with the clock armed at the supplied pose. */
   beginFlyingLap(start: CarState): void {
+    this.interpolatedTiming = true
     this.beginRolling(start, true)
   }
 
   /** A moving run-up; the first forward line crossing starts the timed lap. */
   beginRollingApproach(start: CarState): void {
+    this.interpolatedTiming = true
     this.beginRolling(start, false)
   }
 
@@ -395,6 +420,7 @@ export class TimeAttackSim {
     this.car.s = { ...start }
     this.steps = 0
     this.lapStartStep = 0
+    this.lapStartRemainder = 0
     this.prevS = this.track.project(start.x, start.y).s
     this.lapProgress = 0
     this.timingArmed = armed
@@ -406,7 +432,7 @@ export class TimeAttackSim {
 
   /** Seconds elapsed on the lap in progress; 0 until the clock is armed. */
   get currentLapTime(): number {
-    return this.timingArmed ? (this.steps - this.lapStartStep) * DT : 0
+    return this.timingArmed ? (this.steps - this.lapStartStep) * DT + this.lapStartRemainder : 0
   }
 
   /** Metres round the lap, clamped to it. Zero until the clock is armed. */
@@ -434,6 +460,7 @@ export class TimeAttackSim {
 
   step(steer: number, throttle: number, shiftRequest = 0, tcLevel = TC_LEVEL_DEFAULT): StepResult {
     const s = this.car.s
+    Object.assign(this.beforeStepState, s)
     // Null unless the rotary is in play, which is what leaves every preset's
     // own traction control exactly as it was.
     this.car.tcLevel = this.tc ? Math.round(clamp(tcLevel, 0, TC_LEVEL_MAX)) : null
@@ -453,9 +480,7 @@ export class TimeAttackSim {
     )
 
     if (this.timingArmed) {
-      this.recordingInputs.push(steer, throttle)
-      if (this.car.manual) this.recordingInputs.push(Math.sign(shiftRequest))
-      if (this.tc) this.recordingInputs.push(this.car.tcLevel!)
+      this.recordInput(steer, throttle, shiftRequest)
     }
     this.steps++
 
@@ -492,7 +517,9 @@ export class TimeAttackSim {
     // Progress along the lap, handling the start/finish wrap. A big negative
     // jump in arc length means the line was crossed forwards; a big positive one
     // means it was crossed backwards.
-    let ds = proj.s - this.prevS
+    const previousS = this.prevS
+    const previousProgress = this.lapProgress
+    let ds = proj.s - previousS
     let crossedFinish = false
     if (ds < -this.track.length * 0.5) {
       ds += this.track.length
@@ -500,6 +527,9 @@ export class TimeAttackSim {
     } else if (ds > this.track.length * 0.5) {
       ds -= this.track.length
     }
+    const finishFraction = crossedFinish
+      ? this.interpolatedTiming ? clamp((this.track.length - previousS) / ds, 0, 1) : 1
+      : null
     this.prevS = proj.s
     this.lapProgress += ds
 
@@ -511,7 +541,7 @@ export class TimeAttackSim {
     // Record this lap's progress trace, exactly as the env does: only while
     // the lap is still valid, and only forward, so the series stays monotonic
     // in distance and can be interpolated.
-    if (this.timingArmed && this.lapValid && this.lapProgress >= 0) {
+    if (!crossedFinish && this.timingArmed && this.lapValid && this.lapProgress >= 0) {
       const d = this.lapDistance
       if (this.traceS.length === 0 || d > this.traceS[this.traceS.length - 1]!) {
         this.traceS.push(d)
@@ -523,7 +553,8 @@ export class TimeAttackSim {
     // time at this same distance round the lap.
     this.liveDelta =
       this.timingArmed && this.referenceTrace
-        ? this.currentLapTime - traceTimeAt(this.referenceTrace, this.lapDistance)
+        ? this.currentLapTime - (finishFraction === null ? 0 : (1 - finishFraction) * DT)
+          - traceTimeAt(this.referenceTrace, this.lapDistance)
         : null
 
     let lapCompleted: CompletedLap | null = null
@@ -534,14 +565,15 @@ export class TimeAttackSim {
       // sector 1 actually start. The launch run before it does not count.
       this.timingArmed = true
       this.lapStartStep = this.steps
-      this.lapProgress = 0
+      this.lapStartRemainder = (1 - finishFraction!) * DT
+      this.lapProgress = this.interpolatedTiming ? proj.s : 0
       this.lapValid = !this.offTrack
-      this.beginLapRecording()
+      this.beginCrossingRecording(steer, throttle, shiftRequest, finishFraction!)
       this.beginSectors()
     } else if (crossedFinish && this.lapProgress > this.track.length * 0.5) {
       // A full lap: close the final sector, bank it, and start the next.
-      sectorClosed = this.closeSector(this.currentLapTime)
-      const time = this.currentLapTime
+      const time = this.currentLapTime - (1 - finishFraction!) * DT
+      sectorClosed = this.closeSector(time)
       const valid = this.lapValid
       const sectors = this.currentSectors.slice()
 
@@ -556,13 +588,17 @@ export class TimeAttackSim {
         sectors,
         trace: { s: Float64Array.from(this.traceS), t: Float64Array.from(this.traceT) },
         path: Float64Array.from(this.recordingPath),
+        ...(this.interpolatedTiming ? { pathStartTime: this.pathStartTime } : {}),
         recording: {
           trackId: this.trackId,
           preset: this.preset,
           easy: this.easy,
           start: { ...this.recordingStart },
+          ...(this.interpolatedTiming ? { timing: 2 as const } : {}),
+          ...(this.recordingRollingStart ? { rollingStart: true as const } : {}),
           inputs: Float64Array.from(this.recordingInputs),
           ...(this.car.manual ? { manual: true } : {}),
+          ...(this.car.brakeAwareAuto ? { brakeAwareAuto: this.car.brakeAwareAuto as true | 2 } : {}),
           ...(this.tc ? { tc: true } : {}),
           ...(this.abs ? { abs: true } : {}),
         },
@@ -581,22 +617,26 @@ export class TimeAttackSim {
       }
 
       this.lapStartStep = this.steps
-      this.lapProgress = 0
+      this.lapStartRemainder = (1 - finishFraction!) * DT
+      this.lapProgress = this.interpolatedTiming ? proj.s : 0
       this.lapValid = !this.offTrack
-      this.beginLapRecording()
+      this.beginCrossingRecording(steer, throttle, shiftRequest, finishFraction!)
       this.beginSectors()
     } else if (this.timingArmed) {
       // Mid-lap sector boundary.
       if (this.sector < SECTORS - 1) {
         const boundary = this.track.sectorBoundaries[this.sector]!
         if (this.lapProgress >= boundary) {
-          sectorClosed = this.closeSector(this.currentLapTime)
+          const fraction = this.interpolatedTiming && ds > 0
+            ? clamp((boundary - previousProgress) / ds, 0, 1) : 1
+          sectorClosed = this.closeSector(this.currentLapTime - (1 - fraction) * DT)
         }
       }
     }
 
     return {
       crossedFinish,
+      finishFraction,
       lapCompleted,
       sectorClosed,
       offTrack: this.offTrack,
@@ -605,7 +645,34 @@ export class TimeAttackSim {
     }
   }
 
+  private recordInput(steer: number, throttle: number, shiftRequest: number): void {
+    this.recordingInputs.push(steer, throttle)
+    if (this.car.manual) this.recordingInputs.push(Math.sign(shiftRequest))
+    if (this.tc) this.recordingInputs.push(this.car.tcLevel!)
+  }
+
+  private beginCrossingRecording(steer: number, throttle: number, shiftRequest: number, fraction: number): void {
+    this.beginLapRecording()
+    if (!this.interpolatedTiming) return
+    // Keep the crossing tick so verification independently derives the start
+    // fraction, rather than trusting a client-supplied timing adjustment.
+    const before = this.beforeStepState
+    this.recordingStart = { ...before }
+    this.recordingRollingStart = true
+    this.pathStartTime = -fraction * DT
+    this.recordingPath.unshift(before.x, before.y, before.yaw, before.steer, before.vx, before.wheelVr)
+    this.recordInput(steer, throttle, shiftRequest)
+    this.traceS = [0]
+    this.traceT = [0]
+    if (this.lapProgress > 0) {
+      this.traceS.push(this.lapProgress)
+      this.traceT.push(this.currentLapTime)
+    }
+  }
+
   private beginLapRecording(): void {
+    this.recordingRollingStart = false
+    this.pathStartTime = 0
     this.recordingStart = { ...this.car.s }
     this.recordingInputs = []
     // The path opens with the starting pose, so it lines up with `LapReplay`:
@@ -661,7 +728,12 @@ export function verifyLapRecording(
   params: CarParams,
   recording: LapRecording,
 ): LapVerification {
+  if (recording.brakeAwareAuto !== undefined && recording.brakeAwareAuto !== true && recording.brakeAwareAuto !== 2) return rejected('Unknown automatic gearbox format.')
   if (recording.trackId !== track.id) return rejected('Track metadata does not match.')
+  if (recording.timing !== undefined && recording.timing !== 2) return rejected('Unknown timing format.')
+  if (recording.rollingStart !== undefined && (recording.rollingStart !== true || recording.timing !== 2)) {
+    return rejected('Invalid rolling start format.')
+  }
   const layout = channelLayout(recording)
   const channels = layout.count
   if (recording.inputs.length % channels !== 0) {
@@ -707,6 +779,7 @@ export function verifyLapRecording(
     track, params, recording.trackId, recording.preset, recording.easy,
     {
       manual: recording.manual ?? false,
+      brakeAwareAuto: recording.brakeAwareAuto ?? false,
       tc: recording.tc ?? false,
       abs: recording.abs ?? false,
     },
@@ -721,6 +794,9 @@ export function verifyLapRecording(
       layout.gear < 0 ? 0 : recording.inputs[base + layout.gear]!,
       layout.tc < 0 ? TC_LEVEL_DEFAULT : recording.inputs[base + layout.tc]!,
     )
+    if (recording.rollingStart && tick === 0 && !result.timingArmed) {
+      return rejected('The first input must cross the start line.')
+    }
     if (result.lapCompleted) {
       if (tick !== ticks - 1) return rejected('Input trace continues after the finish.')
       if (!result.lapCompleted.valid) return rejected('Lap left the circuit.')
@@ -730,6 +806,8 @@ export function verifyLapRecording(
         sectors: result.lapCompleted.sectors,
         trace: result.lapCompleted.trace,
         path: result.lapCompleted.path,
+        ...(result.lapCompleted.pathStartTime !== undefined
+          ? { pathStartTime: result.lapCompleted.pathStartTime } : {}),
       }
     }
   }
@@ -796,6 +874,7 @@ export class LapReplay {
     // The gearbox travels with the lap. A manual lap replayed under the
     // automatic box would take different gears and drift off the line.
     this.car.manual = recording.manual ?? false
+    this.car.brakeAwareAuto = recording.brakeAwareAuto ?? false
     // The rotary travels with the lap for the same reason the gearbox does: a
     // lap driven with TC off replayed under TC on takes a different line.
     this.layout = channelLayout(recording)
@@ -811,7 +890,7 @@ export class LapReplay {
     return this.index * this.channels >= this.inputs.length
   }
 
-  /** Duration of the recorded lap in seconds. */
+  /** Playback span in seconds, including partial ticks either side of the lap. */
   get duration(): number {
     return (this.inputs.length / this.channels) * DT
   }

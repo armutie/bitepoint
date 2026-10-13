@@ -16,12 +16,12 @@ const rgb = (r: number, g: number, b: number): number => (r << 16) | (g << 8) | 
 export const PALETTE = {
   // Sky. Zenith and horizon; the fog must match the horizon or the far road
   // dissolves into a colour the sky does not contain.
-  SKY_TOP: rgb(96, 140, 190),
-  SKY_BOT: rgb(168, 196, 220),
+  SKY_TOP: rgb(69, 117, 175),
+  SKY_BOT: rgb(164, 191, 210),
 
   GRASS: rgb(38, 92, 46),
-  TARMAC: rgb(58, 60, 66),
-  TARMAC_FAR: rgb(44, 46, 52),
+  TARMAC: rgb(58, 59, 60),
+  TARMAC_FAR: rgb(47, 48, 49),
 
   GRAVEL: rgb(152, 143, 128),
 
@@ -30,8 +30,8 @@ export const PALETTE = {
   BARRIER_B: rgb(48, 80, 128),
   BARRIER_CREST: rgb(206, 210, 216),
 
-  KERB_A: rgb(212, 64, 58),
-  KERB_B: rgb(235, 235, 238),
+  KERB_A: rgb(161, 65, 55),
+  KERB_B: rgb(191, 186, 171),
 
   /** Track-limit line painted on the boundary (grey-white). */
   LIMIT: rgb(188, 190, 196),

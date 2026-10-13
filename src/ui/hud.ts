@@ -640,6 +640,11 @@ export class Hud {
     this.sectorHoldUntil = performance.now() + 4000
   }
 
+  /** Freeze the displayed clock without releasing the held pedal telemetry. */
+  setCurrentLapTime(time: number, armed: boolean): void {
+    setText(this.current, armed ? formatTime(time) : '--:--.---')
+  }
+
   /** One pill in one of its states. The class carries the fill colour. */
   private setPill(
     i: number,
@@ -730,7 +735,7 @@ export class Hud {
           : `Lap ${s.lapCount + 1} · ${Math.round(s.lapFraction * 100)}% · ${s.validLaps} valid`,
       )
     }
-    setText(this.current, s.timingArmed ? formatTime(s.currentLap) : '--:--.---')
+    this.setCurrentLapTime(s.currentLap, s.timingArmed)
     this.current.classList.toggle('is-void', !s.race && !s.lapValid && s.timingArmed)
     setText(this.last, formatTime(s.lastLap))
     setText(this.raceLast, formatTime(s.lastLap))

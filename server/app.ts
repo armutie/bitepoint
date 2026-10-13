@@ -156,6 +156,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
       sectors: verified.sectors,
       trace: verified.trace,
       path: verified.path,
+      ...(verified.pathStartTime !== undefined ? { pathStartTime: verified.pathStartTime } : {}),
       recordedAt,
       recording: submitted.recording,
     }

@@ -186,129 +186,10 @@ export interface AudioInput {
   throttle: number
   /** Seconds left of the gearchange torque cut; 0 when in gear. */
   shiftTimer: number
+  /** Zero-based gear; audio uses changes for shift articulation. */
+  gear?: number
+  idleRpm?: number
 }
-
-// --- engine -----------------------------------------------------------------
-
-/**
- * Firings per revolution x 2. A V6 fires three times per revolution of a
- * four-stroke, so the firing frequency is `rpm/60 * 3` — 60 Hz at a 1200 rpm
- * idle, 410 Hz at the 8200 rpm redline. That is the note the engine sings.
- */
-export const ENGINE_CYLINDERS = 6
-
-/**
- * How the engine's harmonics fall away, MEASURED from INSIDE a car.
- *
- * The second reference replaced the first, and the difference matters more than
- * any tuning done between them. The first was a distant exterior mic on an
- * idling car: broadband, reverberant, centroid 979 Hz, flatness 0.391. The
- * second is a cabin mic during acceleration — what a driver actually sits in —
- * and it is a completely different sound:
- *
- *     centroid 154 Hz      flatness 0.083      50% of energy below 129 Hz
- *     20-60 Hz    16.1%    250-500 Hz   22.2%
- *     60-125 Hz   32.7%    500-1000 Hz   0.6%
- *     125-250 Hz  28.2%    above 1 kHz   0.1%
- *
- * 99.2% below 500 Hz. Everything the previous version did to sound "raw" put
- * energy where a real cabin has none at all.
- *
- * The rolloff is steep, and the first two are equal — a 1/n series would put h2
- * at half of h1, which is why a naive additive engine sounds thin.
- */
-export const ENGINE_HARMONICS = [
-  1.0, 1.0, 0.6, 0.34, 0.25, 0.16, 0.15, 0.09, 0.085, 0.042, 0.059, 0.03, 0.042, 0.027,
-] as const
-
-/**
- * Share of engine energy carried by the harmonics rather than by broadband.
- *
- * MEASURED at 30%, with a spectral flatness of 0.391 — an engine is mostly
- * NOISE with harmonic structure on top of it, not a harmonic stack. This is the
- * whole defence against whine: a pure additive engine is 100% tonal, and 100%
- * tonal at a frequency that tracks a pedal is precisely the sound everyone
- * complains about.
- */
-export const ENGINE_TONAL_SHARE = 0.72
-
-/** Level of the cabin floor, relative to the engine's overall gain. */
-export const ENGINE_RUMBLE = 0.85
-
-/**
- * How much louder the engine's three layers are together than `ENGINE_MAX`.
- *
- * The ceiling used to be applied to each layer separately — tonal, induction
- * noise and cabin rumble — so the engine's real combined level was 1.31x the
- * number written down, and every comparison against the tyre and kerb ceilings
- * was wrong by that factor. Dividing by this makes `ENGINE_MAX` mean what it
- * says, which matters now that it is being set by ear against the other
- * layers rather than in isolation.
- */
-export const ENGINE_LAYER_SUM = Math.sqrt(
-  ENGINE_TONAL_SHARE + (1 - ENGINE_TONAL_SHARE) + ENGINE_RUMBLE * ENGINE_RUMBLE,
-)
-
-/**
- * Ceiling — the engine's COMBINED level, all three layers together.
- *
- * This is the first value that has actually been applied. Every earlier
- * reduction went in ahead of the saturator and therefore controlled distortion
- * rather than volume, which is why the engine stayed loud however far the
- * number came down. See `Engine.level`.
- *
- * Set low on purpose: it is the only sound that is always there, and a layer
- * that never stops has to sit further back than one that comes and goes. The
- * kerbs and the tyres are events, and events can be louder than the thing they
- * happen over.
- */
-export const ENGINE_MAX = 0.1
-
-/**
- * The engine is MUTED for now. Set to false to bring it back.
- *
- * Parked rather than deleted: the tyres, surface, wind and impacts are working
- * and the engine is not, and leaving a sound that is not right underneath ones
- * that are makes it impossible to judge either. Everything it needs — the
- * measured harmonic profile, the cabin floor, the post-saturator level control
- * — stays wired up and tested, so this is one word away from being audible
- * again once there is a reference worth tuning it against.
- *
- * Applied in the GRAPH, not here. `levelsFor` goes on reporting what the engine
- * would be doing, so the mapping stays under test while it is silent — mute it
- * in the mapping and the tests for lift-off, the gearchange cut and the ceiling
- * all quietly start passing on zeroes.
- */
-export const ENGINE_MUTED = true
-
-/**
- * Strength of the HALF-ORDER content, relative to the firing harmonics.
- *
- * The lumpiness. A V-engine does not fire evenly — the vee angle and the crank
- * throws mean the bangs are not equally spaced — and the audible result is
- * energy at half the firing frequency and its odd multiples. That is the whole
- * reason a V8 burbles and an inline-four drones, and building the wave from
- * clean firing harmonics alone is why this sounded like an organ.
- *
- * So the oscillator runs at HALF the firing frequency: even harmonics carry the
- * measured profile, odd harmonics carry the uneven firing at this fraction.
- */
-export const ENGINE_HALF_ORDER = 0.4
-
-/**
- * The engine wave, as harmonic amplitudes of a fundamental at HALF the firing
- * frequency. Even entries are the firing harmonics, odd are the half-orders.
- */
-export function engineWaveProfile(): number[] {
-  const out: number[] = []
-  for (let k = 1; k <= ENGINE_HARMONICS.length * 2; k++) {
-    const near = ENGINE_HARMONICS[Math.max(0, Math.floor(k / 2) - (k % 2 === 0 ? 1 : 0))] ?? 0.2
-    out.push(k % 2 === 0 ? near : ENGINE_HALF_ORDER * near)
-  }
-  return out
-}
-
-export const firingFrequency = (rpm: number): number => (rpm / 60) * (ENGINE_CYLINDERS / 2)
 
 export interface AudioLevels {
   /** 0..1 gains. */
@@ -371,34 +252,7 @@ export interface AudioLevels {
   /** Kerb rumble modulation rate, Hz. Zero when not on a kerb. */
   rumbleRate: number
 
-  /** Engine: overall level, and the firing frequency it is built on. */
-  engineGain: number
-  engineFreq: number
-  /**
-   * Brightness of the whole engine, Hz.
-   *
-   * Follows LOAD as well as revs, which is the part that stops it being a siren
-   * on a slider. On-throttle and off-throttle are completely different sounds
-   * at the same engine speed: lift at 7000 rpm and a real car goes dark and
-   * hollow instantly, while the pitch barely moves. An engine mapped on revs
-   * alone cannot do that, and no amount of tuning saves it.
-   */
-  engineCutoff: number
-  /** Fundamental wander, Hz. A perfectly steady engine is a synthesiser. */
-  engineJitter: number
-  /**
-   * How hard the engine is driven into saturation, 0..1.
-   *
-   * The raw. An exhaust is a violently nonlinear thing — pressure waves
-   * clipping against pipe walls, a sound that distorts long before it reaches
-   * you — and a sum of clean sine partials has none of that. This drives a
-   * waveshaper, which folds the harmonics into each other and produces the
-   * intermodulation that reads as guttural rather than as a chord.
-   *
-   * Rises with load: an engine on the overrun is comparatively polite, and the
-   * same engine at full throttle is not.
-   */
-  engineDrive: number
+
 }
 
 /**
@@ -518,67 +372,6 @@ export function levelsFor(input: AudioInput): AudioLevels {
     raspGrain: Math.min(110, Math.max(30, speed * 1.6)),
     surfaceCutoff,
     rumbleRate,
-    ...engineLevels(input),
-  }
-}
-
-/**
- * The engine, as gains and frequencies.
- *
- * Three things carry the whole design. The level follows load, so a lift is
- * audible before the revs have moved. The brightness follows load AND revs, so
- * the same engine speed sounds different on and off the throttle. And the
- * gearchange is not faked — the sim already cuts torque for 0.15 s on an
- * upshift, so muting through `shiftTimer` produces a real gap in a real place.
- */
-function engineLevels(input: AudioInput): {
-  engineGain: number
-  engineFreq: number
-  engineCutoff: number
-  engineJitter: number
-  engineDrive: number
-} {
-  const rev = Math.min(1, Math.max(0, input.rpm / Math.max(input.redlineRpm, 1)))
-  const load = Math.min(1, Math.max(0, input.throttle))
-  const freq = firingFrequency(Math.max(input.rpm, 0))
-
-  // Quiet at idle, loud on load, and rising with revs — but never silent,
-  // because an engine you cannot hear at all reads as a stall.
-  let gain = ENGINE_MAX * (0.3 + 0.7 * load) * (0.45 + 0.55 * rev)
-  // The torque cut, straight from the physics. Not a scripted blip: the sim
-  // really does stop making power here, so the hole is in the right place and
-  // lasts exactly as long as the gearbox takes.
-  if (input.shiftTimer > 0) gain *= 0.22
-
-  return {
-    engineGain: gain,
-    engineFreq: freq,
-    // RELATIVE TO THE FUNDAMENTAL, not an absolute frequency — the mistake
-    // that made this thin. The reference puts 85% of its energy below 6.3x its
-    // own firing frequency, so the right cutoff is a multiple of f0, and it
-    // then opens naturally as the engine revs instead of being a fixed 5.2 kHz
-    // window with almost nothing in the top four fifths of it.
-    //
-    // At a 1200 rpm idle off the throttle that is ~240 Hz; at the 8200 rpm
-    // redline flat out, ~2.9 kHz.
-    // Slightly wider than the reference's 6.3x, because the saturation below
-    // generates its grit in the low orders and filtering at exactly the
-    // measured point would shave off the harmonics that carry the growl.
-    engineCutoff: Math.min(freq * (5 + 4 * load), 3600),
-    // 0.35%, down hard from 1.8%. That was audible as VIBRATO — a smooth
-    // sinusoidal wobble on the pitch, which is the most recognisably
-    // synthesised thing a sound can do. Cycle-to-cycle variation in a real
-    // engine is small and irregular, not a 5.7 Hz warble at nearly 2%.
-    engineJitter: freq * 0.0035,
-    // Driven much harder: 1.5 idling, 7 flat out.
-    //
-    // This is where guttural comes from, given the sound has to stay low. A
-    // steep harmonic profile through a low filter is smooth and hollow —
-    // correct in its spectral balance and lifeless. Saturation fills the
-    // low-order harmonics in with intermodulation, which is density rather
-    // than brightness, and density at low frequency is exactly what "growl"
-    // means. It is also what a real exhaust does.
-    engineDrive: 0.22 + 0.78 * load,
   }
 }
 

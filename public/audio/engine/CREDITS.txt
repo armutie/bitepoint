@@ -1,0 +1,24 @@
+# Engine audio credits
+
+"Generic V8 Engine Sound" by DerMeehdrescher / Meehdrescher Studios.
+Source: https://opengameart.org/content/generic-v8-engine-sound
+Original download: https://opengameart.org/sites/default/files/genericv8sound.zip
+License: Creative Commons Attribution-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-sa/4.0/
+
+power.wav derives from Acc_05570.wav; coast.wav from Dec_05581.wav.
+Changes: mono conversion, DC removal, cycle-aligned seam crossfade and level
+normalization. These adapted audio files are distributed under CC BY-SA 4.0.
+No endorsement by the original author is implied.
+
+Runtime playback follows RPM, blends load/coast, and applies EQ and volume.
+The source describes engine loops, but does not establish whether they were
+recorded from a physical car or synthesized. We do not claim physical recording.
+
+
+exhaust-catch.mp3: "BACKFIRE.ogg" by CeebFrack (Freesound sound 105351).
+https://freesound.org/people/CeebFrack/sounds/105351/
+CC0 1.0: https://creativecommons.org/publicdomain/zero/1.0/
+Public high-quality preview downloaded 2026-10-12. No source-file edits;
+runtime uses short filtered/enveloped excerpts with playback-rate variation.
+This is a designed backfire effect, not claimed as an authentic gearbox recording.

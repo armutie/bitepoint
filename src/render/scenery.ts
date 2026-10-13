@@ -24,6 +24,8 @@ import {
 import type { Track } from '../core/track'
 import { PALETTE } from './palette'
 import type { Terrain } from './terrain'
+import { buildDriverEnvironment } from './driverEnvironment'
+import { buildMainStraight } from './mainStraight'
 
 /*
  * Where the wall is, for everything placed against it.
@@ -147,29 +149,52 @@ export function buildScenery(track: Track, terrain: Terrain): Scenery {
   buildBrakeBoards(track, landmarks)
   buildSponsorBoards(track, solid, rand)
   buildFloodlights(track, terrain, solid)
-  buildTyresAndMarshals(track, terrain, solid, rand)
-  buildServiceRoad(track, terrain, solid, overlay)
   buildBridge(track, landmarks)
-  buildTower(track, landmarks)
-  buildVillageAndRoads(track, terrain, solid, overlay, rand)
-  buildCity(track, terrain, solid, rand)
-  buildRiver(terrain, overlay)
+  const mainStraight = buildMainStraight(track, terrain)
+  root.add(mainStraight.root)
+  decorativeRoot.add(mainStraight.detailRoot)
+  disposables.push(mainStraight)
+  if (!mainStraight.replacesStart) buildTower(track, landmarks)
+  // Keep the original skyline, then add only distinct forward-facing straight views.
+  buildCity(track, terrain, solid, lcg(track.seed ^ 0x75c17))
+  const skylineCentres: { x: number; y: number }[] = []
+  for (let ri = 0; ri < terrain.runs.length && skylineCentres.length < 3; ri++) {
+    const run = terrain.runs[ri]!
+    if (run.len < 100) continue
+    const end = track.poseAt(run.s1), approach = track.poseAt(run.mid)
+    const x = end.x + Math.cos(end.yaw) * 640, y = end.y + Math.sin(end.yaw) * 640
+    const dx = x - approach.x, dy = y - approach.y, distance = Math.hypot(dx, dy)
+    const facing = (dx * Math.cos(approach.yaw) + dy * Math.sin(approach.yaw)) / distance
+    if (ri > 0 && (facing < 0.93 || skylineCentres.some(c => Math.hypot(c.x-x,c.y-y) < 340))) continue
+    skylineCentres.push({x,y})
+    if (ri > 0) buildCity(track, {...terrain,runs:[run]}, solid, lcg(track.seed ^ (ri * 0x17459)), true)
+  }
+  // Preserve the old optional outfield dressing, but spend the default scene
+  // on structures and trees that can actually be read from driving height.
+  const extendedOutfield = false
+  if (extendedOutfield) {
+    buildTyresAndMarshals(track, terrain, solid, rand)
+    buildServiceRoad(track, terrain, solid, overlay)
+    buildVillageAndRoads(track, terrain, solid, overlay, rand)
+    buildRiver(terrain, overlay)
+    decorativeRoot.add(buildCarPark(track, rand, disposables))
+  }
 
   // --- grandstands and pit block around the start/finish -------------------
   // Main stand — the anchor, twice the size of anything else — on the left of
   // the pit straight looking at the line; a second along the exit; the pit
   // building opposite.
-  buildStand(track, landmarks, rand, 0, 1, 80, 13)
-  buildStand(track, landmarks, rand, 165, 1, 30, 9)
-  buildPitBlock(track, landmarks, 0, -1)
+  if (!mainStraight.replacesStart) {
+    buildStand(track, landmarks, rand, 0, 1, 80, 13)
+    buildStand(track, landmarks, rand, 165, 1, 30, 9)
+    buildPitBlock(track, landmarks, 0, -1)
+  }
 
   // Corner stands at the two sharpest corners, on the outside, where the
   // spectators would actually stand — and where you brake.
   for (const apex of terrain.corners.slice(0, 2)) {
     buildStand(track, solid, rand, apex.s, -Math.sign(apex.k) || 1, 24, 8)
   }
-
-  decorativeRoot.add(buildCarPark(track, rand, disposables))
 
   const solidMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })
   // DoubleSide for the same winding reason as world.ts's overlay: painted
@@ -202,10 +227,15 @@ export function buildScenery(track: Track, terrain: Terrain): Scenery {
     parent.add(mesh)
   }
 
-  decorativeRoot.add(buildCatchFence(track, disposables))
-  const { hedges, treeSpots } = buildHedgerows(track, terrain, disposables)
-  for (const m of hedges) decorativeRoot.add(m)
-  for (const m of buildTrees(track, terrain, rand, disposables, treeSpots)) decorativeRoot.add(m)
+  if (!mainStraight.replacesStart) decorativeRoot.add(buildCatchFence(track, disposables))
+  if (extendedOutfield) {
+    const { hedges, treeSpots } = buildHedgerows(track, terrain, disposables)
+    for (const m of hedges) decorativeRoot.add(m)
+    for (const m of buildTrees(track, terrain, rand, disposables, treeSpots)) decorativeRoot.add(m)
+  }
+  const driverEnvironment = buildDriverEnvironment(track, terrain)
+  decorativeRoot.add(driverEnvironment.root)
+  disposables.push(driverEnvironment)
 
   return {
     root,
@@ -690,7 +720,7 @@ function buildRiver(terrain: Terrain, s: Strip): void {
  * longest is bridge in the mid-ground, city on the horizon. Tall enough to
  * read over the hills from half the lap.
  */
-function buildCity(track: Track, terrain: Terrain, s: Strip, rand: () => number): void {
+function buildCity(track: Track, terrain: Terrain, s: Strip, rand: () => number, extra = false): void {
   const run = terrain.runs[0]
   if (!run || run.len < 100) return
   const end = track.poseAt(run.s1)
@@ -703,7 +733,7 @@ function buildCity(track: Track, terrain: Terrain, s: Strip, rand: () => number)
   const concreteB = new THREE.Color(0x8f97a2)
   const glass = new THREE.Color(0x27333f)
 
-  const towers = 6
+  const towers = extra ? 4 : 6
   for (let i = 0; i < towers; i++) {
     const ox = (rand() - 0.5) * 260
     const oy = (rand() - 0.5) * 200
@@ -712,7 +742,7 @@ function buildCity(track: Track, terrain: Terrain, s: Strip, rand: () => number)
     const base = terrain.height(tx, ty) - 1
     const w = 16 + rand() * 12
     const depth = w * (0.7 + rand() * 0.5)
-    const h = 48 + rand() * 70
+    const h = extra ? 75 + rand() * 65 : 48 + rand() * 70
     const yaw = end.yaw + (rand() - 0.5) * 0.6
     const wall = rand() < 0.5 ? concrete : concreteB
     box(s, vx(tx), vz(ty), yaw, w, depth, base, base + h, wall)

@@ -40,6 +40,8 @@ export interface LapRecord {
    * longer the one they were driven on.
    */
   path?: Float64Array
+  /** First ghost sample time relative to the interpolated start crossing. */
+  pathStartTime?: number
   /** ISO 8601, so records survive being read by something other than JS. */
   recordedAt: string
   recording: LapRecording
@@ -209,6 +211,10 @@ export interface SerializedLapRecord {
   recordedAt: string
   start: CarState
   inputs: string
+  brakeAwareAuto?: true | 2
+  timing?: 2
+  rollingStart?: true
+  pathStartTime?: number
   /** Driven with a manual gearbox: the trace has three channels, not two. */
   manual?: boolean
   /**
@@ -301,7 +307,11 @@ export function serializeLapRecord(r: LapRecord): SerializedLapRecord {
     recordedAt: r.recordedAt,
     start: r.recording.start,
     inputs: encodeInputs(r.recording.inputs),
+    ...(r.recording.timing === 2 ? { timing: 2 as const } : {}),
+    ...(r.recording.rollingStart ? { rollingStart: true as const } : {}),
+    ...(r.pathStartTime !== undefined ? { pathStartTime: r.pathStartTime } : {}),
     ...(r.recording.manual ? { manual: true } : {}),
+    ...(r.recording.brakeAwareAuto ? { brakeAwareAuto: r.recording.brakeAwareAuto } : {}),
     ...(r.recording.tc ? { tc: true } : {}),
     ...(r.recording.abs ? { abs: true } : {}),
   }
@@ -314,7 +324,10 @@ export function deserializeLapRecord(s: SerializedLapRecord): LapRecord {
     easy: s.easy,
     start: s.start,
     inputs: decodeInputs(s.inputs),
+    ...(s.timing !== undefined ? { timing: s.timing } : {}),
+    ...(s.rollingStart !== undefined ? { rollingStart: s.rollingStart } : {}),
     ...(s.manual ? { manual: true } : {}),
+    ...(s.brakeAwareAuto !== undefined ? { brakeAwareAuto: s.brakeAwareAuto } : {}),
     ...(s.tc ? { tc: true } : {}),
     ...(s.abs ? { abs: true } : {}),
   }
@@ -332,6 +345,7 @@ export function deserializeLapRecord(s: SerializedLapRecord): LapRecord {
       ? { trace: { s: decodeFloat32(s.traceS), t: decodeFloat32(s.traceT) } }
       : {}),
     ...(s.path ? { path: decodeFloat32(s.path) } : {}),
+    ...(s.pathStartTime !== undefined ? { pathStartTime: s.pathStartTime } : {}),
     recordedAt: s.recordedAt,
     recording,
   }
