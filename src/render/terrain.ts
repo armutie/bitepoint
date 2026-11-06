@@ -1,4 +1,5 @@
 import { finishBuild } from './buildScheduler'
+import { onSilverstoneVenue } from './silverstoneVenue'
 /**
  * The land the circuit sits in.
  *
@@ -180,7 +181,8 @@ export function* buildTerrainSteps(track: Track): Generator<void, Terrain> {
     const out = -Math.sign(c.k) || 1
     const half = track.halfAt(c.s)
     const pose = track.poseAt(c.s)
-    const lat = out * (half + 30)
+    const gap = onSilverstoneVenue(track, c.s) ? track.barrierGapAt(c.s, out < 0) : 0
+    const lat = out * (half + Math.max(30, gap + 14))
     berms.push({
       x: pose.x - Math.sin(pose.yaw) * lat,
       y: pose.y + Math.cos(pose.yaw) * lat,
@@ -235,17 +237,20 @@ export function* buildTerrainSteps(track: Track): Generator<void, Terrain> {
 
   const heightAndDist = (x: number, y: number): { h: number; d: number } => {
     let d = approxDist(x, y)
+    let venueGap = 0
     if (d < 70) {
       const proj = track.project(x, y)
       d = Math.abs(proj.lateral) - proj.half
+      if (onSilverstoneVenue(track, proj.s)) venueGap = track.barrierGapAt(proj.s, proj.lateral < 0)
     }
 
     let h = 0
-    if (d > FLAT_CORRIDOR) {
+    const flat = Math.max(FLAT_CORRIDOR, venueGap + 4)
+    if (d > flat) {
       const roll =
         (noise(x / 90, y / 90) - 0.5) * 2 * ROLL_AMP +
         (noise(x / 34, y / 34) - 0.5) * 2.2
-      h += roll * smooth(FLAT_CORRIDOR, ROLL_FULL, d)
+      h += roll * smooth(flat, ROLL_FULL, d)
 
       const hill =
         (noise(x / 420 + 7.3, y / 420 - 2.1) * 0.75 + noise(x / 160, y / 160) * 0.25) * HILL_AMP
@@ -261,7 +266,7 @@ export function* buildTerrainSteps(track: Track): Generator<void, Terrain> {
     // raised vertex outside a tight bend can interpolate a grass wedge through
     // the road even though the analytic height is exactly zero on the tarmac.
     // The bank still reaches full height at its authored 30 m centre.
-    const bermEdgeFade = smooth(18, 30, d)
+    const bermEdgeFade = smooth(Math.max(18, venueGap), Math.max(30, venueGap + 13), d)
     for (const b of berms) {
       const r2 = (x - b.x) ** 2 + (y - b.y) ** 2
       h += b.amp * Math.exp(-r2 / (b.sigma * b.sigma)) * bermEdgeFade

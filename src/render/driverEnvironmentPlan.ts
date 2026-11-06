@@ -1,4 +1,5 @@
 import { planMainStraight } from './mainStraightPlan'
+import { onSilverstoneVenue } from './silverstoneVenue'
 import type { Track } from '../core/track'
 import type { Terrain } from './terrain'
 import { clearOfCircuit, outsideWall, pointAt, safeOutsideBox } from '../core/placement'
@@ -24,6 +25,7 @@ export function planDriverEnvironment(track:Track,terrain:Pick<Terrain,'runs'|'c
  for(const candidate of candidates){
   if(plan.buildings.length>=8)break
   const arc=wrap(candidate,track.length)
+  if(onSilverstoneVenue(track,arc))continue
   if(main && arc<main.end+45)continue
   if(Math.min(arc,track.length-arc)<175)continue
   const style=plan.buildings.length%3,length=style===1?18:26,depth=style===1?9:8,height=style===1?13:8+random()*3
@@ -39,6 +41,7 @@ export function planDriverEnvironment(track:Track,terrain:Pick<Terrain,'runs'|'c
   ...terrain.corners.slice(0,6).map(c=>({arc:c.s-20,span:130,side:-Math.sign(c.k)||1}))]
  for(const zone of zones)for(let along=-zone.span/2;along<=zone.span/2;along+=17+random()*5){
   const arc=wrap(zone.arc+along,track.length)
+  if(onSilverstoneVenue(track,arc))continue
   if(Math.min(arc,track.length-arc)<180 || random()<0.16)continue
   const height=11+random()*6,radius=4.6+random()*1.9
   const beyond=radius+2.5+random()*2.2

@@ -7959,6 +7959,16 @@
     7.25,
     7.25
   ],
+  "barrierProfile": [
+    [0, 4.8, 3.0], [270, 5.5, 3.0], [335, 8.5, 5.0], [450, 9.0, 9.0],
+    [4670, 9.0, 9.0], [4780, 6.5, 7.0], [4860, 8.0, 7.0],
+    [4930, 14.0, 8.0], [4980, 23.0, 8.0], [5030, 31.0, 7.0],
+    [5080, 34.0, 8.0], [5130, 28.0, 9.0], [5180, 21.0, 10.0],
+    [5245, 12.0, 9.0], [5335, 7.0, 10.0], [5400, 7.0, 15.0],
+    [5460, 8.0, 23.0], [5500, 6.5, 22.0], [5540, 16.0, 8.0],
+    [5580, 22.0, 6.5], [5620, 20.0, 8.0], [5680, 16.0, 8.0],
+    [5740, 19.0, 6.0], [5785, 17.0, 4.8], [5850, 7.0, 3.0]
+  ],
   "brakeMarkers": [
     {
       "s": 795.536,
@@ -8018,7 +8028,8 @@
     "relation": 51160,
     "timing": "Previous Bitepoint timing locations projected onto the mapped route",
     "roadEdges": "Hand-authored estimates from Esri World Imagery aerial cross-sections. Widths are symmetric about the mapped route.",
-    "kerbs": "Visible painted runs interpreted from aerial imagery, with approximations where obscured."
+    "kerbs": "Visible painted runs interpreted from aerial imagery, with approximations where obscured.",
+    "barriers": "Approximate offsets authored from the aerial reference from Hangar Straight through Hamilton Straight."
   },
   "edgeNormalWindow": 6,
   "kerbs": [

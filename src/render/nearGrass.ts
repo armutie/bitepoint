@@ -1,3 +1,4 @@
+import { onSilverstoneVenue } from './silverstoneVenue'
 import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 import type { Track } from '../core/track'
@@ -115,6 +116,7 @@ export function* buildNearGrassSteps(track: Track, terrain: Terrain): Generator<
     if (i % 12 === 0) yield
     const j = (i + 1) % track.n, len = track.segLenAt(i)
     const spans = track.kerbs ? kerbSpans(track, i, station) : []
+    const authoredVenue = onSilverstoneVenue(track, station + len / 2)
     station += len
     for (const side of [-1, 1]) {
       const gapI = side > 0 ? track.barrierGapLeft[i]! : track.barrierGapRight[i]!
@@ -130,6 +132,7 @@ export function* buildNearGrassSteps(track: Track, terrain: Terrain): Generator<
       const d = point(i, side * (track.halfRing[i]! + gapI - 0.12))
       if (gapI <= insetI + 0.2 || gapJ <= insetJ + 0.2) continue
       for (const p of [a, c, b, a, d, c]) addGround(p)
+      if (authoredVenue) continue
       const vergeWidth = Math.min(2.8, gapI - insetI - 0.3)
       const count = Math.floor(len * vergeWidth * 2.4)
       for (let t = 0; t < count; t++) {

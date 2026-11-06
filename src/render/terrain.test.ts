@@ -61,7 +61,9 @@ describe('terrain road clearance', () => {
       const height = (lateral: number): number =>
         terrain.height(pose.x - Math.sin(pose.yaw) * lateral, pose.y + Math.cos(pose.yaw) * lateral)
       expect(height(outside * half)).toBeLessThan(1e-9)
-      expect(height(outside * (half + 30))).toBeGreaterThan(4)
+      const wall = track.barrierGapAt(corner.s, outside < 0)
+      expect(height(outside * (half + wall - 1))).toBeLessThan(1e-9)
+      expect(height(outside * (half + Math.max(30, wall + 14)))).toBeGreaterThan(4)
     }
   })
 })

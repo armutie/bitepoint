@@ -95,3 +95,26 @@ describe('sector timing lines', () => {
     expect(track.sectorAt(4257.502)).toBe(2)
   })
 })
+
+describe('Silverstone GP barriers', () => {
+  it('opens the outside of Stowe and closes in on the pit wall through start/finish', () => {
+    const track = loadBaked('silverstone-gp')
+    expect(track.barrierGapAt(5078, false)).toBeGreaterThan(32)
+    expect(track.barrierGapAt(5078, true)).toBeLessThan(10)
+    expect(track.barrierGapAt(5458, true)).toBeGreaterThan(20)
+    expect(track.barrierGapAt(-1, true)).toBeCloseTo(track.barrierGapAt(1, true), 1)
+    expect(track.barrierGapAt(100, true)).toBeCloseTo(3)
+
+    for (let i = 0; i < track.n; i++) {
+      for (const side of [-1, 1]) {
+        const gap = side > 0 ? track.barrierGapLeft[i]! : track.barrierGapRight[i]!
+        const offset = side * (track.halfRing[i]! + gap)
+        const point = track.project(
+          track.cx[i]! + track.edgeNormalX(i) * offset,
+          track.cy[i]! + track.edgeNormalY(i) * offset,
+        )
+        expect(Math.abs(point.lateral) - point.half).toBeGreaterThan(0)
+      }
+    }
+  })
+})

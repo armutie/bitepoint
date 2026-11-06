@@ -27,6 +27,7 @@ import { PALETTE } from './palette'
 import type { Terrain } from './terrain'
 import { buildDriverEnvironmentSteps } from './driverEnvironment'
 import { buildMainStraightSteps } from './mainStraight'
+import { buildSilverstoneVenue, onSilverstoneVenue, SILVERSTONE_VENUE_START } from './silverstoneVenue'
 
 /*
  * Where the wall is, for everything placed against it.
@@ -148,6 +149,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   const solid = newStrip()
   const overlay = newStrip()
 
+  const silverstone = track.id === 'silverstone-gp'
   buildGantry(track, landmarks)
   buildGridBoxes(track, overlay)
   yield
@@ -157,26 +159,41 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   yield
   buildFloodlights(track, terrain, solid)
   yield
-  buildBridge(track, landmarks)
-  const mainStraight = yield* buildMainStraightSteps(track, terrain)
-  root.add(mainStraight.root)
-  decorativeRoot.add(mainStraight.detailRoot)
-  yield
-  disposables.push(mainStraight)
-  if (!mainStraight.replacesStart) buildTower(track, landmarks)
-  // Keep the original skyline, then add only distinct forward-facing straight views.
-  buildCity(track, terrain, solid, lcg(track.seed ^ 0x75c17))
-  const skylineCentres: { x: number; y: number }[] = []
-  for (let ri = 0; ri < terrain.runs.length && skylineCentres.length < 3; ri++) {
-    const run = terrain.runs[ri]!
-    if (run.len < 100) continue
-    const end = track.poseAt(run.s1), approach = track.poseAt(run.mid)
-    const x = end.x + Math.cos(end.yaw) * 640, y = end.y + Math.sin(end.yaw) * 640
-    const dx = x - approach.x, dy = y - approach.y, distance = Math.hypot(dx, dy)
-    const facing = (dx * Math.cos(approach.yaw) + dy * Math.sin(approach.yaw)) / distance
-    if (ri > 0 && (facing < 0.93 || skylineCentres.some(c => Math.hypot(c.x-x,c.y-y) < 340))) continue
-    skylineCentres.push({x,y})
-    if (ri > 0) buildCity(track, {...terrain,runs:[run]}, solid, lcg(track.seed ^ (ri * 0x17459)), true)
+  let replacesStart = false
+  if (silverstone) {
+    const venue = buildSilverstoneVenue(track)
+    root.add(venue.root)
+    disposables.push(venue)
+    replacesStart = true
+    buildStand(track, landmarks, rand, 16, 1, 76, 11)
+    yield
+    buildStand(track, landmarks, rand, 151, 1, 62, 9)
+    buildStand(track, landmarks, rand, 243, 1, 48, 8)
+    yield
+    buildStand(track, landmarks, rand, 5135, 1, 37, 8)
+  } else {
+    buildBridge(track, landmarks)
+    const mainStraight = yield* buildMainStraightSteps(track, terrain)
+    root.add(mainStraight.root)
+    decorativeRoot.add(mainStraight.detailRoot)
+    yield
+    disposables.push(mainStraight)
+    replacesStart = mainStraight.replacesStart
+    if (!replacesStart) buildTower(track, landmarks)
+    // Keep the original skyline, then add only distinct forward-facing straight views.
+    buildCity(track, terrain, solid, lcg(track.seed ^ 0x75c17))
+    const skylineCentres: { x: number; y: number }[] = []
+    for (let ri = 0; ri < terrain.runs.length && skylineCentres.length < 3; ri++) {
+      const run = terrain.runs[ri]!
+      if (run.len < 100) continue
+      const end = track.poseAt(run.s1), approach = track.poseAt(run.mid)
+      const x = end.x + Math.cos(end.yaw) * 640, y = end.y + Math.sin(end.yaw) * 640
+      const dx = x - approach.x, dy = y - approach.y, distance = Math.hypot(dx, dy)
+      const facing = (dx * Math.cos(approach.yaw) + dy * Math.sin(approach.yaw)) / distance
+      if (ri > 0 && (facing < 0.93 || skylineCentres.some(c => Math.hypot(c.x-x,c.y-y) < 340))) continue
+      skylineCentres.push({x,y})
+      if (ri > 0) buildCity(track, {...terrain,runs:[run]}, solid, lcg(track.seed ^ (ri * 0x17459)), true)
+    }
   }
   // Preserve the old optional outfield dressing, but spend the default scene
   // on structures and trees that can actually be read from driving height.
@@ -193,7 +210,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   // Main stand — the anchor, twice the size of anything else — on the left of
   // the pit straight looking at the line; a second along the exit; the pit
   // building opposite.
-  if (!mainStraight.replacesStart) {
+  if (!replacesStart) {
     buildStand(track, landmarks, rand, 0, 1, 80, 13)
     buildStand(track, landmarks, rand, 165, 1, 30, 9)
     buildPitBlock(track, landmarks, 0, -1)
@@ -202,6 +219,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   // Corner stands at the two sharpest corners, on the outside, where the
   // spectators would actually stand — and where you brake.
   for (const apex of terrain.corners.slice(0, 2)) {
+    if (onSilverstoneVenue(track, apex.s)) continue
     buildStand(track, solid, rand, apex.s, -Math.sign(apex.k) || 1, 24, 8)
   }
 
@@ -237,7 +255,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
     parent.add(mesh)
   }
 
-  if (!mainStraight.replacesStart) decorativeRoot.add(buildCatchFence(track, disposables))
+  if (!replacesStart) decorativeRoot.add(buildCatchFence(track, disposables))
   if (extendedOutfield) {
     const { hedges, treeSpots } = buildHedgerows(track, terrain, disposables)
     for (const m of hedges) decorativeRoot.add(m)
@@ -1109,6 +1127,7 @@ function buildGridBoxes(track: Track, s: Strip): void {
 function buildBrakeBoards(track: Track, s: Strip): void {
   const post = new THREE.Color(PALETTE.BRAKE_POST)
   for (const m of track.brakeMarkers) {
+    if (track.id === 'silverstone-gp' && m.s >= SILVERSTONE_VENUE_START) continue
     const accent = new THREE.Color(
       m.distance >= 50 ? PALETTE.BRAKE_ACCENT_FAR : PALETTE.BRAKE_ACCENT_NEAR,
     )

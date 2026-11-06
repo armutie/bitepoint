@@ -5,13 +5,20 @@ import { Track } from '../core/track'
 import type { CameraMode } from '../render/cameras'
 const canvas=document.querySelector<HTMLCanvasElement>('#view')!
 const renderer=new Renderer(canvas)
-renderer.toggleProfiling()
 const params=handlingPreset('legacy')
-const track=new Track(await (await fetch('./tracks/power_8.json')).json())
+const query = new URLSearchParams(location.search)
+if (query.has('view')) document.querySelector('aside')!.style.display = 'none'
+else renderer.toggleProfiling()
+const trackId = query.get('track') === 'silverstone-gp' ? 'silverstone-gp' : 'power_8'
+const track=new Track(await (await fetch('./tracks/'+trackId+'.json')).json())
 await renderer.setTrack(track); renderer.setCars(params,true); renderer.setOpponents(params,7)
 const car=new Car(params), ghost=new Car(params), rivals=Array.from({length:7},()=>new Car(params))
 const input=(id:string)=>document.querySelector<HTMLInputElement>('#'+id)!
 let distance=110, last=performance.now(), frames:number[]=[],renderTimes:number[]=[],sampleId=0
+const initialStation = Number(query.get('s') ?? distance)
+if (Number.isFinite(initialStation)) distance = Math.min(Math.max(initialStation, 0), track.length)
+input('position').max = String(Math.ceil(track.length))
+input('position').value = String(distance)
 const setPose=(c:Car,s:number,lat=0)=>{const p=track.poseAt(s);c.setPose(p.x-Math.sin(p.yaw)*lat,p.y+Math.cos(p.yaw)*lat,p.yaw)}
 input('position').oninput=()=>{distance=Number(input('position').value)}
 document.querySelector<HTMLSelectElement>('#camera')!.onchange=e=>renderer.setCameraMode((e.target as HTMLSelectElement).value as CameraMode)
@@ -41,7 +48,8 @@ renderer.rig.update=(...args)=>{
 }
 window.addEventListener('resize',()=>renderer.resize())
 function frame(now:number){
- const dt=Math.min((now-last)/1000,0.05);last=now
+ const wallMs = Math.max(0, now - last); last = now
+ const dt = Math.min(wallMs / 1000, 0.05)
  if(input('tour').checked)distance=(distance+30*dt)%track.length
  setPose(car,distance,Number(input('lateral').value));car.s.steer=Number(input('steer').value);car.s.vx=input('tour').checked?30:0;car.s.wheelVr=car.s.vx
  setPose(ghost,distance+12,2)
@@ -50,7 +58,7 @@ function frame(now:number){
  const renderStart=performance.now()
  renderer.render(car.s,input('ghost').checked?ghost.s:null,params,0,dt)
  renderTimes.push(performance.now()-renderStart)
- frames.push(dt*1000)
+ frames.push(wallMs)
  if(frames.length>=120){const f=frames.slice().sort((a,b)=>a-b),cpu=renderTimes.slice().sort((a,b)=>a-b),s=renderer.stats();document.querySelector('#stats')!.textContent=JSON.stringify({sampleId:++sampleId,renderCpuMedianMs:+cpu[60]!.toFixed(2),renderCpuP95Ms:+cpu[114]!.toFixed(2),frameMedianMs:+f[60]!.toFixed(1),frameP95Ms:+f[114]!.toFixed(1),...s});frames=[];renderTimes=[]}
  requestAnimationFrame(frame)
 }

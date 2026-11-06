@@ -30,6 +30,7 @@ import { PALETTE } from './palette'
 import { applyRoadWear, makeRubberTextureSteps, makeRoadScuffTextureSteps, roadWearAt } from './roadWear'
 import { buildNearGrassSteps } from './nearGrass'
 import { weatherKerb } from './kerbSurface'
+import { onSilverstoneVenue } from './silverstoneVenue'
 import { kerbPoint, kerbSpans } from './trackSurface'
 import type { Terrain } from './terrain'
 
@@ -299,6 +300,8 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
   const cKerbB = new THREE.Color(track.kerbs ? 0xc9c8bb : PALETTE.KERB_B)
   const cBarrierA = new THREE.Color(PALETTE.BARRIER_A)
   const cBarrierB = new THREE.Color(PALETTE.BARRIER_B)
+  const pitConcrete = new THREE.Color(0xa39f8e)
+  const safetyBarrier = new THREE.Color(0x6c716a)
   const cCrest = new THREE.Color(PALETTE.BARRIER_CREST)
 
 
@@ -401,7 +404,9 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
     // Barrier walls: grey and blue segments under a sunlit crest rail. The
     // crest is a narrow top face — it catches the sky light and is what makes
     // the wall read as an object with thickness rather than a fence of paint.
-    const wall = Math.floor(i / 5) % 2 === 0 ? cBarrierA : cBarrierB
+    const wall = onSilverstoneVenue(track, begin)
+      ? begin < 335 || begin > 5840 ? pitConcrete : safetyBarrier
+      : Math.floor(i / 5) % 2 === 0 ? cBarrierA : cBarrierB
     for (const side of [1, -1]) {
       // The standoff comes from the track's own baked gap, per vertex and per
       // side, not the flat 9 m this used to draw at. That is not cosmetic: the

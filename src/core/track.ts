@@ -32,6 +32,8 @@ export interface TrackData {
   kerbs?: TrackKerb[]
   /** Per-vertex gap from painted edge to barrier wall. Absent in older bakes. */
   barrierGap?: { left: number[]; right: number[] }
+  /** Sorted [station, left gap, right gap] anchors, including station zero. */
+  barrierProfile?: [number, number, number][]
   brakeMarkers: { s: number; distance: number; side: number }[]
 }
 
@@ -156,14 +158,6 @@ export class Track {
     for (let i = 0; i < n; i++) maxHalf = Math.max(maxHalf, this.halfRing[i]!)
     this.half = maxHalf
 
-    const flat = (): Float64Array => new Float64Array(n).fill(DEFAULT_BARRIER_GAP)
-    this.barrierGapLeft = data.barrierGap
-      ? Float64Array.from(data.barrierGap.left)
-      : flat()
-    this.barrierGapRight = data.barrierGap
-      ? Float64Array.from(data.barrierGap.right)
-      : flat()
-
     // Closed-loop segment geometry (the last segment wraps to the first point).
     this.segVecX = new Float64Array(n)
     this.segVecY = new Float64Array(n)
@@ -200,6 +194,22 @@ export class Track {
       acc += this.segLen[i]!
     }
     this.length = acc
+
+    const profile = data.barrierProfile
+    const gaps = (side: 'left' | 'right', column: 1 | 2): Float64Array => {
+      if (data.barrierGap) return Float64Array.from(data.barrierGap[side])
+      if (!profile?.length) return new Float64Array(n).fill(DEFAULT_BARRIER_GAP)
+      let anchor = 0
+      return Float64Array.from(this.s0, station => {
+        while (anchor + 1 < profile.length && profile[anchor + 1]![0] <= station) anchor++
+        const first = profile[anchor]!
+        const last = profile[anchor + 1] ?? profile[0]!
+        const end = anchor + 1 < profile.length ? last[0] : this.length
+        return first[column] + (last[column] - first[column]) * (station - first[0]) / (end - first[0])
+      })
+    }
+    this.barrierGapLeft = gaps('left', 1)
+    this.barrierGapRight = gaps('right', 2)
 
     if (data.edgeNormalWindow && data.edgeNormalWindow > 0) {
       const window = data.edgeNormalWindow
