@@ -1,3 +1,4 @@
+import { aiPaceRanks, mixedAiGrid } from './raceVariation'
 /**
  * A race the game can actually run: the player, a field of AI, and one tick.
  *
@@ -110,6 +111,8 @@ export const MAX_OPPONENTS = GRID_SLOTS - 1
 export const MAX_RACE_LAPS = 15
 
 export interface RaceSetup {
+  /** Browser races mix AI identities and starting order once per event. */
+  randomizeAi?: boolean
   /** Interactive keyboard launch; headless drivers may supply their own starts. */
   playerLaunch?: boolean
   /** Repeatable race variation. The game supplies a fresh seed for each start. */
@@ -245,6 +248,9 @@ export class RaceSession {
       : Array.from({ length: field }, (_, slot) => slot === this.playerSlot
         ? field - 1 : slot > this.playerSlot ? slot - 1 : slot)
 
+    if (setup.randomizeAi && !setup.gridOrder) this.driverIds = mixedAiGrid(this.seed, this.driverIds)
+    const paceRanks = setup.randomizeAi ? aiPaceRanks(this.seed, field - 1) : null
+
     this.shape = setup.shape
     this.race = new Race(
       setup.track,
@@ -267,14 +273,15 @@ export class RaceSession {
     const ribbon = new RacingRibbon(setup.track, setup.shape)
     const opponents = field - 1
     for (let slot = 0; slot < field; slot++) {
-      const identity = setup.gridOrder ? this.driverIds[slot]! : slot
+      const identity = setup.gridOrder || setup.randomizeAi ? this.driverIds[slot]! : slot
       const random = seeded((this.seed + identity * 2654435761) >>> 0)
       // Staged throttle, with a distinct 50–250 ms clutch release per driver.
       // The spread makes starts competitive without linking reflexes to pace.
       this.reactions.push((3 + Math.floor(random() * 13)) / 60)
       this.actions.push({ steer: 0, throttle: 0 })
       const sim = this.race.sims[slot]!
-      this.traffic.push({ state: sim.car.s, road: setup.track.project(sim.car.s.x, sim.car.s.y), speed: 0 })
+      this.traffic.push({ state: sim.car.s, road: setup.track.project(sim.car.s.x, sim.car.s.y), speed: 0,
+        player: slot === this.playerSlot })
       this.stations.push(0)
       if (slot === this.playerSlot) {
         this.drivers.push(null)
@@ -284,7 +291,7 @@ export class RaceSession {
       }
       // Rank among the AI only, so the player's slot does not leave a gap in
       // the pace ladder.
-      const rank = this.driverIds[slot]!
+      const rank = paceRanks?.[this.driverIds[slot]!] ?? this.driverIds[slot]!
       const t = opponents > 1 ? rank / (opponents - 1) : 0
       const commitment = commitmentFor(setup.difficulty, t, setup.shape.recorded != null)
       const driverLine = atCommitment(setup.shape, setup.params, commitment)

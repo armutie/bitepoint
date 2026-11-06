@@ -129,8 +129,8 @@ describe('lap timing', () => {
   })
 
   it('closes Silverstone sectors at its authored timing lines', () => {
-    const track = loadTrack('silverstone')
-    const sim = new TimeAttackSim(track, handlingPreset('f1'), 'silverstone', 'f1')
+    const track = loadTrack('silverstone-gp')
+    const sim = new TimeAttackSim(track, handlingPreset('f1'), track.id, 'f1')
     const closures: { sector: number; s: number }[] = []
     const laps = []
 
@@ -760,12 +760,14 @@ describe('brake-aware automatic lap compatibility', () => {
     const lap = driveLaps(sim, 1)[0]!
     expect(lap).toBeDefined()
     expect(lap.recording.brakeAwareAuto).toBe(schedule)
+    expect(lap.recording.lowSpeedControls).toBe(3)
     const record = {
       trackId: track.id, preset: 'legacy', easy: false,
       time: lap.time, sectors: lap.sectors, recordedAt: '2026-10-13T00:00:00Z', recording: lap.recording,
     }
     const restored = deserializeLapRecord(serializeLapRecord(record))
     expect(restored.recording.brakeAwareAuto).toBe(schedule)
+    expect(restored.recording.lowSpeedControls).toBe(3)
     const verified = verifyLapRecording(track, p, restored.recording)
     expect(verified.accepted, verified.reason).toBe(true)
     expect(verified.time).toBe(lap.time)
@@ -776,3 +778,4 @@ describe('brake-aware automatic lap compatibility', () => {
     expect(verifyLapRecording(track, p, original.recording).time).toBe(original.time)
   })
 })
+

@@ -1,8 +1,10 @@
+import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 const rng=(seed:number)=>()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}
 
 /** Four dense, irregular leafy clusters. Fine leaves merge into shaded mass at driving distance. */
-export function treeFoliageTexture():THREE.CanvasTexture {
+export function treeFoliageTexture():THREE.CanvasTexture {return finishBuild(treeFoliageTextureSteps())}
+export function* treeFoliageTextureSteps():Generator<void,THREE.CanvasTexture> {
  const canvas=document.createElement('canvas');canvas.width=1024;canvas.height=1024
  const c=canvas.getContext('2d')!,r=rng(57183)
  for(let tile=0;tile<4;tile++){
@@ -10,6 +12,7 @@ export function treeFoliageTexture():THREE.CanvasTexture {
   const clumps=Array.from({length:9},(_,i)=>{const angle=i*2.399,reach=i===0?0:70+r()*70;return {x:256+Math.cos(angle)*reach,y:256+Math.sin(angle)*reach,rx:58+r()*40,ry:56+r()*35}})
   // Back to front: shaded interiors first, interlocking lit leaf surfaces second.
   for(let layer=0;layer<3;layer++)for(let i=0;i<800;i++){
+   if(i%64===0)yield
    const clump=clumps[i%clumps.length]!,angle=r()*Math.PI*2,reach=Math.sqrt(r())
    const x=clump.x+Math.cos(angle)*reach*clump.rx,y=clump.y+Math.sin(angle)*reach*clump.ry
    if(x<24||x>488||y<24||y>488)continue
@@ -29,3 +32,4 @@ export function treeFoliageTexture():THREE.CanvasTexture {
  const texture=new THREE.CanvasTexture(canvas);texture.colorSpace=THREE.SRGBColorSpace;texture.anisotropy=4
  return texture
 }
+

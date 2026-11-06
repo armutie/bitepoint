@@ -1,3 +1,4 @@
+import { finishBuild } from './buildScheduler'
 import type { Track } from '../core/track'
 
 const TAU=Math.PI*2
@@ -57,6 +58,9 @@ export function roadWearAt(track:Track,s:number,half:number):RoadWearProfile {
 export interface RoadSurfaceMask { data:Uint8Array; width:number; height:number; span:number }
 /** Packed lap map: R rubber, G surface tone, B polish, A rough deposit character. */
 export function bakeRoadSurfaceMask(track:Track,width=512,height=4096):RoadSurfaceMask {
+ return finishBuild(bakeRoadSurfaceMaskSteps(track,width,height))
+}
+export function* bakeRoadSurfaceMaskSteps(track:Track,width=512,height=4096):Generator<void,RoadSurfaceMask> {
  const span=Math.max(...track.halfRing)*2+2,data=new Uint8Array(width*height*4),random=rng(track.seed^0x4f17d32a)
  const patches=Array.from({length:Math.max(12,Math.round(track.length/48))},()=>({
   s:random()*track.length,lat:(random()-0.5)*span*0.8,length:7+random()*30,width:0.8+random()*4.2,tone:(random()<0.76?-1:1)*(0.12+random()*0.19),skew:(random()-0.5)*0.05,
@@ -83,6 +87,7 @@ export function bakeRoadSurfaceMask(track:Track,width=512,height=4096):RoadSurfa
  for(const marker of track.brakeMarkers){const end=wrap(marker.s+marker.distance,track.length);if(!brakeEnds.some(s=>Math.abs(lapDelta(s,end,track.length))<12))brakeEnds.push(end)}
  const rubber=new Float32Array(width),polish=new Float32Array(width),grit=new Float32Array(width),deposit=new Float32Array(width)
  for(let y=0;y<height;y++){
+  if(y%8===0)yield
   // Include the periodic endpoint so filtering across the lap seam blends identical rows.
   const s=y/(height-1)*track.length,phase=s/track.length*TAU,half=track.halfAt(s),profile=roadWearAt(track,s,half)
   let braking=0

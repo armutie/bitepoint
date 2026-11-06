@@ -1,12 +1,12 @@
 import * as THREE from 'three'
 import type { Track } from '../core/track'
-import { bakeRoadSurfaceMask } from './roadSurfaceMask'
-import { bakeRoadScuffDetail } from './roadScuffDetail'
+import { bakeRoadSurfaceMaskSteps } from './roadSurfaceMask'
+import { bakeRoadScuffDetailSteps } from './roadScuffDetail'
 export { roadWearAt } from './roadSurfaceMask'
 
 /** One precomputed surface sample replaces the old rubber mask and fragment noise. */
-export function makeRubberTexture(track:Track):THREE.DataTexture {
- const baked=bakeRoadSurfaceMask(track)
+export function* makeRubberTextureSteps(track:Track):Generator<void,THREE.DataTexture> {
+ const baked=yield* bakeRoadSurfaceMaskSteps(track)
  const texture=new THREE.DataTexture(baked.data,baked.width,baked.height,THREE.RGBAFormat)
  texture.wrapS=THREE.ClampToEdgeWrapping;texture.wrapT=THREE.RepeatWrapping
  texture.magFilter=THREE.LinearFilter;texture.minFilter=THREE.LinearMipmapLinearFilter
@@ -15,8 +15,9 @@ export function makeRubberTexture(track:Track):THREE.DataTexture {
  return texture
 }
 
-export function makeRoadScuffTexture():THREE.DataTexture {
- const texture=new THREE.DataTexture(bakeRoadScuffDetail(),512,512,THREE.RGBAFormat)
+export function* makeRoadScuffTextureSteps():Generator<void,THREE.DataTexture> {
+ const data=yield* bakeRoadScuffDetailSteps()
+ const texture=new THREE.DataTexture(data,512,512,THREE.RGBAFormat)
  texture.wrapS=texture.wrapT=THREE.RepeatWrapping
  texture.magFilter=THREE.LinearFilter;texture.minFilter=THREE.LinearMipmapLinearFilter;texture.generateMipmaps=true
  texture.colorSpace=THREE.NoColorSpace;texture.anisotropy=8;texture.needsUpdate=true

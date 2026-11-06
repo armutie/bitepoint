@@ -2,7 +2,7 @@ import {describe,it,expect} from 'vitest'
 import {Track,type TrackData} from '../core/track'
 import {bakeRoadSurfaceMask,roadWearAt} from './roadSurfaceMask'
 import croft from '../../public/tracks/power_8.json'
-import silverstone from '../../public/tracks/silverstone.json'
+import silverstone from '../../public/tracks/silverstone-gp.json'
 import technical from '../../public/tracks/technical_8.json'
 
 describe('lap-aligned asphalt zones',()=>{

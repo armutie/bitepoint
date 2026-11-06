@@ -77,6 +77,7 @@ export class InputState {
   mode: InputMode = 'mouse'
   lookBack = false
   get launchClutch(): boolean { return this.held.has('KeyR') }
+  get brakeHeld(): boolean { return this.held.has('KeyS') || this.held.has('ArrowDown') }
   get launchThrottle(): boolean { return this.held.has('KeyW') || this.held.has('ArrowUp') }
   /**
    * Fraction of the half-width at which the wheel hits full lock. 1.0 means
@@ -100,6 +101,7 @@ export class InputState {
   private steer = 0
   private throttleCmd = 0
   private brakeCmd = 0
+  private resumeFullThrottle = false
 
   /** Callbacks for one-shot keys, so the game layer decides what they mean. */
   onAction: (action: string) => void = () => {}
@@ -152,6 +154,7 @@ export class InputState {
     // A window that loses focus mid-corner should not keep the throttle pinned.
     const blur = (): void => {
       this.held.clear()
+      this.resumeFullThrottle = false
       this.pendingShift = 0
     }
     const mousemove = (e: MouseEvent): void => {
@@ -217,13 +220,28 @@ export class InputState {
     this.listeners.length = 0
   }
 
-  /** Drop all held state — use when the game is paused or a menu opens. */
-  release(): void {
-    this.held.clear()
+  /** Clear commands; a pause may retain physically held pedals until keyup. */
+  release(preservePedals = false): void {
+    this.resumeFullThrottle = preservePedals && this.throttleCmd - this.brakeCmd >= 0.9
+    if (preservePedals) {
+      for (const code of this.held) {
+        if (!['KeyW', 'ArrowUp', 'KeyS', 'ArrowDown'].includes(code)) this.held.delete(code)
+      }
+    } else this.held.clear()
     this.pendingShift = 0
     this.wheelAccum = 0
     this.steer = 0
     this.throttleCmd = 0
+    this.brakeCmd = 0
+  }
+
+  /** Only a near-full pedal at pause may resume at full throttle if still held. */
+  resume(): void {
+    this.pendingShift = 0
+    this.wheelAccum = 0
+    const braking = this.held.has('KeyS') || this.held.has('ArrowDown')
+    this.throttleCmd = this.resumeFullThrottle && this.launchThrottle && !braking ? 1 : 0
+    this.resumeFullThrottle = false
     this.brakeCmd = 0
   }
 
@@ -243,7 +261,7 @@ export class InputState {
   }
 
   /** Advance the analog controls by one tick and return what the car gets. */
-  sample(): Controls {
+  sample(releaseBrakeImmediately = false): Controls {
     const up = this.held.has('ArrowUp') || this.held.has('KeyW')
     const down = this.held.has('ArrowDown') || this.held.has('KeyS')
     this.lookBack = this.held.has('ShiftLeft') || this.held.has('ShiftRight')
@@ -271,7 +289,9 @@ export class InputState {
     }
 
     this.throttleCmd = clamp(this.throttleCmd + (up ? THROTTLE_ON : THROTTLE_OFF), 0, 1)
-    this.brakeCmd = clamp(this.brakeCmd + (down ? BRAKE_ON : BRAKE_OFF), 0, 1)
+    this.brakeCmd = releaseBrakeImmediately && !down
+      ? 0
+      : clamp(this.brakeCmd + (down ? BRAKE_ON : BRAKE_OFF), 0, 1)
 
     return {
       steer: this.steer,

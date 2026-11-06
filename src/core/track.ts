@@ -26,6 +26,10 @@ export interface TrackData {
   sectorBoundaries?: [number, number]
   centerline: [number, number][]
   halfRing: number[]
+  /** Average edge directions over this distance on either side of a vertex. */
+  edgeNormalWindow?: number
+  /** Authored kerbs. An empty list disables the curvature-based fallback. */
+  kerbs?: TrackKerb[]
   /** Per-vertex gap from painted edge to barrier wall. Absent in older bakes. */
   barrierGap?: { left: number[]; right: number[] }
   brakeMarkers: { s: number; distance: number; side: number }[]
@@ -62,6 +66,15 @@ export interface BrakeMarker {
   side: number
 }
 
+export interface TrackKerb {
+  start: number
+  /** End station, which may exceed lap length to cross start/finish. */
+  end: number
+  side: -1 | 1
+  width: number
+  height: number
+}
+
 export class Track {
   readonly id: string
   readonly label: string
@@ -70,6 +83,8 @@ export class Track {
   readonly seed: number
   readonly width: number
   readonly brakeMarkers: readonly BrakeMarker[]
+  readonly kerbs?: readonly TrackKerb[]
+  readonly edgeNormalWindow?: number
   /** Arc-length positions of the two intermediate timing lines. */
   readonly sectorBoundaries: readonly [number, number]
 
@@ -103,6 +118,7 @@ export class Track {
   /** unit normals, left of travel: the tangent rotated +90 degrees */
   private readonly nrmX: Float64Array
   private readonly nrmY: Float64Array
+  private readonly edgeNormals?: { x: Float64Array; y: Float64Array }
 
   readonly curvature: Float64Array
   /** signed: positive is a left turn, matching the lateral-offset convention */
@@ -122,6 +138,8 @@ export class Track {
     this.seed = data.seed
     this.width = data.width
     this.brakeMarkers = data.brakeMarkers
+    if (data.kerbs) this.kerbs = data.kerbs
+    if (data.edgeNormalWindow !== undefined) this.edgeNormalWindow = data.edgeNormalWindow
 
     const n = data.centerline.length
     this.n = n
@@ -183,6 +201,20 @@ export class Track {
     }
     this.length = acc
 
+    if (data.edgeNormalWindow && data.edgeNormalWindow > 0) {
+      const window = data.edgeNormalWindow
+      const x = new Float64Array(n), y = new Float64Array(n)
+      for (let i = 0; i < n; i++) {
+        const a = this.poseAt(this.s0[i]! - window)
+        const b = this.poseAt(this.s0[i]! + window)
+        const dx = b.x - a.x, dy = b.y - a.y
+        const length = Math.hypot(dx, dy)
+        x[i] = length > 1e-9 ? -dy / length : this.nrmX[i]!
+        y[i] = length > 1e-9 ? dx / length : this.nrmY[i]!
+      }
+      this.edgeNormals = { x, y }
+    }
+
     const sectorBoundaries = data.sectorBoundaries ?? [acc / 3, (acc * 2) / 3]
     const [sectorOneEnd, sectorTwoEnd] = sectorBoundaries
     if (
@@ -214,10 +246,10 @@ export class Track {
     this.rightY = new Float64Array(n)
     for (let i = 0; i < n; i++) {
       const h = this.halfRing[i]!
-      this.leftX[i] = this.cx[i]! + this.nrmX[i]! * h
-      this.leftY[i] = this.cy[i]! + this.nrmY[i]! * h
-      this.rightX[i] = this.cx[i]! - this.nrmX[i]! * h
-      this.rightY[i] = this.cy[i]! - this.nrmY[i]! * h
+      this.leftX[i] = this.cx[i]! + this.edgeNormalX(i) * h
+      this.leftY[i] = this.cy[i]! + this.edgeNormalY(i) * h
+      this.rightX[i] = this.cx[i]! - this.edgeNormalX(i) * h
+      this.rightY[i] = this.cy[i]! - this.edgeNormalY(i) * h
     }
   }
 
@@ -281,7 +313,26 @@ export class Track {
 
   /** Half-width of the road at arc length ``s`` (wrapped to the lap). */
   halfAt(s: number): number {
-    return this.halfRing[this.segmentAt(s)]!
+    if (!this.edgeNormals) return this.halfRing[this.segmentAt(s)]!
+    const w = pyMod(s, this.length)
+    const i = this.segmentAt(w)
+    return this.roadHalf(i, (w - this.s0[i]!) / this.segLen[i]!)
+  }
+
+  private roadHalf(i: number, fraction: number): number {
+    const half = this.halfRing[i]!
+    // Mapped road edges taper between vertices. Keep legacy lap limits intact.
+    return this.edgeNormals
+      ? half + (this.halfRing[(i + 1) % this.n]! - half) * fraction
+      : half
+  }
+
+  edgeNormalX(i: number): number {
+    return this.edgeNormals?.x[i] ?? this.nrmX[i]!
+  }
+
+  edgeNormalY(i: number): number {
+    return this.edgeNormals?.y[i] ?? this.nrmY[i]!
   }
 
   /** Length of segment ``i`` in metres — for renderers pacing things by arc. */
@@ -337,7 +388,7 @@ export class Track {
       heading: Math.atan2(this.tanY[bi]!, this.tanX[bi]!),
       segment: bi,
       frac: bt,
-      half: this.halfRing[bi]!,
+      half: this.roadHalf(bi, bt),
     }
   }
 

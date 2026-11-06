@@ -1,3 +1,4 @@
+import { drivingLibraryUrl } from '../telemetry/urls'
 /**
  * Session choice, followed by the circuit and handling or a supported race.
  *
@@ -19,7 +20,7 @@ import {
   DIFFICULTIES, difficultyByName, MAX_OPPONENTS, MAX_RACE_LAPS,
 } from '../core/raceSession'
 import { isClean, type Assists, type LeaderboardClient, type LeaderboardEntry } from '../storage/leaderboard'
-import { ASSISTS_ADJUSTABLE, SHOW_REFERENCE_DRIVER } from '../features'
+import { ASSISTS_ADJUSTABLE, LEGACY_TYRE_MODE, SHOW_REFERENCE_DRIVER } from '../features'
 import { formatTime, keyOf, type LapRecord, type RecordKey } from '../storage/records'
 import { carBars, carTags, powerToWeight } from './carStats'
 import { buildTrackMap } from './trackMap'
@@ -83,14 +84,14 @@ export interface PauseStatus {
  * is the balanced reference lap, Croft Bay is pure stop-and-go, Thruxton Vale is
  * the longest, and Elvington Mile is one 670 m straight — two and a half times
  * anything else here, and the only place the low-drag trim's extra 18 km/h has
- * room to pay for the cornering it gives up. Silverstone is the first circuit
- * traced from a real reference. The rest of the calendar stays
+ * room to pay for the cornering it gives up. Silverstone uses mapped GP
+ * coordinates. The rest of the calendar stays
  * visible but locked: a menu that shows what is coming reads as a roadmap, one
  * that hides it reads as thin.
  * Time-trial choices are separate from the supported race pairing.
  */
 export const RELEASED_TRACKS: readonly string[] =
-  ['silverstone', 'power_8', 'power_4', 'balanced_8', 'power_3']
+  ['silverstone-gp', 'power_8', 'power_4', 'balanced_8', 'power_3']
 /** Both setups in `PRESET_ORDER` are drivable; the gate is kept for the next one. */
 export const RELEASED_PRESETS: readonly PresetName[] = ['legacy', 'classic']
 const CONTROLS_SEEN_KEY = 'car-racing:controls-seen'
@@ -141,6 +142,10 @@ export class Menu {
   private mainOpen = false
   private controlsOpen = false
   private settingsOpen = false
+  private recordsOpen = false
+  private readonly loading: HTMLDivElement
+  /** Undefined outside a paused drive; null is a pause without timing status. */
+  private pausedStatus: PauseStatus | null | undefined = undefined
   private profileOpen = false
   /** Board filters are browsing state; changing them must not rebuild the 3D preview. */
   private leaderboardTrackId: string
@@ -187,7 +192,10 @@ export class Menu {
     this.root = el('div', 'menu')
     this.panel = el('div', 'menu-panel')
     this.lock = buildLockPreview()
-    this.root.append(this.panel, this.lock.root)
+    this.loading = el('div', 'menu-loading')
+    this.loading.setAttribute('role', 'status')
+    this.loading.setAttribute('aria-live', 'polite')
+    this.root.append(this.panel, this.lock.root, this.loading)
     window.addEventListener('keydown', (event) => {
       if (!this.visible || event.key !== '?') return
       if (this.mainOpen || this.controlsOpen) {
@@ -219,8 +227,15 @@ export class Menu {
     return !this.root.classList.contains('is-hidden')
   }
 
+  setLoading(label: string | null): void {
+    this.loading.textContent = label ? `Loading ${label}…` : ''
+    this.root.setAttribute('aria-busy', String(!!label))
+    this.panel.querySelectorAll<HTMLButtonElement>('.flow-continue').forEach(button => { button.disabled = !!label })
+  }
+
   hide(): void {
     this.root.classList.add('is-hidden')
+    this.pausedStatus = undefined
     this.hideLock()
   }
 
@@ -231,7 +246,8 @@ export class Menu {
       void this.showLeaderboard()
       return true
     }
-    if (this.controlsOpen || this.settingsOpen) this.renderFlow()
+    if (this.settingsOpen) this.leaveSettings()
+    else if (this.controlsOpen || this.recordsOpen) this.renderFlow()
     else if (this.mainOpen && this.flowStep !== 'mode') this.backFlow()
     else return false
     return true
@@ -240,10 +256,11 @@ export class Menu {
   private show(kind: 'full' | 'dialog'): void {
     this.root.classList.remove('is-hidden')
     this.root.classList.toggle('menu-dialog', kind === 'dialog')
-    this.root.classList.remove('menu-controls', 'menu-flow', 'menu-profile', 'menu-session-summary')
+    this.root.classList.remove('menu-controls', 'menu-flow', 'menu-profile', 'menu-session-summary', 'menu-pause')
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
+    this.recordsOpen = false
     this.profileOpen = false
     // Every screen comes through here, so this is the one place the preview has
     // to be put away — including the case where the pointer left the slider by
@@ -274,6 +291,7 @@ export class Menu {
   }
 
   private renderFlow(): void {
+    this.pausedStatus = undefined
     const focused = document.activeElement
     const keyboardFocus = focused instanceof HTMLElement && focused.matches(':focus-visible')
     const focusedLabel = focused?.getAttribute('aria-label')
@@ -367,6 +385,7 @@ export class Menu {
         else this.backFlow()
       })
       const next = el('button', 'flow-continue')
+      next.disabled = !!this.loading.textContent
       next.textContent = this.flowStep === 'circuit' ? 'Continue'
         : SHOW_REFERENCE_DRIVER ? 'Watch' : this.flowStep === 'race'
           ? this.raceEvent?.completed ? 'New event' : this.raceEvent?.qualifying ? 'To the grid' : 'Start qualifying'
@@ -474,6 +493,8 @@ export class Menu {
     place.textContent = `P${result.playerPosition}`
     const time = el('span', '')
     time.textContent = result.playerTime === null ? 'No valid lap · back of the grid' : formatTime(result.playerTime)
+    const mixedGridHint = el('p', 'menu-hint')
+    mixedGridHint.textContent = 'Mixed AI grid · your position is preserved.'
     summary.append(place, time)
     const table = el('ol', 'flow-qualifying-order')
     for (const entry of result.entries) {
@@ -492,7 +513,7 @@ export class Menu {
     }
     const format = el('p', 'flow-event-format')
     format.textContent = `${this.selection.laps} laps / ${this.selection.opponents} opponents / ${difficultyByName(this.selection.difficulty).label}`
-    section.append(label, summary, table, format)
+    section.append(label, summary, mixedGridHint, table, format)
     return section
   }
 
@@ -519,7 +540,11 @@ export class Menu {
           ? this.raceEvent?.qualifying ? 'Clutch at start; restart race after launch' : 'End qualifying attempt'
           : label,
       ] as const)
-      grid.append(controlGroup(group.title, rows))
+      if (group.title === 'Driving' && this.settings.gearbox === 'manual') {
+        grid.append(controlGroup(group.title, [...rows,
+          ['E / left click', 'Shift up'], ['Q / right click', 'Shift down'],
+        ]))
+      } else grid.append(controlGroup(group.title, rows))
     }
 
     const actions = el('div', 'menu-actions controls-actions')
@@ -548,6 +573,9 @@ export class Menu {
     for (const [key, label] of QUICK_CONTROLS) quick.append(controlRow(key,
       key === 'R' && this.selection.mode === 'race'
         ? this.raceEvent?.qualifying ? 'Clutch at start' : 'End qualifying attempt' : label))
+    if (this.settings.gearbox === 'manual') {
+      quick.append(controlRow('E / Q', 'Shift up / down (or left / right click)'))
+    }
     const launch = this.selection.mode === 'race' ? el('p', 'quick-launch-tip') : null
     if (launch) launch.textContent = this.raceEvent?.qualifying
       ? 'Hold R to start the lights, then hold W. When all five red lights go out, release R while keeping W held.'
@@ -585,6 +613,7 @@ export class Menu {
   /** One timing board, with circuit and rules visible where they are changed. */
   async showLeaderboard(): Promise<void> {
     this.show('full')
+    this.recordsOpen = true
     this.panel.replaceChildren()
 
     const header = el('header', 'menu-header leaderboard-header')
@@ -678,7 +707,12 @@ export class Menu {
         return
       }
       const failed = el('div', 'leaderboard-empty is-error')
-      failed.textContent = error instanceof Error ? error.message : 'Leaderboard unavailable.'
+      console.warn('[records]', error)
+      failed.textContent = 'Records are unavailable right now.'
+      const retry = el('button', 'btn')
+      retry.textContent = 'Retry'
+      retry.addEventListener('click', () => void this.showLeaderboard())
+      failed.append(retry)
       body.append(failed)
     }
   }
@@ -928,7 +962,9 @@ export class Menu {
    * and the camera and picture keys are already visible as HUD chips.
    */
   showPause(status: PauseStatus | null = null): void {
+    this.pausedStatus = status
     this.show('dialog')
+    this.root.classList.add('menu-pause')
     this.panel.replaceChildren()
 
     const eyebrow = el('div', 'eyebrow')
@@ -976,6 +1012,7 @@ export class Menu {
         this.hide()
         this.onRestart()
       }),
+      actionButton('sliders', 'Settings', '', '', () => this.showSettings()),
       actionButton('menu', 'End session', '', '', () => this.onEndSession()),
     )
     this.panel.append(actions, this.renderHelp(DRIVING_KEYS))
@@ -1299,6 +1336,11 @@ export class Menu {
    * that differs from its default, and next to the title if anything does at
    * all. Nothing is destructive, so nothing needs confirming.
    */
+  private leaveSettings(): void {
+    if (this.pausedStatus !== undefined) this.showPause(this.pausedStatus)
+    else this.renderFlow()
+  }
+
   showSettings(): void {
     this.show('full')
     this.settingsOpen = true
@@ -1340,6 +1382,19 @@ export class Menu {
     const driving = el('section', 'menu-section is-tuning-focus')
     driving.append(sectionTitle('Driving', ''))
     driving.append(this.sensitivityRow(syncResetAll))
+    driving.append(setRow('Gearbox', segmented(
+      [
+        { id: 'auto', label: 'Automatic' },
+        { id: 'manual', label: 'Manual' },
+      ],
+      s.gearbox,
+      (v) => set({ gearbox: v as Settings['gearbox'] }),
+    ), off('gearbox'), revert('gearbox')))
+    const gearboxHint = el('p', 'menu-hint')
+    gearboxHint.textContent = s.gearbox === 'manual'
+      ? 'E / Q or mouse buttons to shift. Next drive.'
+      : 'Automatic shifts. Next drive.'
+    driving.append(gearboxHint)
     // ABS sits here rather than on the wheel with traction control, because
     // unlike TC it cannot be changed while driving — so it is a choice you make
     // before the lap, and one bit travels with the recording. Not offered in
@@ -1412,13 +1467,20 @@ export class Menu {
     audioCredit.rel = 'noopener'
     audioCredit.className = 'menu-hint'
     system.append(audioCredit)
+    if (import.meta.env.DEV) {
+      const drivingData = document.createElement('a')
+      drivingData.href = drivingLibraryUrl(document.baseURI)
+      drivingData.textContent = 'Driving recordings'; drivingData.target = '_blank'; drivingData.rel = 'noopener'
+      drivingData.className = 'menu-hint'; drivingData.style.display = 'block'
+      system.append(drivingData)
+    }
 
     body.append(driving, view, system)
 
     const footer = el('footer', 'menu-footer')
     const back = el('button', 'btn btn-primary')
-    back.textContent = 'Back'
-    back.addEventListener('click', () => this.renderFlow())
+    back.textContent = this.pausedStatus !== undefined ? 'Back to pause' : 'Back'
+    back.addEventListener('click', () => this.leaveSettings())
     const acts = el('div', 'settings-actions')
     acts.append(back)
     footer.append(el('div', ''), acts)
@@ -1654,6 +1716,14 @@ export class Menu {
       choice.append(number, words, selector)
       choice.addEventListener('click', () => this.chooseMode(mode.id))
       wrap.append(choice)
+    }
+    if (import.meta.env.DEV && !LEGACY_TYRE_MODE) {
+      const multiplayer = el('button', 'flow-mode')
+      multiplayer.textContent = 'Multiplayer'
+      multiplayer.addEventListener('click', () => {
+        window.location.href = new URL('multiplayer.html', document.baseURI).href
+      })
+      wrap.append(multiplayer)
     }
     return wrap
   }

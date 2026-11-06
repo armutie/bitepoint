@@ -7,10 +7,10 @@
  * preview at all, because a player will trust it and place their hand there.
  * So: the same assertion the drawing makes, run against the input code.
  */
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { MOUSE_DEADZONE, steerFromOffset } from '../game/input'
-import { SENSITIVITY, fullLockFraction, fullLockOffset } from './settings'
+import { DEFAULT_SETTINGS, SENSITIVITY, fullLockFraction, fullLockOffset, loadSettings, saveSettings } from './settings'
 
 /** A picture 1600 px wide, i.e. 800 px either side of the straight-ahead point. */
 const HALF = 800
@@ -48,5 +48,28 @@ describe('where the settings screen draws full lock', () => {
   it('moves the line inward as sensitivity rises', () => {
     expect(fullLockOffset(SENSITIVITY.high)).toBeLessThan(fullLockOffset(SENSITIVITY.medium))
     expect(fullLockOffset(SENSITIVITY.medium)).toBeLessThan(fullLockOffset(SENSITIVITY.low))
+  })
+})
+
+describe('gearbox preference', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('keeps manual mode after saving and reopening the game', () => {
+    const stored = new Map<string, string>()
+    vi.stubGlobal('window', { localStorage: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+    } })
+    saveSettings({ ...DEFAULT_SETTINGS, gearbox: 'manual' })
+    expect(loadSettings().gearbox).toBe('manual')
+    saveSettings({ ...DEFAULT_SETTINGS, gearbox: 'auto' })
+    expect(loadSettings().gearbox).toBe('auto')
+  })
+
+  it.each([undefined, 'unknown', false])('defaults an older or invalid gearbox choice %s to automatic', (gearbox) => {
+    vi.stubGlobal('window', { localStorage: {
+      getItem: () => JSON.stringify({ gearbox }),
+    } })
+    expect(loadSettings().gearbox).toBe('auto')
   })
 })

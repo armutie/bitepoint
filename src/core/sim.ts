@@ -16,7 +16,7 @@
  * likely to keep changing on the Python side.
  */
 import { Barriers } from './barriers.ts'
-import { Car, initialState, speedOf, type CarState } from './car.ts'
+import { Car, CURRENT_LOW_SPEED_CONTROLS, initialState, speedOf, type CarState, type LowSpeedControlsVersion } from './car.ts'
 import type { CarParams } from './carParams.ts'
 import { TC_LEVEL_DEFAULT, TC_LEVEL_MAX } from './carParams.ts'
 import { gridPose, GRID_SLOTS } from './grid.ts'
@@ -45,6 +45,7 @@ export const SECTORS = 3
 export interface SimOptions {
   /** Earlier automatic downshifts under braking; stored with each new lap. */
   brakeAwareAuto?: boolean | 2
+  lowSpeedControls?: false | LowSpeedControlsVersion
   /**
    * Solid barrier walls. On by default, matching `play.py`.
    *
@@ -158,6 +159,8 @@ export interface LapTrace {
 export interface LapRecording {
   /** Absent: original; true: brake-pressure schedule; 2: road-speed schedule. */
   brakeAwareAuto?: true | 2
+  /** Version 2 keeps reverse selected while coasting. Version 3 settles sideways creep under braking. */
+  lowSpeedControls?: LowSpeedControlsVersion
   trackId: string
   preset: string
   easy: boolean
@@ -283,6 +286,9 @@ export class TimeAttackSim {
   /** ABS was switched on for this session, and travels with the lap. */
   private readonly abs: boolean
 
+  /** Observation-only commands/surface multipliers used by the last completed step. */
+  readonly lastStepControls = { steer:0, pedal:0, shift:0, tc:null as number|null, grip:1, rolling:1 }
+
   /** Peak wall impulse this tick (N·s), 0 when nothing was touched. */
   wallImpact = 0
 
@@ -372,6 +378,7 @@ export class TimeAttackSim {
     this.barriers = (opts.walls ?? true) ? new Barriers(track) : null
     this.car.manual = opts.manual ?? false
     this.car.brakeAwareAuto = opts.brakeAwareAuto ?? false
+    this.car.lowSpeedControls = opts.lowSpeedControls ?? CURRENT_LOW_SPEED_CONTROLS
     this.tc = opts.tc ?? false
     this.slot = opts.slot ?? STAGE_SLOT
     this.reset()
@@ -401,6 +408,7 @@ export class TimeAttackSim {
   /** Replay legacy tick timing or derive both crossings from a new recording. */
   beginVerification(recording: LapRecording): void {
     this.interpolatedTiming = recording.timing === 2
+    this.car.lowSpeedControls = recording.lowSpeedControls ?? false
     this.beginRolling(recording.start, !recording.rollingStart)
   }
 
@@ -469,6 +477,10 @@ export class TimeAttackSim {
     // grip you get this tick is the grip where you already are.
     const surface = this.track.project(s.x, s.y)
     const onGrass = Math.abs(surface.lateral) > surface.half + OFF_TRACK_MARGIN
+    const observed = this.lastStepControls
+    observed.steer=clamp(steer,-1,1); observed.pedal=clamp(throttle,-1,1); observed.shift=shiftRequest
+    observed.tc=this.car.tcLevel; observed.grip=onGrass?this.offTrackGrip:1
+    observed.rolling=onGrass?OFF_TRACK_ROLLING:1
     this.car.step(
       steer,
       throttle,
@@ -598,6 +610,7 @@ export class TimeAttackSim {
           ...(this.recordingRollingStart ? { rollingStart: true as const } : {}),
           inputs: Float64Array.from(this.recordingInputs),
           ...(this.car.manual ? { manual: true } : {}),
+          ...(this.car.lowSpeedControls ? { lowSpeedControls: this.car.lowSpeedControls } : {}),
           ...(this.car.brakeAwareAuto ? { brakeAwareAuto: this.car.brakeAwareAuto as true | 2 } : {}),
           ...(this.tc ? { tc: true } : {}),
           ...(this.abs ? { abs: true } : {}),
@@ -733,6 +746,10 @@ export function verifyLapRecording(
   if (recording.timing !== undefined && recording.timing !== 2) return rejected('Unknown timing format.')
   if (recording.rollingStart !== undefined && (recording.rollingStart !== true || recording.timing !== 2)) {
     return rejected('Invalid rolling start format.')
+  }
+  if (recording.lowSpeedControls !== undefined && recording.lowSpeedControls !== true
+    && recording.lowSpeedControls !== 2 && recording.lowSpeedControls !== CURRENT_LOW_SPEED_CONTROLS) {
+    return rejected('Unknown low-speed controls format.')
   }
   const layout = channelLayout(recording)
   const channels = layout.count
@@ -875,6 +892,7 @@ export class LapReplay {
     // automatic box would take different gears and drift off the line.
     this.car.manual = recording.manual ?? false
     this.car.brakeAwareAuto = recording.brakeAwareAuto ?? false
+    this.car.lowSpeedControls = recording.lowSpeedControls ?? false
     // The rotary travels with the lap for the same reason the gearbox does: a
     // lap driven with TC off replayed under TC on takes a different line.
     this.layout = channelLayout(recording)

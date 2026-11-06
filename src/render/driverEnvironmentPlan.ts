@@ -69,3 +69,6 @@ export function planDriverEnvironment(track:Track,terrain:Pick<Terrain,'runs'|'c
  }
  return plan
 }
+
+
+

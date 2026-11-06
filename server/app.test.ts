@@ -105,19 +105,25 @@ describe('verified lap submission', () => {
 })
 
 describe('leaderboard calendar', () => {
-  it('accepts Silverstone leaderboard queries', async () => {
+  it('accepts Silverstone GP leaderboard queries and rejects the retired trace', async () => {
+    const trackId = 'silverstone-gp'
     const app = await buildApp({ repository: new MemoryLeaderboardRepository() })
     const response = await app.inject({
       method: 'GET',
-      url: `/v1/leaderboards?trackId=silverstone&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
+      url: `/v1/leaderboards?trackId=${trackId}&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
-      key: { trackId: 'silverstone', easy: false, ruleset: CURRENT_PHYSICS_RULESET },
+      key: { trackId, easy: false, ruleset: CURRENT_PHYSICS_RULESET },
       entries: [],
       scope: 'global',
     })
+    const retired = await app.inject({
+      method: 'GET',
+      url: `/v1/leaderboards?trackId=silverstone&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
+    })
+    expect(retired.statusCode).toBe(400)
     await app.close()
   })
 })

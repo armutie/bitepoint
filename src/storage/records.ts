@@ -212,6 +212,7 @@ export interface SerializedLapRecord {
   start: CarState
   inputs: string
   brakeAwareAuto?: true | 2
+  lowSpeedControls?: LapRecording['lowSpeedControls']
   timing?: 2
   rollingStart?: true
   pathStartTime?: number
@@ -311,6 +312,7 @@ export function serializeLapRecord(r: LapRecord): SerializedLapRecord {
     ...(r.recording.rollingStart ? { rollingStart: true as const } : {}),
     ...(r.pathStartTime !== undefined ? { pathStartTime: r.pathStartTime } : {}),
     ...(r.recording.manual ? { manual: true } : {}),
+    ...(r.recording.lowSpeedControls ? { lowSpeedControls: r.recording.lowSpeedControls } : {}),
     ...(r.recording.brakeAwareAuto ? { brakeAwareAuto: r.recording.brakeAwareAuto } : {}),
     ...(r.recording.tc ? { tc: true } : {}),
     ...(r.recording.abs ? { abs: true } : {}),
@@ -327,6 +329,7 @@ export function deserializeLapRecord(s: SerializedLapRecord): LapRecord {
     ...(s.timing !== undefined ? { timing: s.timing } : {}),
     ...(s.rollingStart !== undefined ? { rollingStart: s.rollingStart } : {}),
     ...(s.manual ? { manual: true } : {}),
+    ...(s.lowSpeedControls !== undefined ? { lowSpeedControls: s.lowSpeedControls } : {}),
     ...(s.brakeAwareAuto !== undefined ? { brakeAwareAuto: s.brakeAwareAuto } : {}),
     ...(s.tc ? { tc: true } : {}),
     ...(s.abs ? { abs: true } : {}),

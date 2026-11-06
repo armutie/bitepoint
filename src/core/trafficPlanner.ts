@@ -1,3 +1,4 @@
+import { PackTrafficPlanner } from './packTrafficPlanner'
 import type { CarState } from './car'
 import { carLength, type CarParams } from './carParams'
 import { clamp, wrapAngle } from './math'
@@ -9,6 +10,8 @@ export interface TrafficCar {
   state: CarState
   road: Projection
   speed: number
+  /** A human driver cannot be assumed to follow our reference or share an apex. */
+  player?: boolean
 }
 
 export interface TrafficDecision {
@@ -39,11 +42,15 @@ export class RacingRibbon {
   readonly half: Float64Array
   readonly nx: Float64Array
   readonly ny: Float64Array
+  readonly roadNx: Float64Array
+  readonly roadNy: Float64Array
   constructor(readonly track: Track, readonly reference: RacingLine) {
     const n = reference.x.length
     this.half = new Float64Array(n)
     this.nx = new Float64Array(n)
     this.ny = new Float64Array(n)
+    this.roadNx = new Float64Array(n)
+    this.roadNy = new Float64Array(n)
     for (let i = 0; i < n; i++) {
       const p = track.project(reference.x[i]!, reference.y[i]!)
       this.half[i] = p.half
@@ -51,6 +58,8 @@ export class RacingRibbon {
       const heading = Math.atan2(reference.y[b]! - reference.y[a]!, reference.x[b]! - reference.x[a]!)
       this.nx[i] = -Math.sin(heading)
       this.ny[i] = Math.cos(heading)
+      this.roadNx[i] = -Math.sin(p.heading)
+      this.roadNy[i] = Math.cos(p.heading)
     }
   }
 }
@@ -63,7 +72,10 @@ export class RacingRibbon {
  * the baseline corner geometry and recorded speed profile remain the reference.
  */
 export class TrafficPlanner {
-  readonly path: RacingLine
+  private readonly smartPath: RacingLine
+  private readonly pack: PackTrafficPlanner
+  private packActive = false
+  get path(): RacingLine { return this.packActive ? this.pack.path : this.smartPath }
   readonly decision: TrafficDecision = {
     lane: null, reason: 'clear', speedLimit: Infinity, candidates: 0,
   }
@@ -71,11 +83,20 @@ export class TrafficPlanner {
   private initialized = false
   private offset = 0
   private pressureMemory = 0
+  private passTarget: number | null = null
+  private passMemory = 0
+  private passSide = 0
+  private nearMeLateral = 0
+  private nearMeSpeed = 0
+  private nearMeDeviation = 0
+  private playerLane: number | null = null
+  private playerSide = 0
+  private playerSlot = -1
   private readonly length: number
   private readonly separation: number
   private readonly raw: Float64Array
   private readonly past: Float64Array
-  private readonly near: { car: TrafficCar; along: number; drift: number; pace: number }[] = []
+  private readonly near: { car: TrafficCar; along: number; drift: number; pace: number; slot: number; station: number; deviation: number }[] = []
   private readonly candidates: (number | null)[] = []
 
   constructor(
@@ -84,19 +105,22 @@ export class TrafficPlanner {
     private readonly params: CarParams,
     private readonly style: TrafficStyle = { side: 0, clearance: 0.65, preparation: 2 },
   ) {
-    this.path = {
+    this.pack = new PackTrafficPlanner(ribbon, reference, params, style)
+    this.smartPath = {
       ...reference, x: reference.x.slice(), y: reference.y.slice(),
       offset: reference.offset.slice(), curvature: reference.curvature.slice(),
       speed: reference.speed.slice(),
     }
     this.length = carLength(params)
-    this.separation = params.width + style.clearance
+    this.separation = params.width + Math.max(style.clearance, 0.85)
     this.raw = new Float64Array(reference.x.length)
     this.past = new Float64Array(24)
   }
 
   update(cars: readonly TrafficCar[], slot: number, racing = true): RacingLine {
     const me = cars[slot]!
+    this.nearMeLateral = me.road.lateral
+    this.nearMeSpeed = me.speed
     const { reference: ref, ribbon } = this
     const n = ref.x.length
     if (!this.initialized) {
@@ -108,6 +132,7 @@ export class TrafficPlanner {
       }
     } else this.station = nearestStation(ref, me.state.x, me.state.y, this.station)
     const at = this.station
+    this.nearMeDeviation = me.road.lateral - ref.offset[at]!
     const edge = Math.max(0, me.road.half - this.params.width / 2 - 0.65)
     this.near.length = 0
     for (let i = 0; i < cars.length; i++) {
@@ -119,8 +144,49 @@ export class TrafficPlanner {
       const drift = clamp(car.state.vx * Math.sin(angle) + car.state.vy * Math.cos(angle), -3, 3)
       const expected = (at + Math.round(along / (ref.total / n)) + n) % n
       const otherAt = nearestStation(ref, car.state.x, car.state.y, expected)
-      this.near.push({ car, along, drift, pace: ref.speed[otherAt]! })
+      this.near.push({ car, along, drift, pace: ref.speed[otherAt]!, slot: i, station: otherAt,
+        deviation: car.road.lateral - ref.offset[otherAt]! })
     }
+
+    const player = this.near.find((r) => r.car.player && Math.abs(r.along) < this.length + 3)
+    if (player) {
+      // Compare the actual bodies in our road frame. Keep an established side
+      // until the complete car has cleared; a short nose lead is not clearance.
+      const normalX = -Math.sin(me.road.heading), normalY = Math.cos(me.road.heading)
+      const beside = (me.state.x - player.car.state.x) * normalX
+        + (me.state.y - player.car.state.y) * normalY
+      const alongBody = (player.car.state.x - me.state.x) * Math.cos(me.road.heading)
+        + (player.car.state.y - me.state.y) * Math.sin(me.road.heading)
+      if (this.playerLane === null && Math.abs(alongBody) < this.length - 0.5
+        && me.speed > 15 && Math.abs(beside) > this.params.width * 0.6) {
+        this.playerSide = Math.sign(beside)
+        this.playerSlot = player.slot
+        this.playerLane = me.road.lateral
+      }
+      if (this.playerLane !== null && this.playerSlot === player.slot) {
+        const boundary = player.car.road.lateral + player.drift * 0.2
+          + this.playerSide * (this.separation + 0.3)
+        this.playerLane = clamp(this.playerSide > 0
+          ? Math.max(this.playerLane, boundary) : Math.min(this.playerLane, boundary), -edge, edge)
+      }
+    } else {
+      this.playerLane = null
+      this.playerSide = 0
+      this.playerSlot = -1
+    }
+
+    const crowded = this.near.filter((r) => Math.abs(r.along) < 100
+      && Math.abs(r.car.road.lateral) < r.car.road.half + 1).length > 1
+    if (crowded) {
+      if (!this.packActive) this.pack.reset()
+      this.packActive = true
+      this.passMemory = 0; this.passSide = 0; this.passTarget = null
+      const path = this.pack.update(cars, slot, racing)
+      Object.assign(this.decision, this.pack.decision)
+      return path
+    }
+    if (this.packActive) this.initialized = false
+    this.packActive = false
 
     // Find the next substantial bend, far enough ahead to prepare BEFORE braking.
     let turn = 0, turnDistance = Infinity, bend = at, distance = 0
@@ -138,15 +204,24 @@ export class TrafficPlanner {
       && turnDistance > braking + me.speed * 0.5
     const preparation = canPrepare ? clamp(1 - Math.abs(turnDistance - braking - me.speed * this.style.preparation)
       / Math.max(60, me.speed * 3), 0, 1) : 0
-    const alongside = this.near.some((r) => Math.abs(r.along) < this.length + 2)
+    const alongside = this.near.some((r) => Math.abs(r.along) < this.length + 1
+      && Math.abs(this.nearMeDeviation - r.deviation) > this.params.width * 0.5)
     const closingBehind = this.near.some((r) => r.along < -this.length - 2 && r.along > -60
       && r.car.speed > me.speed + 0.7 && -r.along / (r.car.speed - me.speed) < 9)
     this.pressureMemory = closingBehind ? 20 : Math.max(0, this.pressureMemory - 1)
     const pressure = this.pressureMemory > 0 && this.near.some((r) => r.along < -this.length - 2 && r.along > -60)
     this.near.sort((a, b) => a.along - b.along)
-    const faster = this.near.find((r) => r.along > 0
-      && r.along < Math.max(25, (r.pace - r.car.speed) * 5)
-      && r.pace > r.car.speed + 1.2)
+    const opportunity = this.near.find((r) => r.along > this.length + 1
+      && r.along < Math.max(45, (r.pace - r.car.speed) * 8)
+      && r.pace > r.car.speed + Math.max(0.3, r.pace * 0.006))
+    if (opportunity) {
+      if (this.passTarget !== opportunity.slot) this.passSide = 0
+      this.passTarget = opportunity.slot; this.passMemory = 60
+    }
+    else this.passMemory = Math.max(0, this.passMemory - 1)
+    if (this.passMemory === 0) this.passSide = 0
+    const faster = opportunity ?? (this.passMemory > 0
+      ? this.near.find((r) => r.slot === this.passTarget && r.along > -this.length - 12 && r.along < 65) : undefined)
 
     this.candidates.length = 0
     const add = (lane: number | null): void => {
@@ -178,13 +253,12 @@ export class TrafficPlanner {
     const transitionFor = (lane: number | null): number => Math.max(36, me.speed * Math.max(1.1,
       Math.sqrt(Math.abs((lane === null ? 0 : lane - ref.offset[at]!) - initial) * 5.8 / 9)))
     const latAt = (lane: number | null, d: number, lineLat: number): number => {
-      const target = lane === null ? 0 : lane - ref.offset[at]!
       const transition = transitionFor(lane)
       const t = clamp(d / transition, 0, 1)
       // Quintic Hermite, matching the established path's position and direction.
       return lineLat + (1 - smooth(t)) * initial
         + (t - 6 * t ** 3 + 8 * t ** 4 - 3 * t ** 5) * transition * slope
-        + smooth(t) * target
+        + smooth(t) * (lane === null ? 0 : lane - ref.offset[at]!)
     }
     // Score the speed of the route we would actually ask the controller to
     // drive. The collision score alone can prefer a gap that requires a sharp
@@ -220,10 +294,15 @@ export class TrafficPlanner {
       for (let k = 1; k < routeSamples.length - 1; k++) {
         const a = routeSamples[k - 1]!, b = routeSamples[k]!, c = routeSamples[k + 1]!
         const ax = b.x - a.x, ay = b.y - a.y, bx = c.x - b.x, by = c.y - b.y
-        const curvature = 2 * (ax * by - ay * bx) / Math.max(1e-6,
+        const changed = 2 * (ax * by - ay * bx) / Math.max(1e-6,
           Math.hypot(ax, ay) * Math.hypot(bx, by) * Math.hypot(ax + bx, ay + by))
+        const rx = ref.x[b.i]! - ref.x[a.i]!, ry = ref.y[b.i]! - ref.y[a.i]!
+        const sx = ref.x[c.i]! - ref.x[b.i]!, sy = ref.y[c.i]! - ref.y[b.i]!
+        const original = 2 * (rx * sy - ry * sx) / Math.max(1e-6,
+          Math.hypot(rx, ry) * Math.hypot(sx, sy) * Math.hypot(rx + sx, ry + sy))
+        const curvature = ref.curvature[b.i]! + changed - original
         const referenceSpeed = ref.speed[b.i]!
-        const demand = Math.max(this.params.mu * 9.81 * 0.75,
+        const demand = Math.max(this.params.mu * (9.81 + this.params.downforceCoef * referenceSpeed ** 2 / this.params.mass) * 0.8,
           referenceSpeed ** 2 * Math.abs(ref.curvature[b.i]!))
         const possible = Math.min(referenceSpeed,
           Math.sqrt(demand / Math.max(Math.abs(curvature), 0.0001)))
@@ -235,21 +314,27 @@ export class TrafficPlanner {
     let best = null as number | null, bestScore = -Infinity
     for (const lane of this.candidates) {
       const dest = lane ?? ref.offset[at]!
+      // A committed passing side is a corridor, not a preference to flip at
+      // every update. Keep the reference available as the safe abort route.
+      if (faster && this.passSide !== 0 && lane !== null
+        && (dest - ref.offset[at]!) * this.passSide < 0.25) continue
       let score = -Math.abs(dest - ref.offset[at]!) * 0.35
         - Math.abs(dest - (previousLane ?? ref.offset[at]!)) * 0.85
       // Break near-ties between useful routes. This never overrides collision
       // cost and never changes the recorded lap when there is no traffic.
       if (faster || alongside) score += this.style.side * Math.tanh(dest - ref.offset[at]!)
-      if (lane === previousLane) score += 0.6
+      if (lane === previousLane) score += faster ? 2 : 0.6
       const cornerLoad = clamp(me.speed ** 2 * Math.abs(ref.curvature[at]!) / 12, 0, 1)
       score -= cornerLoad * Math.abs(dest - (previousLane ?? me.road.lateral)) * 5
       if (routeSamples.length) score -= routeTimeLoss(lane) * 6
-      if (pressure && !alongside && !faster && turn !== 0 && racing) {
+      if (pressure && !alongside && !faster && turn !== 0 && racing
+        && !this.near.some((r) => r.along < 0 && r.along > -25)) {
         score += preparation * Math.min(turn * dest, 1.5) * 3
       }
       for (const r of this.near) {
-        if (Math.abs(r.along) < this.length + 2) {
-          const side = Math.sign(me.road.lateral - r.car.road.lateral)
+        if (Math.abs(r.along) < this.length + 1
+          && Math.abs(this.nearMeDeviation - r.deviation) > this.params.width * 0.5) {
+          const side = Math.sign(this.nearMeDeviation - r.deviation)
           // Do not plan a crossover just because the speed prediction says
           // overlap will soon end. Wait until the cars have actually cleared.
           const room = side * (dest - r.car.road.lateral)
@@ -267,14 +352,18 @@ export class TrafficPlanner {
           const futureEdge = Math.max(0, ribbon.half[future]! - this.params.width / 2 - 0.4)
           const lat = clamp(latAt(lane, travel, ref.offset[future]!),
             Math.min(-futureEdge, ref.offset[future]!), Math.max(futureEdge, ref.offset[future]!))
-          const other = r.car.road.lateral + r.drift * Math.min(t, 0.5)
+          const otherFuture = (r.station + Math.round(r.car.speed * t / (ref.total / n))) % n
+          // Predict the reference's turn-in rather than extrapolating a straight
+          // lateral line through a bend. Retain the rival's observed deviation.
+          const other = ref.offset[otherFuture]! + r.deviation
           const gap = Math.abs(lat - other)
           const missing = Math.max(0, this.separation - gap)
           score -= missing * missing * 35 / (0.7 + t)
           // A beside car forms a boundary: a target on its far side is not
           // reachable, however attractive the empty space beyond it looks.
           if (Math.abs(r.along) < this.length + 1
-            && (me.road.lateral - r.car.road.lateral) * (lat - other) < 0) score -= 1000
+            && Math.abs(this.nearMeDeviation - r.deviation) > this.params.width * 0.5
+            && (this.nearMeDeviation - r.deviation) * (lat - other) < 0) score -= 1000
         }
       }
       if (score > bestScore) { bestScore = score; best = lane }
@@ -294,6 +383,13 @@ export class TrafficPlanner {
     }
     // An off-road car first needs a reachable route back to the reference.
     if (Math.abs(me.road.lateral) > me.road.half + 0.5) best = null
+    if (faster && !alongside && racing && Math.abs(me.road.lateral) <= me.road.half + 0.5) {
+      if (this.passSide === 0) this.passSide = turn !== 0 ? -turn
+        : Math.sign((best ?? ref.offset[at]!) - ref.offset[at]!) || (this.style.side < 0 ? -1 : 1)
+      best = clamp(ref.offset[at]! + faster.deviation + this.passSide * this.separation,
+        -edge, edge)
+    }
+    if (this.playerLane !== null) best = this.playerLane
     this.offset = best === null ? 0 : best - ref.offset[at]!
     this.decision.lane = best
     this.decision.reason = alongside ? 'alongside' : faster ? 'progress'
@@ -307,6 +403,11 @@ export class TrafficPlanner {
 
   /** Fast safety check at physics rate; longitudinal braking only for our corridor. */
   speedLimit(cars: readonly TrafficCar[], slot: number): number {
+    if (this.packActive) {
+      const limit = this.pack.speedLimit(cars, slot)
+      this.decision.speedLimit = limit
+      return limit
+    }
     const me = cars[slot]!
     let limit = Infinity
     const ref = this.reference
@@ -318,14 +419,35 @@ export class TrafficPlanner {
       if (i === slot) continue
       const other = cars[i]!
       const gap = signedGap(other.road.s, me.road.s, this.ribbon.track.length)
+      if (other.player && this.playerLane !== null && Math.abs(gap) < this.length + 3) {
+        const otherAt = nearestStation(ref, other.state.x, other.state.y,
+          (at + Math.round(gap / (ref.total / n)) + n) % n)
+        const deviation = other.road.lateral - ref.offset[otherAt]!
+        for (let k = 0; k < 16; k++) {
+          const future = (otherAt + k) % n
+          const edge = this.ribbon.half[future]! - this.params.width * 0.5 - 0.65
+          const occupied = ref.offset[future]! + deviation
+          const required = occupied + this.playerSide * (this.separation + 0.3)
+          if (this.playerSide * required > edge) {
+            // There is no legal side corridor farther around this bend.
+            // Fall behind early instead of merging into the player's body.
+            limit = Math.min(limit, Math.max(0, other.speed - 8))
+            break
+          }
+        }
+      }
       if (gap <= 0 || gap > 100) continue
       const t = clamp((gap - this.length) / Math.max(me.speed - other.speed, 1), 0, 2)
       const future = (at + Math.round(me.speed * t / (ref.total / n))) % n
       const angle = wrapAngle(other.state.yaw - other.road.heading)
       const drift = clamp(other.state.vx * Math.sin(angle) + other.state.vy * Math.cos(angle), -3, 3)
-      const predictedLateral = other.road.lateral + drift * Math.min(t, 0.5)
-      const actualClear = Math.abs(me.road.lateral - other.road.lateral) >= this.params.width + 0.3
-      const plannedClear = Math.abs(this.path.offset[future]! - predictedLateral) >= this.params.width + 0.4
+      const otherAt = nearestStation(ref, other.state.x, other.state.y,
+        (at + Math.round(gap / (ref.total / n))) % n)
+      const otherFuture = (otherAt + Math.round(other.speed * t / (ref.total / n))) % n
+      const predictedLateral = ref.offset[otherFuture]! + other.road.lateral - ref.offset[otherAt]!
+        + drift * Math.min(t, 0.15)
+      const actualClear = Math.abs(me.road.lateral - other.road.lateral) >= this.params.width + 0.65
+      const plannedClear = Math.abs(this.path.offset[future]! - predictedLateral) >= this.params.width + 0.7
       if (plannedClear && (t > 0.45 || actualClear)) continue
       if (actualClear && gap < this.length + 2) continue
       const room = gap - this.length - 1.5
@@ -341,6 +463,16 @@ export class TrafficPlanner {
     transition: number, horizon: number): void {
     const { path, reference: ref, ribbon } = this
     const n = ref.x.length
+    // A distant follower or a cosmetic cruising offset is not a manoeuvre.
+    // Preserve the known clear-air geometry until a meaningful lateral route
+    // or established overlap actually requires traffic-specific path handling.
+    const targetOffset = lane === null ? 0 : lane - ref.offset[at]!
+    const traffic = this.passMemory > 0 || this.playerLane !== null
+      || Math.abs(initial) > 0.4 || Math.abs(targetOffset) > 0.4
+      || this.near.some((r) => Math.abs(r.along) < this.length + 14
+        && Math.abs(this.nearMeDeviation - r.deviation) > this.params.width * 0.5)
+    const nx = traffic ? ribbon.roadNx : ribbon.nx
+    const ny = traffic ? ribbon.roadNy : ribbon.ny
     // Keep recent history so geometry across the current station is continuous.
     for (let k = 1; k <= 24; k++) this.past[k - 1] = this.initialized
       ? path.offset[(at - k + n) % n]! : ref.offset[(at - k + n) % n]! + initial
@@ -348,11 +480,37 @@ export class TrafficPlanner {
     path.curvature.set(ref.curvature); path.speed.set(ref.speed)
     const set = (i: number, lateral: number): void => {
       const edge = Math.max(0, ribbon.half[i]! - this.params.width / 2 - 0.65)
-      const lat = clamp(lateral, Math.min(-edge, ref.offset[i]!), Math.max(edge, ref.offset[i]!))
+      const lo = Math.min(-edge, ref.offset[i]!), hi = Math.max(edge, ref.offset[i]!)
+      const band = 1.5
+      let lat = lateral
+      if (!traffic) lat = clamp(lat, lo, hi)
+      else if (Math.abs(lat - ref.offset[i]!) < 0.001) lat = ref.offset[i]!
+      else if (lat > hi - band) lat = hi - band + band * Math.tanh((lat - hi + band) / band)
+      else if (lat < lo + band) lat = lo + band + band * Math.tanh((lat - lo - band) / band)
+      // Once a rival has established overlap (or is about to), reserve its
+      // side through the planned bend. Rejoining the nominal line is not safe
+      // until longitudinal clearance, even if a prediction ends the overlap.
+      for (const r of this.near) {
+        const current = this.nearMeDeviation - r.deviation
+        if (Math.abs(r.along) > this.length + 14 || Math.abs(current) < this.params.width * 0.5) continue
+        // Allocate two legal corridors around a common centre. Pinning one
+        // car to the other's nominal apex can otherwise leave no road for it.
+        const centreEdge = Math.max(0, edge - this.separation * 0.5)
+        const deviation = (this.nearMeLateral - ref.offset[at]! + r.deviation) * 0.5
+        const centre = clamp(ref.offset[i]! + deviation, -centreEdge, centreEdge)
+        const boundary = r.car.player
+          ? ref.offset[i]! + r.deviation + this.playerSide * (this.separation + 0.3)
+          : centre + Math.sign(current) * this.separation * 0.5
+        const reserved = current > 0 ? Math.max(lat, boundary) : Math.min(lat, boundary)
+        const forward = ((i - at + n) % n) * (ref.total / n)
+        const influence = 1 - smooth((forward - Math.max(45, this.nearMeSpeed * 1.5)) / 60)
+        if (forward < ref.total * 0.5) lat += (reserved - lat) * influence
+      }
+      lat = clamp(lat, lo, hi)
       const shift = lat - ref.offset[i]!
       path.offset[i] = lat
-      path.x[i] = ref.x[i]! + ribbon.nx[i]! * shift
-      path.y[i] = ref.y[i]! + ribbon.ny[i]! * shift
+      path.x[i] = ref.x[i]! + nx[i]! * shift
+      path.y[i] = ref.y[i]! + ny[i]! * shift
     }
     for (let k = 1; k <= 24; k++) set((at - k + n) % n, this.past[k - 1]!)
     let d = 0
@@ -362,15 +520,18 @@ export class TrafficPlanner {
         const j = (i - 1 + n) % n
         d += Math.hypot(ref.x[i]! - ref.x[j]!, ref.y[i]! - ref.y[j]!)
       }
-      const target = lane === null ? 0 : lane - ref.offset[at]!
       const t = clamp(d / transition, 0, 1)
-      const lat = ref.offset[i]! + (1 - smooth(t)) * initial
+      let lat = ref.offset[i]! + (1 - smooth(t)) * initial
         + (t - 6 * t ** 3 + 8 * t ** 4 - 3 * t ** 5) * transition * slope
-        + smooth(t) * target
+        + smooth(t) * (lane === null ? 0 : lane - ref.offset[at]!)
+      if (this.playerLane !== null) lat = (1 - smooth(t)) * (ref.offset[i]! + initial)
+        + (t - 6 * t ** 3 + 8 * t ** 4 - 3 * t ** 5) * transition * slope
+        + smooth(t) * (ref.offset[i]! + this.playerLane - ref.offset[at]!)
       set(i, lat + (ref.offset[i]! - lat) * smooth((d - horizon) / 70))
     }
     for (let i = 0; i < n; i++) {
-      const a = (i - 1 + n) % n, c = (i + 1) % n
+      const span = traffic ? 2 : 1
+      const a = (i - span + n) % n, c = (i + span) % n
       const ax = path.x[i]! - path.x[a]!, ay = path.y[i]! - path.y[a]!
       const bx = path.x[c]! - path.x[i]!, by = path.y[c]! - path.y[i]!
       this.raw[i] = 2 * (ax * by - ay * bx) / Math.max(1e-6,
@@ -384,8 +545,12 @@ export class TrafficPlanner {
       path.curvature[i] = k
       // Preserve the driven lap's demonstrated lateral demand. A tighter path
       // gets a lower corner speed; a wider path never invents extra grip.
-      const demand = Math.max(this.params.mu * 9.81 * 0.75, ref.speed[i]! ** 2 * Math.abs(ref.curvature[i]!))
+      const demand = Math.max(traffic
+        ? this.params.mu * (9.81 + this.params.downforceCoef * ref.speed[i]! ** 2 / this.params.mass) * 0.8
+        : this.params.mu * 9.81 * 0.75, ref.speed[i]! ** 2 * Math.abs(ref.curvature[i]!))
       path.speed[i] = Math.min(ref.speed[i]!, Math.sqrt(demand / Math.max(Math.abs(k), 0.0001)))
     }
   }
 }
+
+

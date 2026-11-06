@@ -131,7 +131,18 @@ function revLimiter(rpm: number, redline: number): number {
   return Math.max(0.0, 1.0 - (rpm - redline) / (redline * LIMITER_BAND))
 }
 
+const REVERSE_HOLD_SECONDS = 0.5
+const STOP_SPEED = 0.05
+const REVERSE_SPEED = 8 // m/s
+const BRAKE_SETTLE_SPEED = 0.8 // m/s, just above the lateral grip cutoff
+const BRAKE_SETTLE_DECEL = 4 // m/s² at full brake
+
+export const CURRENT_LOW_SPEED_CONTROLS = 3
+export type LowSpeedControlsVersion = true | 2 | typeof CURRENT_LOW_SPEED_CONTROLS
+
 export interface CarState {
+  /** Brake hold at rest, latched above the threshold while reverse is selected. */
+  reverseHold?: number
   x: number
   y: number
   yaw: number
@@ -166,6 +177,9 @@ export function initialState(): CarState {
     gear: 0, shiftTimer: 0, engineRpm: 0,
   }
 }
+
+export const reverseSelected = (s: CarState): boolean =>
+  (s.reverseHold ?? 0) > REVERSE_HOLD_SECONDS + 1e-9
 
 export const speedOf = (s: CarState): number => Math.hypot(s.vx, s.vy)
 
@@ -203,6 +217,8 @@ export class Car {
   manual = false
   /** Recorded with new laps; false preserves pre-change replays and AI tuning. */
   brakeAwareAuto: boolean | 2 = false
+  /** Off for old lap replays and the original physics fixtures. */
+  lowSpeedControls: false | LowSpeedControlsVersion = false
 
   /**
    * Wheel-rotary traction control, or null to leave the preset's TC alone.
@@ -271,6 +287,18 @@ export class Car {
     this.tcCut = 0
     this.absCut = 0
 
+    let reversing = false
+    if (this.lowSpeedControls) {
+      const selected = reverseSelected(s)
+      const keepWhileCoasting = this.lowSpeedControls !== true && selected
+      if (this.manual || throttle > 0 || s.vx > STOP_SPEED || (throttle === 0 && !keepWhileCoasting)) {
+        s.reverseHold = 0
+      } else if (!selected) {
+        s.reverseHold = speedOf(s) <= STOP_SPEED ? (s.reverseHold ?? 0) + dt : 0
+      }
+      reversing = throttle < 0 && reverseSelected(s)
+    }
+
     const steerSpeed = p.steerUsesRoadSpeed ? Math.hypot(s.vx, s.vy) : Math.abs(s.vx)
     const speedFrac = Math.min(steerSpeed / p.steerSpeedRef, 1.0)
     const scale = 1.0 - (1.0 - p.highSpeedSteer) * speedFrac
@@ -281,7 +309,7 @@ export class Car {
     else this.autoShift(dt, throttle)
     const h = dt / substeps
     for (let i = 0; i < substeps; i++) {
-      this.integrate(targetSteer, throttle, h, steerRate, gripMult, rollingMult)
+      this.integrate(targetSteer, throttle, h, steerRate, gripMult, rollingMult, reversing)
     }
   }
 
@@ -355,6 +383,7 @@ export class Car {
     steerRate: number,
     gripMult: number,
     rollingMult: number,
+    reversing: boolean,
   ): void {
     const p = this.p
     const s = this.s
@@ -371,7 +400,12 @@ export class Car {
     // estimate and the axle split alike — has to see the same number.
     let brakeBias = p.brakeBias
     let fxDrive: number
-    if (throttle >= 0.0) {
+    const movingBackward = this.lowSpeedControls && s.vx < 0
+    const braking = this.lowSpeedControls && !reversing
+      && (throttle < 0 || (movingBackward && throttle > 0))
+    if (reversing) {
+      fxDrive = throttle * p.maxEngineForce * 0.5 * clamp(1 + s.vx / REVERSE_SPEED, 0, 1)
+    } else if (throttle >= 0.0 && !braking) {
       const total = p.gearRatios[s.gear]! * p.finalDrive
       // Engine speed follows the DRIVEN WHEEL, not the road.
       //
@@ -400,8 +434,10 @@ export class Car {
       wheelForce *= revLimiter(rpmWheel, p.redlineRpm)
       if (s.shiftTimer > 0.0) wheelForce = 0.0 // clutch/torque cut mid-change
       fxDrive = throttle * wheelForce
-    } else if (s.vx > 0.5) {
-      fxDrive = throttle * p.maxBrakeForce
+    } else if (braking || s.vx > 0.5) {
+      fxDrive = braking
+        ? -Math.min(Math.abs(throttle) * p.maxBrakeForce, p.mass * Math.abs(s.vx) / h)
+        : throttle * p.maxBrakeForce
       if (p.absOn) {
         // Rear stepping out under brakes: move brake FORWARD, do not throw it
         // away. This used to scale the whole brake command down toward a floor,
@@ -458,7 +494,7 @@ export class Car {
         fxEst = Math.min(fxDrive, gripREst)
       }
     }
-    const aLong = (fxEst - drag - rr) / p.mass
+    const aLong = ((braking && movingBackward ? -fxEst : fxEst) - drag - rr) / p.mass
     const dFz = (p.mass * aLong * p.hCg) / wb
     fzF = Math.max(fzF - dFz, 100.0)
     fzR = Math.max(fzR + dFz, 100.0)
@@ -477,7 +513,7 @@ export class Car {
 
     // Slip angles. Guard forward speed and fade lateral grip out near standstill.
     const vxSafe = Math.max(Math.abs(s.vx), 1.0)
-    const alphaFGeo = Math.atan2(s.vy + p.lf * s.r, vxSafe) - delta
+    const alphaFGeo = Math.atan2(s.vy + p.lf * s.r, vxSafe) + (movingBackward ? delta : -delta)
     const alphaRGeo = Math.atan2(s.vy - p.lr * s.r, vxSafe)
     // Relaxation length: the slip angle the tyre actually feels lags the
     // geometric one by a first-order filter over distance travelled.
@@ -496,7 +532,12 @@ export class Car {
     let fxR: number
     let fyR: number
 
-    if (fxDrive >= 0.0) {
+    if (reversing) {
+      fyR = pacejka(alphaR, gripR) * gripFade
+      fxF = 0
+      fxR = frictionClamp(fxDrive, gripR, fyR)
+      s.wheelVr = s.vx
+    } else if (fxDrive >= 0.0 && !braking) {
       // Driven rear from combined slip: the wheel's slip ratio and slip angle
       // share one Pacejka budget, so spinning it bleeds lateral grip and steps
       // the rear out — and self-limits, since the spin also caps the thrust.
@@ -557,6 +598,10 @@ export class Car {
         fxF = fxFWant
       }
       fxR = frictionClamp(fxDrive * (1.0 - bias), gripR, fyR)
+      if (braking && movingBackward) {
+        fxF = -fxF
+        fxR = -fxR
+      }
       s.wheelVr = s.vx // ABS-style: no stored spin while braking
     }
 
@@ -567,13 +612,35 @@ export class Car {
     const ay = (fyF * Math.cos(delta) + fyR) / p.mass - s.vx * s.r
     const rDot = (p.lf * fyF * Math.cos(delta) - p.lr * fyR) / p.inertiaZ
 
+    const previousVx = s.vx
     s.vx += ax * h
     s.vy += ay * h
     s.r += rDot * h
 
-    if (throttle < 0.0 && s.vx > -0.5 && s.vx < 0.5) {
+    if (braking && (Math.abs(s.vx) < STOP_SPEED || s.vx * previousVx <= 0)) {
+      s.vx = 0
+      s.wheelVr = 0
+    } else if (!this.lowSpeedControls && throttle < 0.0 && s.vx > -0.5 && s.vx < 0.5) {
       s.vx = 0.0 // don't let braking drag the car into spurious reverse
     }
+
+    if (this.lowSpeedControls) {
+      // At rest the lateral force fade leaves no tyre torque to settle yaw.
+      // Blend the damping out before the car can sustain a powered slide.
+      const rest = clamp(1 - speedOf(s) / 0.5, 0, 1)
+      if (rest > 0) {
+    if (this.lowSpeedControls === CURRENT_LOW_SPEED_CONTROLS && braking) {
+      // Close the gap left by the tyre force fade so the brakes can hold a stopped car.
+      const blend = clamp((BRAKE_SETTLE_SPEED - speedOf(s)) / (BRAKE_SETTLE_SPEED - 0.5), 0, 1)
+      const lateralStep = BRAKE_SETTLE_DECEL * blend * Math.abs(throttle) * gripMult * h
+      s.vy -= clamp(s.vy, -lateralStep, lateralStep)
+    }
+
+        s.r *= Math.exp(-20 * rest * h)
+        if (Math.abs(s.r) < 1e-4) s.r = 0
+      }
+    }
+    if (reversing) s.wheelVr = s.vx
 
     // Integrate global pose.
     s.x += (s.vx * Math.cos(s.yaw) - s.vy * Math.sin(s.yaw)) * h

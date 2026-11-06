@@ -1,3 +1,4 @@
+import { aiPaceRanks } from './raceVariation'
 import type { CarParams } from './carParams'
 import { findCorners } from './corners'
 import { cornerIndex, Mistakes, seeded } from './racecraft'
@@ -122,8 +123,9 @@ export async function qualifyOpponents(
   yieldFrame: () => Promise<void> = async () => {},
 ): Promise<(number | null)[]> {
   const difficulty = difficultyByName(setup.difficulty)
+  const paceRanks = aiPaceRanks(seed, setup.opponents)
   const drivers = Array.from({ length: setup.opponents }, (_, driverId) => {
-    const rank = setup.opponents > 1 ? driverId / (setup.opponents - 1) : 0
+    const rank = setup.opponents > 1 ? paceRanks[driverId]! / (setup.opponents - 1) : 0
     const line = atCommitment(shape, params, commitmentFor(difficulty, rank, shape.recorded != null))
     const sim = new TimeAttackSim(track, params, setup.trackId, setup.preset, setup.easy)
     // The rolling start is shared with the player, rather than advantaging pole.

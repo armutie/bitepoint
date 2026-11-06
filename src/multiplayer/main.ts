@@ -1,0 +1,220 @@
+import './style.css'
+import { loadSettings,saveSettings,fullLockFraction,cameraFeel } from '../ui/settings'
+import { Track,type TrackData,loadManifest } from '../core/track'
+import { handlingPreset,type CarParams } from '../core/carParams'
+import { reverseSelected,speedOf,type CarState } from '../core/car'
+import { DT } from '../core/sim'
+import { wrapAngle } from '../core/math'
+import { Renderer } from '../render/renderer'
+import { CAMERA_ORDER } from '../render/cameras'
+import { InputState } from '../game/input'
+import { Sound } from '../audio/sound'
+import { Predictor } from './prediction'
+import { PeerLink,createRoom,joinRoom,service } from './connection'
+import { PROTOCOL,TRACKS,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
+
+const root=document.querySelector<HTMLDivElement>('#app')!
+root.innerHTML=`<div class="mp-stage"><canvas id="picture" aria-label="Race view"></canvas></div>
+<section class="mp-panel" id="home"><a class="mp-brand" href="./">Bitepoint</a><a class="mp-back" href="./">Back</a>
+<h1>Multiplayer</h1><div class="mp-form">
+<label class="mp-wide">Driver name<input id="name" maxlength="24" autocomplete="nickname" value="Driver"></label>
+<label>Circuit<select id="track"></select></label><label>Handling<select id="preset"><option value="legacy">Low drag</option><option value="classic">High downforce</option></select></label>
+<label>Laps<select id="laps"><option>1</option><option selected>3</option><option>5</option></select></label>
+<label>Gearbox<select id="gearbox"><option value="auto">Automatic</option><option value="manual">Manual</option></select></label>
+<label>Contact<select id="contact"><option value="off">Ghost racing</option><option value="on">Car contact · experimental</option></select></label>
+<label>Braking aid<select id="abs"><option value="off">ABS off</option><option value="on">ABS on</option></select></label>
+<button id="host" class="mp-primary mp-wide">Host a room</button></div>
+<div class="mp-join"><input id="code" aria-label="Room code" maxlength="6" placeholder="Room code" autocomplete="off"><button id="join" class="mp-secondary">Join room</button></div>
+<p class="mp-small">Private races for two drivers. Your single-player settings carry over.</p><div id="home-status" role="status" class="mp-status"></div></section>
+<section class="mp-panel" id="lobby" hidden><span class="mp-brand">Bitepoint</span><h1 id="room-title">Room</h1>
+<div id="room-details" class="mp-room-details"></div><ul class="mp-drivers" id="drivers"></ul>
+<div class="mp-invite"><input readonly id="invite" aria-label="Invite link"><button id="copy" class="mp-secondary">Copy invite</button></div>
+<div id="lobby-status" class="mp-status" role="status">Connecting…</div>
+<div class="mp-pause-actions"><button id="start" class="mp-primary" disabled>Start race</button><button id="leave" class="mp-secondary">Leave room</button></div></section>
+<div class="mp-hud" id="hud" hidden><div class="mp-racebar"><span id="position">P1 / 2</span><span id="lap">Lap 1 / 3</span><span id="time">0:00.000</span></div>
+<div id="countdown" class="mp-countdown"></div><div class="mp-speed"><strong id="speed">0</strong><span>km/h</span><b id="gear">1</b></div><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
+<section class="mp-panel" id="pause" hidden><span class="mp-brand">Bitepoint</span><h1 id="pause-title">Menu</h1><p id="pause-status" class="mp-small">The race continues. Your car will slow down.</p>
+<div class="mp-settings"><label>Steering<select id="input"><option value="mouse">Mouse</option><option value="keyboard">Keyboard</option></select></label><label>Mouse sensitivity<input id="sensitivity" type="range" min="0" max="1" step="0.05"></label><label>Sound<input id="volume" type="range" min="0" max="1" step="0.05"></label></div>
+<div class="mp-pause-actions"><button id="resume" class="mp-primary">Resume</button><button id="quit" class="mp-secondary">Leave room</button></div></section>`
+const element=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T
+const field=(id:string)=>element<HTMLInputElement>(id)
+let settings=loadSettings()
+const trackLabels=new Map<string,string>()
+field('name').value=localStorage.getItem('bitepoint:multiplayer-name')??'Driver'
+field('gearbox').value=settings.gearbox;field('abs').value=settings.abs?'on':'off'
+field('input').value=settings.inputMode;field('volume').value=String(settings.volume);field('sensitivity').value=String(settings.mouseSensitivity)
+field('code').value=new URLSearchParams(location.search).get('room')?.toUpperCase().replace(/[^A-F0-9]/g,'').slice(0,6)??''
+let renderer:Renderer|null=null,worker:Worker|null=null,link:PeerLink|null=null,ticket:Ticket|null=null,carParams:CarParams|null=null
+let track:Track|null=null,predictor:Predictor|null=null,latest:Snapshot|null=null,prepared=false,verified=false,playing=false,inMenu=false,ended=false
+let fingerprint='',names:[string,string|null]=['Host',null],lastSnapshot=0,ping=0,lastPing=0,lastHud=0
+let lastFrame=performance.now(),accumulator=0,previous:CarState[]|null=null
+let labDriveStarted=0
+const lab=import.meta.env.DEV&&new URLSearchParams(location.search).has('lab')
+if(lab){const box=document.createElement('div');box.className='mp-test';box.innerHTML='<button id="lab-drive">Straight test · 6 seconds</button><output id="diagnostics" style="display:block;max-width:320px;margin-top:8px"></output>';element('hud').append(box)
+  element('lab-drive').onclick=()=>{labDriveStarted=performance.now()}}
+let offsets=[{x:0,y:0,yaw:0},{x:0,y:0,yaw:0}]
+const input=new InputState(),sound=new Sound(),canvas=element<HTMLCanvasElement>('picture')
+input.attach(canvas);input.mode=settings.inputMode;input.fullLockFraction=fullLockFraction(settings.mouseSensitivity)
+sound.setLevel(0,true)
+const fmt=(seconds:number)=>`${Math.floor(seconds/60)}:${(seconds%60).toFixed(3).padStart(6,'0')}`
+const cloneStates=()=>predictor!.states.map(s=>({...s}))
+function notice(id:string,message:string,error=false):void{element(id).textContent=message;element(id).classList.toggle('is-error',error)}
+function fail(message:string):void{
+  if(ended)return;ended=true;playing=false;input.release();worker?.terminate();worker=null;link?.close();sound.setLevel(0,true)
+  element('home').hidden=true;element('lobby').hidden=true;element('hud').hidden=true;element('pause').hidden=false
+  element('pause-title').textContent='Race stopped';element('pause-status').textContent=message;element('pause-status').classList.add('mp-disconnect')
+  element('resume').hidden=true
+}
+async function leave():Promise<void>{
+  worker?.terminate();link?.close();input.release();sound.setLevel(0,true)
+  if(ticket)await service(`/rooms/${ticket.code}`,'DELETE',undefined,ticket).catch(()=>{})
+  location.href='./'
+}
+function sendHello():void{if(prepared&&link?.connected)link.controlSend({type:'hello',protocol:PROTOCOL,fingerprint})}
+function updateReady():void{
+  element<HTMLButtonElement>('start').disabled=!(prepared&&verified&&ticket?.slot===0)
+  if(verified&&prepared)notice('lobby-status',ticket?.slot===0?'Both drivers ready.':'Ready. Waiting for the host to start.')
+}
+function enterRace():void{
+  if(playing||ended)return;playing=true;input.release();element('lobby').hidden=true;element('hud').hidden=false
+  sound.setLevel(settings.volume,settings.volume<=0);lastFrame=performance.now();accumulator=0
+}
+function snapshot(s:Snapshot):void{
+  if(!predictor||!validSnapshot(s))return
+  const before=cloneStates()
+  if(!predictor.reconcile(s))return
+  const after=predictor.states
+  if(latest&&playing)for(let i=0;i<2;i++) {
+    const dx=before[i]!.x-after[i]!.x,dy=before[i]!.y-after[i]!.y
+    if(Math.hypot(dx,dy)<3){offsets[i]!.x+=dx;offsets[i]!.y+=dy;offsets[i]!.yaw+=wrapAngle(before[i]!.yaw-after[i]!.yaw)}
+    else offsets[i]={x:0,y:0,yaw:0}
+  }
+  previous=cloneStates();latest=s;lastSnapshot=performance.now()
+  if(s.phase!=='waiting')enterRace()
+}
+async function prepare(t:Ticket):Promise<void>{
+  if(!validConfig(t.config))throw new Error('This room uses a different game version. Reload both games.')
+  const response=await fetch(`./tracks/${t.config.trackId}.json`);if(!response.ok)throw new Error('Could not load the circuit.')
+  const data=await response.json() as TrackData;track=new Track(data)
+  const bytes=new TextEncoder().encode(JSON.stringify({protocol:PROTOCOL,data,params:handlingPreset(t.config.preset),config:t.config}))
+  fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('')
+  predictor=new Predictor(track,t.config,t.slot);previous=cloneStates();carParams=handlingPreset(t.config.preset)
+  renderer=new Renderer(canvas);renderer.applySettings({effects:settings.effects,performanceMode:settings.performanceMode,...cameraFeel(settings.effects)})
+  renderer.setCameraMode(settings.camera)
+  await renderer.setTrack(track);renderer.setCars(carParams,false);renderer.setOpponents(carParams,1,[t.slot===0?1:0])
+  if(ended)return
+  if(t.slot===0){worker=new Worker(new URL('./host.worker.ts',import.meta.url),{type:'module'})
+    worker.onmessage=e=>{
+      if(e.data.type==='stalled'){link?.controlSend({type:'closed',reason:'The host could not keep the race running.'});fail('The host was suspended or could not keep the race running. Create a new room.');return}
+      if(e.data.type==='snapshot'){snapshot(e.data.snapshot as Snapshot);if(verified)link?.fastSend({type:'snapshot',snapshot:e.data.snapshot})}
+    };worker.onerror=()=>fail('The race host stopped unexpectedly.');worker.postMessage({type:'init',track:data,config:t.config})}
+  prepared=true;input.refreshBounds();sendHello();updateReady()
+  element('controls').textContent=`W / S pedals · ${settings.inputMode==='mouse'?'Mouse':'A / D'} steering${t.config.manual?' · E / Q gears':''} · Esc menu`
+}
+async function connect(t:Ticket):Promise<void>{
+  ticket=t;element('home').hidden=true;element('lobby').hidden=false;element('room-title').textContent=`Room ${t.code}`
+  element('start').hidden=t.slot!==0
+  const invite=new URL('multiplayer.html',location.href);invite.searchParams.set('room',t.code);field('invite').value=invite.href
+  const label=trackLabels.get(t.config.trackId)??t.config.trackId
+  element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'} · ${t.config.contact?'Car contact':'Ghost racing'}`
+  link=new PeerLink(t)
+  link.onLobby=s=>{names=s.names;element('drivers').replaceChildren(...names.map((n,i)=>{const li=document.createElement('li');li.textContent=n?`${n}${i===t.slot?' · You':''}`:'Waiting for a driver…';return li}))
+    if(!verified)notice('lobby-status',!names[1]?'Share the invite with the other driver.':prepared?'Connecting drivers…':'Loading circuit…')}
+  link.onOpen=()=>{notice('lobby-status',prepared?'Checking both games…':'Loading circuit…');sendHello()}
+  link.onError=fail
+  link.onControl=value=>{
+    if(!value||typeof value!=='object')return
+    const m=value as {type?:string;protocol?:string;fingerprint?:string;sent?:number;reason?:string}
+    if(m.type==='hello'){
+      if(!prepared)return
+      if(m.protocol!==PROTOCOL||m.fingerprint!==fingerprint){fail('The two games have different circuit or physics data. Reload both games.');return}
+      const first=!verified;verified=true;if(first)sendHello();updateReady();if(t.slot===0&&latest)link?.fastSend({type:'snapshot',snapshot:latest})
+    }
+    if(m.type==='ping'&&typeof m.sent==='number')link?.controlSend({type:'pong',sent:m.sent})
+    if(m.type==='pong'&&typeof m.sent==='number')ping=Math.max(0,performance.now()-m.sent)
+    if(m.type==='closed')fail(typeof m.reason==='string'?m.reason.slice(0,160):'The other driver left the room.')
+  }
+  link.onFast=value=>{
+    if(!verified||!value||typeof value!=='object')return
+    const m=value as {type?:string;frames?:unknown;snapshot?:unknown}
+    if(t.slot===0&&m.type==='input')worker?.postMessage({type:'input',slot:1,frames:m.frames})
+    if(t.slot===1&&m.type==='snapshot'&&validSnapshot(m.snapshot))snapshot(m.snapshot)
+  }
+  await Promise.all([link.open(),prepare(t)])
+}
+async function begin(host:boolean):Promise<void>{
+  if(ticket)return
+  const name=field('name').value.trim();if(!name){notice('home-status','Enter your driver name.',true);return}
+  element<HTMLButtonElement>('host').disabled=true;element<HTMLButtonElement>('join').disabled=true
+  notice('home-status',host?'Creating room…':'Joining room…');sound.start();sound.setLevel(0,true)
+  localStorage.setItem('bitepoint:multiplayer-name',name)
+  try{
+    const c:RoomConfig={protocol:PROTOCOL,trackId:field('track').value,preset:field('preset').value==='classic'?'classic':'legacy',
+      laps:Number(field('laps').value),manual:field('gearbox').value==='manual',abs:field('abs').value==='on',contact:field('contact').value==='on'}
+    const t=host?await createRoom(name,c):await joinRoom(name,field('code').value.toUpperCase().trim())
+    await connect(t)
+  }catch(e){const message=e instanceof Error?e.message:'Could not connect.'
+    if(ticket)fail(message);else{notice('home-status',message.includes('JSON')||message.includes('fetch')?'Room service unavailable. Please try again.':message,true)
+      element<HTMLButtonElement>('host').disabled=false;element<HTMLButtonElement>('join').disabled=false}}
+}
+element('host').onclick=()=>void begin(true);element('join').onclick=()=>void begin(false)
+element('copy').onclick=()=>{void navigator.clipboard.writeText(field('invite').value).then(()=>notice('lobby-status','Invite copied.')).catch(()=>{field('invite').focus();field('invite').select();notice('lobby-status','Copy the selected invite link.')})}
+element('leave').onclick=()=>void leave();element('quit').onclick=()=>void leave()
+element('start').onclick=()=>{if(verified&&prepared&&ticket?.slot===0){worker?.postMessage({type:'start'});element<HTMLButtonElement>('start').disabled=true}}
+function menu(open:boolean):void{
+  if(!playing||ended)return;inMenu=open;element('pause').hidden=!open
+  if(open)input.release(true);else{input.resume();sound.start()}
+}
+element('resume').onclick=()=>menu(false)
+input.onAction=a=>{
+  if(a==='pause')menu(!inMenu)
+  if(a==='camera'&&renderer){const next=CAMERA_ORDER[(CAMERA_ORDER.indexOf(settings.camera)+1)%CAMERA_ORDER.length]!;settings={...settings,camera:next};renderer.setCameraMode(next)}
+}
+function preferences():void{
+  settings={...settings,inputMode:field('input').value==='keyboard'?'keyboard':'mouse',volume:Number(field('volume').value),mouseSensitivity:Number(field('sensitivity').value)}
+  saveSettings(settings);input.mode=settings.inputMode;input.fullLockFraction=fullLockFraction(settings.mouseSensitivity)
+  sound.setLevel(settings.volume,settings.volume<=0)
+  if(ticket)element('controls').textContent=`W / S pedals · ${settings.inputMode==='mouse'?'Mouse':'A / D'} steering${ticket.config.manual?' · E / Q gears':''} · Esc menu`
+}
+for(const id of ['input','volume','sensitivity'])element(id).oninput=preferences
+window.addEventListener('resize',()=>{renderer?.resize();input.refreshBounds()})
+window.addEventListener('pagehide',()=>{worker?.terminate();link?.close();sound.setLevel(0,true)})
+function frame(now:number):void{
+  const wall=Math.min((now-lastFrame)/1000,0.1);lastFrame=now
+  if(predictor&&renderer&&track&&ticket&&!ended){
+    accumulator+=wall
+    while(accumulator>=DT){accumulator-=DT
+      if(verified){previous=cloneStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5)
+        const cruise=labDriveStarted>0&&now-labDriveStarted<6000
+        const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),settings.tcLevel)
+        if(ticket.slot===0)worker?.postMessage({type:'input',slot:0,frames:[f]})
+        else link?.fastSend({type:'input',frames:predictor.batch()})}
+    }
+    const alpha=accumulator/DT,states=predictor.states.map((s,i)=>{
+      const p=previous?.[i]??s,o=offsets[i]!,decay=Math.exp(-wall/0.10);o.x*=decay;o.y*=decay;o.yaw*=decay
+      return {...s,x:p.x+(s.x-p.x)*alpha+o.x,y:p.y+(s.y-p.y)*alpha+o.y,yaw:p.yaw+wrapAngle(s.yaw-p.yaw)*alpha+o.yaw}
+    })
+    const local=states[ticket.slot]!,p=carParams!,proj=track.project(local.x,local.y)
+    renderer.setOpponentStates([states[1-ticket.slot]!]);renderer.rig.lookBack=input.lookBack
+    renderer.render(local,null,p,inMenu?0:input.pedals.throttle,wall,{lateral:proj.lateral,half:proj.half,margin:1.2})
+    if(playing){sound.update({speed:speedOf(local),vx:local.vx,wheelVr:local.wheelVr,slipF:local.slipF,slipR:local.slipR,
+      onKerb:Math.abs(proj.lateral)>proj.half-0.5,onGrass:Math.abs(proj.lateral)>proj.half+1.2,
+      rpm:local.engineRpm,redlineRpm:p.redlineRpm,idleRpm:p.idleRpm,gear:local.gear,throttle:inMenu?0:input.pedals.throttle-input.pedals.brake,shiftTimer:local.shiftTimer})}
+    if(verified&&latest&&now-lastSnapshot>1800)fail('Race updates stopped. The room has ended.')
+    if(verified&&now-lastPing>1000){lastPing=now;link?.controlSend({type:'ping',sent:now})}
+    if(latest&&now-lastHud>80){lastHud=now;const score=latest.scores[ticket.slot]!
+      element('position').textContent=`P${score.position} / 2`;element('lap').textContent=`Lap ${Math.min(score.laps+1,ticket.config.laps)} / ${ticket.config.laps}`
+      element('time').textContent=score.finish!==null?`Finished · ${fmt(score.finish)}`:`${fmt(score.lapTime)}${score.armed&&!score.valid?' · Invalid lap':''}`
+      element('speed').textContent=String(Math.round(speedOf(local)*3.6));element('gear').textContent=reverseSelected(local)?'R':String(local.gear+1)
+      element('countdown').textContent=latest.phase==='countdown'?String(Math.max(1,Math.ceil(latest.countdown/60))):latest.phase==='finished'?'Race finished':''
+      element('network').textContent=`${Math.round(ping)} ms · Private race`
+      if(lab)element('diagnostics').textContent=`${ticket.slot===0?'Host':'Guest'} · Tick ${latest.tick} · Input ${predictor.sequence} / ack ${latest.ack[ticket.slot]} · Queue ${predictor.queueSize} · Pedal ${latest.actions[ticket.slot]!.throttle.toFixed(2)} · Correction ${predictor.correction.toFixed(3)} m`
+    }
+  }
+  requestAnimationFrame(frame)
+}
+requestAnimationFrame(frame)
+void loadManifest().then(manifest=>{
+  const select=element<HTMLSelectElement>('track');for(const id of TRACKS){const t=manifest.find(m=>m.id===id);if(!t)continue;trackLabels.set(id,t.label);const o=document.createElement('option');o.value=id;o.textContent=t.label;select.append(o)}
+}).catch(()=>notice('home-status','Could not load the circuit list. Reload the game.',true))
+if(import.meta.hot)import.meta.hot.dispose(()=>{worker?.terminate();link?.close();renderer?.dispose();input.detach();sound.dispose()})

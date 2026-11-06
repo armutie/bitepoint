@@ -1,3 +1,4 @@
+import { runBuild } from './buildScheduler'
 import { RenderProfiler } from './renderProfiler'
 /**
  * The three.js layer: one renderer, one scene, and the handful of things in it.
@@ -40,9 +41,9 @@ import { PALETTE } from './palette'
 const SUN_OFFSET = new THREE.Vector3(140, 20, 190)
 import { PostPipeline } from './post'
 import { renderQuality, viewportPixelRatio, AdaptivePixelRatio } from './quality'
-import { buildScenery, type Scenery } from './scenery'
-import { buildTerrain } from './terrain'
-import { buildWorld, type World } from './world'
+import { buildScenerySteps, type Scenery } from './scenery'
+import { buildTerrainSteps } from './terrain'
+import { buildWorldSteps, type World } from './world'
 import { TrackSurface } from './trackSurface'
 import { ContactSuspension } from './contactSuspension'
 
@@ -225,7 +226,6 @@ export class Renderer {
     this.resize()
   }
 
-  /** Swap in a circuit, disposing whatever was there. */
   setDebugLine(points: { x: number; y: number }[] | null): void {
     if (this.debugLine) {
       this.scene.remove(this.debugLine)
@@ -246,33 +246,50 @@ export class Renderer {
     this.scene.add(this.debugLine)
   }
 
-  /** Swap in a circuit, disposing whatever was there. */
-  setTrack(track: Track): void {
+
+  /** Keep the previous circuit live while the next one is prepared cooperatively. */
+  async setTrack(track: Track, current: () => boolean = () => true): Promise<boolean> {
+    const began = performance.now()
+    let longestSlice = 0
+    const prepare = function* (): Generator<void, { world: World; scenery: Scenery; surface: TrackSurface }> {
+      let world: World | null = null, scenery: Scenery | null = null, complete = false
+      try {
+
+        const surface = yield* TrackSurface.buildSteps(track)
+        yield
+
+        const terrain = yield* buildTerrainSteps(track)
+        yield
+
+        world = yield* buildWorldSteps(track, terrain)
+        yield
+
+        scenery = yield* buildScenerySteps(track, terrain)
+        complete = true
+        return { world, scenery, surface }
+      } finally {
+        if (!complete) { world?.dispose(); scenery?.dispose() }
+      }
+    }
+    const prepared = await runBuild(prepare(), current, ms => { longestSlice = ms })
+    if (!prepared) return false
+    if (!current()) { prepared.world.dispose(); prepared.scenery.dispose(); return false }
     this.setDebugLine(null)
-    this.trackSurface = new TrackSurface(track)
-    if (this.world) {
-      this.scene.remove(this.world.root)
-      this.world.dispose()
-    }
-    if (this.scenery) {
-      this.scene.remove(this.scenery.root)
-      this.scenery.dispose()
-    }
-    const terrain = buildTerrain(track)
-    this.world = buildWorld(track, terrain)
-    this.scenery = buildScenery(track, terrain)
+    if (this.world) { this.scene.remove(this.world.root); this.world.dispose() }
+    if (this.scenery) { this.scene.remove(this.scenery.root); this.scenery.dispose() }
+    this.trackSurface = prepared.surface
+    this.world = prepared.world
+    this.scenery = prepared.scenery
     this.scene.add(this.world.root, this.scenery.root)
-    // The circuit never moves, so its matrices are computed once, here, and
-    // never again. three.js re-walks the whole scene every render and, with
-    // `matrixAutoUpdate` on, re-composes every object's matrix from its
-    // position/quaternion/scale — for the few hundred static objects of road,
-    // wall and scenery that was the single largest JS cost in a CPU profile
-    // of a driving session, all of it recomputing values that never change.
     this.scene.updateMatrixWorld(true)
-    this.world.root.traverse((o) => { o.matrixAutoUpdate = false; o.matrixWorldAutoUpdate = false })
-    this.scenery.root.traverse((o) => { o.matrixAutoUpdate = false })
+    this.world.root.traverse(o => { o.matrixAutoUpdate = false; o.matrixWorldAutoUpdate = false })
+    this.scenery.root.traverse(o => { o.matrixAutoUpdate = false })
     this.buildAttractField(track)
+    if (import.meta.env.DEV) console.info('[track-build]', track.id,
+      JSON.stringify({ totalMs: Math.round(performance.now() - began), longestSliceMs: Math.round(longestSlice) }))
+    return true
   }
+
 
   /**
    * The attract-mode field: ten cars lapping the circuit behind the menu.

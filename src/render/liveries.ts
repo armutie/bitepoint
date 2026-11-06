@@ -4,7 +4,7 @@
  * Its own module because two very different places need the same list: the
  * renderer, which builds cars out of them, and the HUD, which puts a matching
  * chip beside each name on the order board. A chip that does not match the car
- * it stands for is worse than no chip, so the list has to have one home — and
+ * it stands for is worse than no chip, so the list has to have one home â€” and
  * that home cannot be the renderer, because the HUD would then be importing
  * three.js to find out what colour something is.
  */
@@ -14,7 +14,7 @@ export interface Livery {
 }
 
 /** The player, who is never one of the field. */
-export const PLAYER_LIVERY: Livery = { body: 0x2f6fd0, accent: 0xe8eef7 }
+export const PLAYER_LIVERY: Livery = { body: 0xb91e27, accent: 0xdedfd9 }
 
 /** One each, so no two cars on a grid look alike. */
 export const FIELD_LIVERIES: readonly Livery[] = [

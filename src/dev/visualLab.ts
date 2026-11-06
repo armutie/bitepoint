@@ -8,7 +8,7 @@ const renderer=new Renderer(canvas)
 renderer.toggleProfiling()
 const params=handlingPreset('legacy')
 const track=new Track(await (await fetch('./tracks/power_8.json')).json())
-renderer.setTrack(track); renderer.setCars(params,true); renderer.setOpponents(params,7)
+await renderer.setTrack(track); renderer.setCars(params,true); renderer.setOpponents(params,7)
 const car=new Car(params), ghost=new Car(params), rivals=Array.from({length:7},()=>new Car(params))
 const input=(id:string)=>document.querySelector<HTMLInputElement>('#'+id)!
 let distance=110, last=performance.now(), frames:number[]=[],renderTimes:number[]=[],sampleId=0
@@ -25,6 +25,11 @@ renderer.rig.update=(...args)=>{
   const eye=-wall-5,aim=-wall-14
   renderer.rig.camera.position.set(p.x-Math.sin(p.yaw)*eye,2.3,-p.y-Math.cos(p.yaw)*eye)
   renderer.rig.camera.up.set(0,1,0);renderer.rig.camera.lookAt(q.x-Math.sin(q.yaw)*aim,2.2,-q.y-Math.cos(q.yaw)*aim)
+ }
+ if(input('side').checked){
+  const s=args[0],cos=Math.cos(s.yaw),sin=Math.sin(s.yaw)
+  renderer.rig.camera.position.set(s.x-sin*5.1,1.55,-s.y-cos*5.1)
+  renderer.rig.camera.up.set(0,1,0);renderer.rig.camera.lookAt(s.x,0.55,-s.y)
  }
  if(input('contact').checked){
   const s=args[0],cos=Math.cos(s.yaw),sin=Math.sin(s.yaw)

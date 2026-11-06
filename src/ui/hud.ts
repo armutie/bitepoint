@@ -103,6 +103,7 @@ export interface HudState {
   qualifyingIntro?: { active: boolean; lights: number; hint: string }
   speedKmh: number
   gear: number
+  reverse?: boolean
   rpm: number
   redlineRpm: number
   currentLap: number
@@ -684,7 +685,7 @@ export class Hud {
     this.updateTrackLimits(s.race ? s.trackLimits : undefined)
     this.invalid.classList.toggle('is-hidden', s.race !== undefined)
     setText(this.speed, String(Math.round(s.speedKmh)))
-    setText(this.gear, s.speedKmh < 1 && s.gear === 0 ? 'N' : String(s.gear + 1))
+    setText(this.gear, s.reverse ? 'R' : s.speedKmh < 1 && s.gear === 0 ? 'N' : String(s.gear + 1))
 
     if (this.hudMap) {
       this.hudMap.setCar(s.carX, s.carY, s.sector)

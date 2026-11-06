@@ -1,3 +1,7 @@
+import { DriveRecorder } from './telemetry/recorder'
+import { DrivingCapture, telemetryBadge } from './telemetry/capture'
+import { buildId as drivingBuildId } from 'virtual:bitepoint-driving-build'
+import { mixedAiGrid } from './core/raceVariation'
 /**
  * Wiring: menus, input, simulation, renderer.
  *
@@ -8,7 +12,7 @@
  */
 import './styles.css'
 
-import { useLegacyTyreModel, type CarState } from './core/car'
+import { reverseSelected, useLegacyTyreModel, type CarState } from './core/car'
 import {
   applyEasyAids, handlingPreset, presetLabel, PRESET_INFO, PRESET_ORDER,
   TC_LEVEL_MAX, type PresetName,
@@ -131,6 +135,19 @@ async function boot(): Promise<void> {
   const hud = new Hud()
   const finish = new RaceFinish()
   const input = new InputState()
+  const driveRecorder = import.meta.env.DEV ? new DriveRecorder() : null
+  const driveCapture = driveRecorder ? new DrivingCapture(driveRecorder) : null
+  if (driveRecorder && driveCapture) {
+    app.append(telemetryBadge(driveRecorder))
+    const telemetryTimer = window.setInterval(() => driveCapture.flush(), 1000)
+    window.addEventListener('pagehide', event => {
+      if (event.persisted) driveCapture.event('page-hidden')
+      else driveCapture.finish('page-exit')
+      driveCapture.flush()
+    })
+    window.addEventListener('pageshow', event => { if (event.persisted) driveCapture.event('page-return') })
+    if (import.meta.hot) import.meta.hot.dispose(() => { clearInterval(telemetryTimer); driveCapture.finish('development-reload') })
+  }
   input.attach(canvas)
 
   const selection = restoreSelection(manifest)
@@ -169,6 +186,8 @@ async function boot(): Promise<void> {
   /** Push every preference into the layer that owns it. Applied live, so the
    *  settings screen shows its own effect on the circuit behind it. */
   function applySettings(s: Settings): void {
+    driveCapture?.event('settings', JSON.stringify({ camera:s.camera, viewport:s.viewport, effects:s.effects,
+      inputMode:s.inputMode, sensitivity:s.mouseSensitivity, gearbox:s.gearbox, tc:s.tcLevel, abs:s.abs }))
     settings = s
     saveSettings(s)
     input.mode = s.inputMode
@@ -293,37 +312,36 @@ async function boot(): Promise<void> {
     return paramsValue
   }
 
-  /**
-   * SINGLE-FLIGHT track loading, shared by the menu preview and by Drive.
-   *
-   * The old shape had each caller fetch-and-build independently, and the
-   * worst real-user path — click a circuit card, then Drive before the ~1 s
-   * preview build lands — ran the full terrain+scenery build TWICE, back to
-   * back, on the main thread: 3.9 s of frozen UI, measured. Now there is one
-   * job per track id; whoever asks first starts it, whoever asks second
-   * awaits the same promise, and a job superseded by a different selection
-   * quietly declines to apply itself.
-   */
+  /** One cancellable scene build per selection, shared by preview and Drive.
+   * The existing scene stays live while deterministic build steps yield to
+   * input and painting. Only the latest selection can install its scene. */
   let trackJob: { id: string; promise: Promise<Track> } | null = null
   let lastBuildMs = 0
   let buildCount = 0
   function ensureTrack(trackId: string): Promise<Track> {
-    if (track && track.id === trackId) return Promise.resolve(track)
+    if (track && track.id === trackId) {
+      trackJob = null
+      menu.setLoading(null)
+      return Promise.resolve(track)
+    }
     if (trackJob && trackJob.id === trackId) return trackJob.promise
+    menu.setLoading(manifest.find(item => item.id === trackId)?.label ?? 'circuit')
     const job = {
       id: trackId,
-      promise: loadTrack(trackId).then((loaded) => {
-        // Only the job that is still current gets to touch the scene.
+      promise: loadTrack(trackId).then(async loaded => {
         if (trackJob === job) {
           const t0 = performance.now()
-          track = loaded
-          renderer.setTrack(loaded)
-          hud.setTrack(loaded)
-          lastBuildMs = performance.now() - t0
-          buildCount++
-          trackJob = null
+          const applied = await renderer.setTrack(loaded, () => trackJob === job)
+          if (applied && trackJob === job) {
+            track = loaded
+            hud.setTrack(loaded)
+            lastBuildMs = performance.now() - t0
+            buildCount++
+          }
         }
         return loaded
+      }).finally(() => {
+        if (trackJob === job) { trackJob = null; menu.setLoading(null) }
       }),
     }
     trackJob = job
@@ -331,7 +349,7 @@ async function boot(): Promise<void> {
   }
 
   function preview(trackId: string): void {
-    void ensureTrack(trackId).then(() => refreshAttractLine())
+    void ensureTrack(trackId).then(() => refreshAttractLine()).catch(error => console.error('[track-load]', error))
   }
 
   /**
@@ -391,12 +409,22 @@ async function boot(): Promise<void> {
     return weekend
   }
 
+  function startTelemetry(): void {
+    if (!sim) return
+    driveCapture?.start({track:sim.track, sims:race?.race.sims ?? [sim], race, playerSlot:race?.playerSlot ?? 0,
+      preset:current.preset, easy:current.easy, mode:qualifying?'qualifying':current.mode==='race'?'race':'time-trial',
+      legacyTyres:LEGACY_TYRE_MODE, buildId:drivingBuildId,
+      purpose:import.meta.env.DEV&&new URLSearchParams(location.search).has('recordingTest')?'verification':'personal'})
+  }
+
   async function start(sel: Selection, oneShot = false): Promise<void> {
     const event = sel.mode === 'race' ? eventFor(sel) : null
     if (event && !oneShot && !event.qualifying) {
       menu.showRaceEvent()
       return
     }
+    driveCapture?.finish('new-session')
+    running = false
     qualifying = null
     if (finishState === 'results') paused = true
     finishState = 'none'
@@ -413,8 +441,8 @@ async function boot(): Promise<void> {
     const loaded = await ensureTrack(sel.trackId)
     if (!track || track.id !== sel.trackId) {
       const t0 = performance.now()
+      await renderer.setTrack(loaded)
       track = loaded
-      renderer.setTrack(loaded)
       hud.setTrack(loaded)
       lastBuildMs = performance.now() - t0
       buildCount++
@@ -422,7 +450,7 @@ async function boot(): Promise<void> {
 
     const p = params(sel)
     const simOpts = {
-      manual: false,
+      manual: settings.gearbox === 'manual',
       brakeAwareAuto: 2 as const,
       // Always on, not "on when TC is on". The rotary can be turned mid-lap, so
       // the channel has to exist from the first tick or a lap that started at
@@ -455,8 +483,9 @@ async function boot(): Promise<void> {
           if (event) event.completed = false
           race = new RaceSession({
             playerLaunch: true,
+            randomizeAi: true,
             seed: event?.seed ?? crypto.getRandomValues(new Uint32Array(1))[0]!,
-            ...(event?.qualifying ? { gridOrder: event.qualifying.gridOrder } : {}),
+            ...(event?.qualifying ? { gridOrder: mixedAiGrid(event.seed, event.qualifying.gridOrder) } : {}),
             track: loaded,
             trackId: sel.trackId,
             params: p,
@@ -578,6 +607,7 @@ async function boot(): Promise<void> {
     // AudioContext make a sound. Built here rather than at boot, so a player
     // who never presses it never has one.
     if (settings.volume > 0) sound.start()
+    startTelemetry()
     loop.resumeSimulation(true)
     running = true
     paused = false
@@ -614,7 +644,9 @@ async function boot(): Promise<void> {
       void start(current)
       return
     }
+    driveCapture?.finish('restart')
     sim.reset()
+    startTelemetry()
     loop.resumeSimulation(true)
     prevState = { ...sim.car.s }
     ghost = null
@@ -628,6 +660,7 @@ async function boot(): Promise<void> {
       completeQualifying(null)
       return
     }
+    driveCapture?.finish('quit-to-menu')
     finishState = 'none'
     finish.hide()
     loop.resumeSimulation(true)
@@ -649,6 +682,7 @@ async function boot(): Promise<void> {
 
   function completeQualifying(lap: CompletedLap | null): void {
     if (!qualifying) return
+    driveCapture?.finish(lap?'qualifying-complete':'qualifying-abandoned')
     const attempt = qualifying
     qualifying = null
     attempt.event.qualifying = qualifyingGrid(attempt.aiTimes, lap?.valid ? lap.time : null)
@@ -724,6 +758,7 @@ async function boot(): Promise<void> {
   }
 
   function showRaceResults(r: RaceSession): void {
+    driveCapture?.finish('race-results')
     const liveryIndex = (slot: number): number => r.driverIdOf(slot)
     if (weekend) weekend.completed = true
     finish.showResults({
@@ -756,6 +791,7 @@ async function boot(): Promise<void> {
 
   /** Stop on the frozen circuit long enough to read the run, when there is one. */
   function endSession(): void {
+    driveCapture?.finish('end-session')
     // A debrief with no clean timing has nothing useful to say. Leave it out
     // rather than turning a quick test or abandoned run into an extra screen.
     if (!sessionLaps.some((lap) => lap.valid)) {
@@ -903,7 +939,7 @@ async function boot(): Promise<void> {
         watcher.flying = sim.lapsCompleted > 0
         controls = { steer: c.steer, throttle: c.pedal, pedalIntent: Math.sign(c.pedal) }
       } else {
-        controls = input.sample()
+        controls = input.sample(sim.car.s.vx <= 0.5)
       }
       lastThrottle = controls.throttle
       lastSteer = controls.steer
@@ -914,10 +950,16 @@ async function boot(): Promise<void> {
       const wasPlayerFinished = race?.playerFinished ?? false
       const requestedShift = input.takeShift()
       const shift = introControls ? 0 : requestedShift
+      const rawPedals = input.pedals
+      driveCapture?.begin({steer:controls.steer,pedal:controls.throttle,shift:requestedShift,tc:tcLevel,
+        throttlePedal:rawPedals.throttle,brakePedal:rawPedals.brake,throttleHeld:input.launchThrottle,brakeHeld:input.brakeHeld,
+        clutchHeld:input.launchClutch,lookBack:input.lookBack,inputMode:input.mode,sensitivity:settings.mouseSensitivity,
+        source:introControls?'qualifying-intro':watcher?'reference-driver':'human'})
       const result = race
         ? race.step(controls.steer, controls.throttle, shift, tcLevel,
           { clutch: input.launchClutch, throttle: input.launchThrottle })[race.playerSlot]!
         : sim.step(controls.steer, controls.throttle, shift, tcLevel)
+      driveCapture?.end(result)
 
       if (race?.playerFinished && !wasPlayerFinished) {
         finishState = 'flag'
@@ -1106,6 +1148,7 @@ async function boot(): Promise<void> {
           ...(race ? { race: raceHudState(race) } : {}),
           speedKmh: Math.hypot(sim.car.s.vx, sim.car.s.vy) * 3.6,
           gear: sim.car.s.gear,
+          reverse: reverseSelected(sim.car.s),
           rpm: launchRev,
           redlineRpm: p.redlineRpm,
           carX: sim.car.s.x,
@@ -1135,7 +1178,7 @@ async function boot(): Promise<void> {
           brake: pedals.brake,
           steer: lastSteer,
           cameraLabel: CAMERA_LABEL[renderer.rig.mode],
-          inputLabel: input.mode === 'mouse' ? 'Mouse' : 'Keys',
+          inputLabel: `${input.mode === 'mouse' ? 'Mouse' : 'Keys'} · ${sim.car.manual ? 'Manual' : 'Auto'}`,
           viewportLabel: VIEWPORT_LABEL[viewport],
           easy: current.easy,
           // What the car was actually built with, not what was requested — the
@@ -1180,17 +1223,17 @@ async function boot(): Promise<void> {
           }
           running = false
           paused = true
-          input.release()
+          driveCapture?.event('pause')
+          input.release(true)
           const status = pauseStatus()
           if (status) hud.setCurrentLapTime(status.currentLap, status.timingArmed)
+          hud.root.classList.add('is-hidden')
           menu.showPause(status)
         } else if (menu.handleEscape()) {
           break
         } else if (menu.visible && paused) {
           menu.hide()
-          loop.resumeSimulation()
-          running = true
-          paused = false
+          resumeDrive()
         }
         break
       case 'camera':
@@ -1226,12 +1269,15 @@ async function boot(): Promise<void> {
     weekend = new RaceEvent(menu.selection, crypto.getRandomValues(new Uint32Array(1))[0]!)
     menu.raceEvent = weekend
   }
-  menu.onResume = () => {
+  function resumeDrive(): void {
+    driveCapture?.event('resume')
+    input.resume()
     loop.resumeSimulation()
     if (sim) running = true
     paused = false
     hud.root.classList.remove('is-hidden')
   }
+  menu.onResume = resumeDrive
   menu.onRestart = () => {
     if (qualifying) {
       completeQualifying(null)
@@ -1241,6 +1287,7 @@ async function boot(): Promise<void> {
     loop.resumeSimulation(true)
     running = true
     paused = false
+    hud.root.classList.remove('is-hidden')
   }
   menu.onEndSession = () => endSession()
   menu.onQuit = () => quitToMenu()
@@ -1283,8 +1330,10 @@ async function boot(): Promise<void> {
   // but running nothing at all while nobody is looking is still the right
   // behaviour, and it is what stops a backgrounded tab burning a core.
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) loop.stop()
-    else if (!loop.isRunning) loop.start()
+    if (document.hidden) { driveCapture?.event('tab-hidden'); loop.stop() }
+    else { driveCapture?.event('tab-visible') }
+    if (document.hidden) return
+    if (!loop.isRunning) loop.start()
   })
 
   renderer.resize()

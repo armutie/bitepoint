@@ -702,6 +702,15 @@ html, body, #app {
   transition: background 180ms ease;
 }
 
+.menu-loading {
+  position: absolute;
+  right: 26px;
+  bottom: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
+}
+
 .menu-panel {
   width: min(1120px, 100%);
   max-height: calc(100vh - 52px);

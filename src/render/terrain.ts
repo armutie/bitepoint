@@ -1,3 +1,4 @@
+import { finishBuild } from './buildScheduler'
 /**
  * The land the circuit sits in.
  *
@@ -113,7 +114,8 @@ const smooth = (a: number, b: number, v: number): number => {
   return t * t * (3 - 2 * t)
 }
 
-export function buildTerrain(track: Track): Terrain {
+export function buildTerrain(track: Track): Terrain { return finishBuild(buildTerrainSteps(track)) }
+export function* buildTerrainSteps(track: Track): Generator<void, Terrain> {
   const noise = makeNoise(track.seed ^ 0x5eed7e44)
   const corners = sharpestCorners(track, 4)
   const runs = longRuns(track)
@@ -212,6 +214,7 @@ export function buildTerrain(track: Track): Terrain {
   const gny = Math.ceil((maxY - minY + PAD * 2) / CELL) + 1
   const dGrid = new Float32Array(gnx * gny)
   for (let iy = 0; iy < gny; iy++) {
+    yield
     for (let ix = 0; ix < gnx; ix++) {
       const proj = track.project(gx0 + ix * CELL, gy0 + iy * CELL)
       dGrid[iy * gnx + ix] = Math.abs(proj.lateral) - proj.half

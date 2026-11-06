@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { describe, it, expect } from 'vitest'
 import data from '../../public/tracks/power_8.json'
+import silverstone from '../../public/tracks/silverstone-gp.json'
 import { Track, type TrackData } from '../core/track'
 import { initialState } from '../core/car'
 import { ContactSuspension, settle } from './contactSuspension'
@@ -23,6 +24,21 @@ const model = (): CarModel => {
   return {root,wheels,updateSuspension:()=>{}} as unknown as CarModel
 }
 describe('surface contact suspension',()=>{
+  it('keeps the authored Silverstone kerb continuous across start/finish on its own side', () => {
+    const gp = new Track(silverstone as unknown as TrackData)
+    const gpSurface = new TrackSurface(gp)
+    const height = (s: number, side: number) => {
+      const pose = gp.poseAt(s)
+      const offset = side * (gp.halfAt(s) + 0.6)
+      return gpSurface.heightAt(pose.x - Math.sin(pose.yaw) * offset, pose.y + Math.cos(pose.yaw) * offset)
+    }
+    for (const station of [gp.length - 1, 1, 30]) {
+      expect(height(station, 1)).toBeGreaterThan(0.03)
+      expect(height(station, -1)).toBe(0)
+    }
+    expect(height(150, 1)).toBe(0)
+  })
+
   it('samples the same triangles as the rendered kerb, on both sides',()=>{
     for(const side of [-1,1]) {
       const a=kerbPoint(track,index,begin,side,1/3,6/16)

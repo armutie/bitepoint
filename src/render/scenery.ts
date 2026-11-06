@@ -1,3 +1,4 @@
+import { finishBuild } from './buildScheduler'
 /**
  * The circuit's dressing: start/finish complex, grandstands, pit building,
  * brake boards, trees.
@@ -24,8 +25,8 @@ import {
 import type { Track } from '../core/track'
 import { PALETTE } from './palette'
 import type { Terrain } from './terrain'
-import { buildDriverEnvironment } from './driverEnvironment'
-import { buildMainStraight } from './mainStraight'
+import { buildDriverEnvironmentSteps } from './driverEnvironment'
+import { buildMainStraightSteps } from './mainStraight'
 
 /*
  * Where the wall is, for everything placed against it.
@@ -130,11 +131,14 @@ function box(
   quad(s, corner(hw, -hd, y1), corner(hw, hd, y1), corner(-hw, hd, y1), corner(-hw, -hd, y1), color)
 }
 
-export function buildScenery(track: Track, terrain: Terrain): Scenery {
+export function buildScenery(track: Track, terrain: Terrain): Scenery { return finishBuild(buildScenerySteps(track, terrain)) }
+export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<void, Scenery> {
   const root = new THREE.Group()
   const decorativeRoot = new THREE.Group()
   root.add(decorativeRoot)
   const disposables: { dispose(): void }[] = []
+  let complete = false
+  try {
   const rand = lcg(track.seed * 2654435761)
 
   // These few large forms are part of learning the circuit, not decoration:
@@ -146,13 +150,18 @@ export function buildScenery(track: Track, terrain: Terrain): Scenery {
 
   buildGantry(track, landmarks)
   buildGridBoxes(track, overlay)
+  yield
   buildBrakeBoards(track, landmarks)
+  yield
   buildSponsorBoards(track, solid, rand)
+  yield
   buildFloodlights(track, terrain, solid)
+  yield
   buildBridge(track, landmarks)
-  const mainStraight = buildMainStraight(track, terrain)
+  const mainStraight = yield* buildMainStraightSteps(track, terrain)
   root.add(mainStraight.root)
   decorativeRoot.add(mainStraight.detailRoot)
+  yield
   disposables.push(mainStraight)
   if (!mainStraight.replacesStart) buildTower(track, landmarks)
   // Keep the original skyline, then add only distinct forward-facing straight views.
@@ -196,6 +205,7 @@ export function buildScenery(track: Track, terrain: Terrain): Scenery {
     buildStand(track, solid, rand, apex.s, -Math.sign(apex.k) || 1, 24, 8)
   }
 
+  yield
   const solidMat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })
   // DoubleSide for the same winding reason as world.ts's overlay: painted
   // marks built from mirrored offsets flip their winding on one side.
@@ -233,17 +243,14 @@ export function buildScenery(track: Track, terrain: Terrain): Scenery {
     for (const m of hedges) decorativeRoot.add(m)
     for (const m of buildTrees(track, terrain, rand, disposables, treeSpots)) decorativeRoot.add(m)
   }
-  const driverEnvironment = buildDriverEnvironment(track, terrain)
+  yield
+  const driverEnvironment = yield* buildDriverEnvironmentSteps(track, terrain)
   decorativeRoot.add(driverEnvironment.root)
   disposables.push(driverEnvironment)
 
-  return {
-    root,
-    decorativeRoot,
-    dispose(): void {
-      for (const d of disposables) d.dispose()
-    },
-  }
+  complete = true
+  return { root, decorativeRoot, dispose(): void { for (const d of disposables) d.dispose() } }
+  } finally { if (!complete) for (const d of disposables) d.dispose() }
 }
 
 /**

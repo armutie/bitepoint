@@ -1,4 +1,5 @@
 import { buildFieldCar } from './fieldCar'
+import { PLAYER_LIVERY } from './liveries'
 /** Smooth formula-car bodywork with separate wheel, steering and suspension rigs.
  * Authored nose-along +X; axle positions and width follow the simulation dimensions.
  * Near detail is used for the player; the field shares the silhouette at fewer subdivisions.
@@ -6,7 +7,7 @@ import { buildFieldCar } from './fieldCar'
 import * as THREE from 'three'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 
-import { shell, surfaceTexture, teamDecal, haloSurface } from './carSurface'
+import { shell, surfaceTexture, teamDecal, haloSurface, cockpitPaintAtlas, paintPanelUV } from './carSurface'
 
 import type { CarParams } from '../core/carParams'
 
@@ -67,7 +68,7 @@ export interface CarSkin {
 }
 
 export const SKINS = {
-  player: { body: 0x174c91, accent: 0xf1eee4 },
+  player: PLAYER_LIVERY,
   ghost: { body: 0x8892a0, accent: 0xc9d2dd },
 } satisfies Record<string, CarSkin>
 
@@ -75,7 +76,7 @@ export const SKINS = {
  * Half-section of a tyre, for revolving into one.
  *
  * A cylinder has a 90-degree corner where the tread meets the sidewall, and
- * nothing on a car catches a hard highlight along a straight edge like that —
+ * nothing on a car catches a hard highlight along a straight edge like that â€”
  * it is the single strongest tell that a wheel is two primitives rather than a
  * moulded object. This walks the shoulder round a quarter-circle instead.
  *
@@ -112,14 +113,14 @@ function tyreProfile(r: number, halfW: number, shoulder: number): THREE.Vector2[
  *
  * The car is some hundred boxes, cylinders and lathes, and each was its own
  * mesh: a draw call in the colour pass, another in the shadow pass, a matrix
- * compose and a frustum test every frame — times twelve cars, counting the
+ * compose and a frustum test every frame â€” times twelve cars, counting the
  * menu's attract field. None of it moves relative to its parent after
  * assembly, so once built the parts can be baked together; only material
  * boundaries have to survive, because materials are what the ghost fade and
  * the wheel-blur write to at runtime.
  *
  * Groups (the wheel pivots under the root, the spin group under each pivot)
- * are left alone — they are exactly the transforms that DO move.
+ * are left alone â€” they are exactly the transforms that DO move.
  */
 function mergeStatic(
   parent: THREE.Object3D,
@@ -179,16 +180,30 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
 
   const carbonTexture = surfaceTexture('carbon')
   const rubberTexture = surfaceTexture('rubber')
-  disposables.push(carbonTexture, rubberTexture)
-  const bodyMat = new THREE.MeshPhysicalMaterial({ color: skin.body, roughness: 0.29,
-    metalness: 0, clearcoat: 1, clearcoatRoughness: 0.18,
-    transparent: ghost, opacity: ghost ? 0.4 : 1, depthWrite: !ghost })
-  materials.push(bodyMat); disposables.push(bodyMat)
-  const accentMat = mat(skin.accent, { roughness: 0.3 })
-  const darkMat = mat(0x17191d, { roughness: 0.7, metalness: 0 })
+  const paintTexture = surfaceTexture('paint')
+  const fabricTexture = surfaceTexture('fabric')
+  const cockpitTexture = cockpitPaintAtlas(skin.body, skin.accent)
+  disposables.push(carbonTexture, rubberTexture, paintTexture, fabricTexture, cockpitTexture)
+  const paint = (color: number, map?: THREE.Texture) => {
+    const m = new THREE.MeshPhysicalMaterial({ color, map: map ?? null,
+      roughness: 0.46, roughnessMap: paintTexture, metalness: 0,
+      clearcoat: 0.42, clearcoatRoughness: 0.32,
+      bumpMap: paintTexture, bumpScale: 0.00008,
+      transparent: ghost, opacity: ghost ? 0.4 : 1, depthWrite: !ghost })
+    materials.push(m); disposables.push(m); return m
+  }
+  const bodyMat = paint(skin.body)
+  const accentMat = paint(skin.accent)
+  const cockpitMat = paint(0xffffff, cockpitTexture)
+  const darkMat = mat(0x17191d, { roughness: 0.88, metalness: 0, bumpMap: fabricTexture, bumpScale: 0.0003 })
   const tyreMat = mat(0x24262a, { roughness: 0.76, metalness: 0, roughnessMap: rubberTexture, bumpMap: rubberTexture, bumpScale: 0.00035 })
   const rimMat = mat(0x3a3e46, { roughness: 0.5, metalness: 0.35 })
-  const carbonMat = mat(0x30343b, { roughness: 0.43, metalness: 0, map: carbonTexture, bumpMap: carbonTexture, bumpScale: 0.00025 })
+  const carbonMat = new THREE.MeshPhysicalMaterial({ color: 0x383e46,
+    roughness: 0.44, metalness: 0, map: carbonTexture,
+    clearcoat: 0.25, clearcoatRoughness: 0.38,
+    bumpMap: carbonTexture, bumpScale: 0.00035,
+    transparent: ghost, opacity: ghost ? 0.4 : 1, depthWrite: !ghost })
+  materials.push(carbonMat); disposables.push(carbonMat)
 
   const halfW = p.width / 2
   const wheelR = p.wheelRadius
@@ -300,20 +315,21 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   // Continuous skins replace stacked boxes. The cockpit stays open between the shoulders.
   add(bodyShell([[-0.85,0.30,0.15,0.25],[-0.25,0.32,0.17,0.29],[0.45,0.36,0.17,0.25],[0.85,0.40,0.14,0.18]]), bodyMat, 0,0)
   for (const side of [-1, 1]) {
-    add(bodyShell([[-0.70,0.50,0.13,0.12],[-0.38,0.58,0.10,0.12],[0.12,0.57,0.10,0.105],[0.53,0.50,0.12,0.10]]), accentMat,0,0,side*0.29)
-    add(bodyShell([[-1.62,0.23,0.06,0.075],[-1.12,0.33,0.12,0.16],[-0.55,0.38,0.19,0.205],[0.05,0.41,0.16,0.19],[0.37,0.40,0.075,0.14]]),bodyMat,0,0,side*0.50)
+    const shoulder = bodyShell([[-0.70,0.50,0.13,0.12],[-0.38,0.58,0.10,0.12],[0.12,0.57,0.10,0.105],[0.53,0.50,0.12,0.10]])
+    add(paintPanelUV(shoulder,'shoulder',side<0), cockpitMat,0,0,side*0.29)
+    add(paintPanelUV(bodyShell([[-1.62,0.23,0.06,0.075],[-1.12,0.33,0.12,0.16],[-0.55,0.38,0.19,0.205],[0.05,0.41,0.16,0.19],[0.37,0.40,0.075,0.14]]),'sidepod',side<0),cockpitMat,0,0,side*0.50)
     const inlet = add(new THREE.SphereGeometry(1,24,12),darkMat,0.33,0.42,side*0.50)
     inlet.scale.set(0.018,0.059,0.128)
     // A narrow painted shoulder stripe follows the body without a floating decal plane.
-    add(bodyShell([[-1.25,0.452,0.008,0.025],[-0.55,0.578,0.008,0.028],[0.05,0.568,0.008,0.024],[0.28,0.512,0.006,0.018]],24),accentMat,0,0,side*0.52)
+    add(bodyShell([[-1.25,0.452,0.008,0.025],[-0.55,0.578,0.008,0.028],[0.05,0.568,0.008,0.024],[0.28,0.512,0.006,0.018]],24),bodyMat,0,0,side*0.52)
   }
-  add(bodyShell([[-2.20,0.35,0.09,0.055],[-1.5,0.42,0.14,0.12],[-0.88,0.57,0.24,0.22],[-0.65,0.67,0.25,0.20]]),bodyMat,0,0)
-  const intake = add(new THREE.SphereGeometry(1,24,16),bodyMat,-0.64,0.96)
-  intake.scale.set(0.16,0.17,0.13)
+  add(paintPanelUV(bodyShell([[-2.20,0.35,0.09,0.055],[-1.5,0.42,0.14,0.12],[-0.88,0.57,0.24,0.22],[-0.65,0.67,0.25,0.20]]),'engine'),cockpitMat,0,0)
+  add(bodyShell([[-0.85,0.91,0.13,0.085],[-0.72,0.98,0.12,0.11],[-0.52,0.98,0.11,0.095]],20),accentMat,0,0)
   const mouth = add(new THREE.CircleGeometry(0.08,24),darkMat,-0.485,0.995)
   mouth.rotation.y=Math.PI/2
-  add(bodyShell([[0.35,0.49,0.17,0.30],[0.72,0.48,0.17,0.28],[1.20,0.44,0.13,0.23],[1.75,0.37,0.09,0.15],[2.30,0.27,0.06,0.105],[2.65,0.235,0.04,0.10]]),accentMat,0,0)
-  add(bodyShell([[0.38,0.662,0.004,0.045],[0.72,0.652,0.004,0.045],[1.20,0.572,0.004,0.04],[1.75,0.462,0.004,0.03],[2.30,0.332,0.003,0.027],[2.60,0.282,0.003,0.025]],32),bodyMat,0,0)
+  const nose = bodyShell([[0.35,0.49,0.17,0.30],[0.72,0.48,0.17,0.28],[1.20,0.44,0.13,0.23],[1.75,0.37,0.09,0.15],[2.30,0.27,0.06,0.105],[2.65,0.235,0.04,0.10]])
+  add(paintPanelUV(nose,'nose'),cockpitMat,0,0)
+  // The nose stripe is baked into its paint, avoiding a raised strip over the finish.
 
   // --- front wing -----------------------------------------------------------
   const wingX = p.lf + 0.75
@@ -326,18 +342,18 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   // --- rear wing ------------------------------------------------------------
   const rearX = -p.lr - 0.55
   // A single central swan-neck pylon from the tail cover up to the main plane,
-  // replacing the old full-width support slab — from behind, daylight between
+  // replacing the old full-width support slab â€” from behind, daylight between
   // the main plane and the beam wing is most of what makes it read as a wing
   // assembly rather than a solid block.
   add(new THREE.BoxGeometry(0.06, 0.44, 0.05), carbonMat, rearX + 0.05, 0.72)
   // The whole assembly ends INBOARD of the rear tyres, as the real one does.
-  // The endplates used to stand at ±0.70 m — over the middle of the tyres —
+  // The endplates used to stand at Â±0.70 m â€” over the middle of the tyres â€”
   // with planes 0.36 m short of them, so from behind the wing read as a narrow
   // slab floating between two unrelated fences, and once the planes were
   // widened to meet them the wing became a full-width shelf over the wheels.
   // Both wrong for the same reason: the fences were in the wrong place.
-  add(new THREE.BoxGeometry(0.46, 0.05, halfW * 1.16), accentMat, rearX, 0.95)
-  add(new THREE.BoxGeometry(0.4, 0.04, halfW * 1.16), accentMat, rearX + 0.06, 0.83)
+  add(new THREE.BoxGeometry(0.46, 0.05, halfW * 1.16), carbonMat, rearX, 0.95)
+  add(new THREE.BoxGeometry(0.4, 0.04, halfW * 1.16), carbonMat, rearX + 0.06, 0.83)
   // DRS actuator pod, the little hump on the main plane's centreline.
   add(new THREE.BoxGeometry(0.14, 0.05, 0.08), darkMat, rearX, 0.99)
   // Beam wing: two low elements between the endplates' lower edges.
@@ -352,7 +368,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   // Exhaust: a dark pipe poking out of the very end of the tail cover.
   const exhaust = add(new THREE.CylinderGeometry(0.042, 0.042, 0.16, 10), darkMat, -2.28, 0.47)
   exhaust.rotation.z = Math.PI / 2
-  // Rain light on the tail's aft face. Emissive enough to catch the bloom —
+  // Rain light on the tail's aft face. Emissive enough to catch the bloom â€”
   // from the chase cam and the mirror-check it is the car's tail light, the
   // single most recognisable thing about an F1 car from behind.
   const rainMat = mat(0xff2020, {
@@ -384,7 +400,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     const mount=add(new THREE.SphereGeometry(1,20,12),bodyMat,-0.59,0.70,side*0.39)
     mount.scale.set(0.11,0.055,0.095)
   }
-  const helmetMat = mat(0xe9ac28,{roughness:0.28,metalness:0})
+  const helmetMat = mat(0xe9ac28,{roughness:0.36,metalness:0,roughnessMap:paintTexture,bumpMap:paintTexture,bumpScale:0.00008})
   const helmet = add(new THREE.SphereGeometry(0.18,40,28),helmetMat,-0.13,0.72)
   helmet.scale.set(1.08,1.05,0.96)
   const visorMat = mat(0x192b38,{roughness:0.16,metalness:0.65})
@@ -404,7 +420,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   const rawPlate = new THREE.ExtrudeGeometry(outline,{depth:0.026,bevelEnabled:detailed,bevelSize:0.005,bevelThickness:0.005,bevelSegments:2,steps:1})
   rawPlate.rotateY(Math.PI/2)
   const plate=mergeVertices(rawPlate);rawPlate.dispose();add(plate,carbonMat,-0.018,0,0,cockpitWheel)
-  const gloveMat=detailed?mat(0x334b68,{roughness:0.86,metalness:0}):darkMat
+  const gloveMat=detailed?mat(0x9e292b,{roughness:0.91,metalness:0,bumpMap:fabricTexture,bumpScale:0.00025}):darkMat
   const buttonMats=detailed?[mat(0xc4b761,{roughness:0.58,metalness:0}),mat(0x9d554a,{roughness:0.58,metalness:0}),mat(0x71999d,{roughness:0.58,metalness:0})]:[accentMat,accentMat,accentMat]
   for(const side of [-1,1]) {
     const grip=add(new THREE.SphereGeometry(1,20,12),darkMat,0.001,-0.007,side*0.155,cockpitWheel);grip.scale.set(0.035,0.083,0.029)
@@ -454,15 +470,14 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     glass.scale.set(0.007,0.033,0.102)
     tube([[0.30,0.55,side*0.36],[0.31,0.58,side*0.52],[0.30,0.69,side*0.65]],0.012,carbonMat)
   }
-  const labelTexture=teamDecal('BITE POINT')
+  const labelTexture=teamDecal('Bitdefender','RICHARD MILLE')
   if(labelTexture) {
     disposables.push(labelTexture)
     const labelMat=mat(0xffffff,{map:labelTexture,transparent:true,alphaTest:0.1,roughness:0.5,metalness:0,polygonOffset:true,polygonOffsetFactor:-2})
-    add(haloSurface(haloPoints,0.10,0.29,true),labelMat,0,0)
-    add(haloSurface(haloPoints,0.71,0.90,true),labelMat,0,0)
-    for(const side of [-1,1]) {
-      const label=add(new THREE.PlaneGeometry(0.34,0.085),labelMat,-0.04,0.69,side*0.31)
-      label.rotation.x=-Math.PI/2; label.rotation.z=-Math.PI/2
+    for (const [from,to,offset] of [[0.10,0.29,0.5],[0.71,0.90,0]] as const) {
+      const g=haloSurface(haloPoints,from,to,true),uv=g.getAttribute('uv')
+      for(let i=0;i<uv.count;i++)uv.setY(i,offset+uv.getY(i)*0.5)
+      add(g,labelMat,0,0)
     }
   }
 
@@ -480,7 +495,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
    *
    * These are then a shade wider than that scales to. Straight proportion off
    * the real car would give 0.28 and 0.37 on this 0.66 m wheel, and against an
-   * onboard reference shot it looked narrow — because the halo camera sees the
+   * onboard reference shot it looked narrow â€” because the halo camera sees the
    * fronts from above and inboard, foreshortening the tread. Set by eye at the
    * view the game is actually played from, which is the right judge.
    */
@@ -499,13 +514,13 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
    * proud. A torus tube stood off the sidewall and caught the light like a
    * fitting bolted to the wheel; a flat ring sitting on the rubber is what the
    * real marking is. Being a perfect circle it is rotationally symmetric, so it
-   * says nothing about rotation and — the point — cannot flicker at any speed,
+   * says nothing about rotation and â€” the point â€” cannot flicker at any speed,
    * which is why it is the one part that gets to be a colour.
    *
    * **Tread patches**, on the running surface rather than the sidewall.
    *
    * These were radial bars on the sidewall first, and from any angle where the
-   * wheel was not edge-on they read as spikes sticking out of the rubber —
+   * wheel was not edge-on they read as spikes sticking out of the rubber â€”
    * because that is geometrically what they were: boxes pointing outward at
    * 0.88R, catching light along their length. A tyre has no such feature.
    *
@@ -513,7 +528,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
    * slightly lighter than the rubber around them, wrapped ON the surface. So
    * these are long, narrow, tapered streaks a shade off the tyre colour, laid
    * along the running surface. They cannot read as a fitting because
-   * they follow the tyre's own curve, and they cross the contact patch — which
+   * they follow the tyre's own curve, and they cross the contact patch â€” which
    * is where the eye is already looking when it wants to know what the wheel is
    * doing.
    *
@@ -534,16 +549,16 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
 
   const spokeGeom = new THREE.BoxGeometry(wheelR * 1.06, 0.045, 0.022)
   // A thin stripe, not a painted panel. The sidewall runs from the rim at
-  // 0.58R out to the tread at 1.0R, and the first version covered 0.70–0.88 of
-  // that — over 40% of the visible rubber, which is a wheel with a yellow face
-  // rather than a tyre with a marking on it. 0.80–0.865 is nearer a fifth.
+  // 0.58R out to the tread at 1.0R, and the first version covered 0.70â€“0.88 of
+  // that â€” over 40% of the visible rubber, which is a wheel with a yellow face
+  // rather than a tyre with a marking on it. 0.80â€“0.865 is nearer a fifth.
   const bandGeom = new THREE.RingGeometry(wheelR * 0.8, wheelR * 0.865, 40)
-  // A long, thin, uneven STREAK of tread — not a patch.
+  // A long, thin, uneven STREAK of tread â€” not a patch.
   //
   // The arc segments this replaces were uniform rectangles: constant width,
   // hard parallel edges, three identical copies. Wrapped on the tyre they read
   // as tape rather than rubber, because nothing about a worn tyre is that
-  // regular. A streak is the opposite shape — long around the circumference,
+  // regular. A streak is the opposite shape â€” long around the circumference,
   // narrow across the tread, tapered to nothing at both ends, and with edges
   // that wander.
   //
@@ -558,7 +573,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     for (let i = 0; i <= STEPS; i++) {
       const t = i / STEPS
       const a = t * arc
-      // Taper to a point at both ends — the reason it reads as a streak and
+      // Taper to a point at both ends â€” the reason it reads as a streak and
       // not a bar. The 0.65 power keeps it slim through the middle instead of
       // bulging into a leaf shape.
       const taper = Math.sin(Math.PI * t) ** 0.65
@@ -585,7 +600,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
 
   // ONE streak, on the RIGHT-hand tyres only.
   //
-  // Two per wheel was one too many — they were never both out of shot, so the
+  // Two per wheel was one too many â€” they were never both out of shot, so the
   // eye read them as a repeating feature rather than as damage. One is a mark
   // on a tyre. And putting it on one side of the car only is the same argument
   // at the next scale up: four identical worn tyres is a texture, one worn tyre
@@ -612,9 +627,9 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   })
   disposables.push(spokeMat)
 
-  // Pirelli medium, taken a long way down from signal-yellow. Under the bloom
+  // Muted yellow sidewall marking, restored at the user's request. Under the bloom
   // this scene runs, anything near #FFF200 stops being rubber and becomes a
-  // light source. Flat-lit too — no metalness, high roughness — because paint
+  // light source. Flat-lit too â€” no metalness, high roughness â€” because paint
   // on a tyre should not have a highlight travelling round it.
   const bandMat = mat(0x9c8829, {
     roughness: 0.9,
@@ -622,7 +637,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     side: THREE.DoubleSide,
   })
   // Two steps off the tyre's own 0x141619 rather than four. These only have to
-  // be findable when you go looking for them — a mark you notice unprompted on
+  // be findable when you go looking for them â€” a mark you notice unprompted on
   // a tyre is a mark that has stopped being tyre.
   // Barely off the rubber's own 0x141619. A tread patch that reads as a colour
   // is a sticker; this one only shows as the surface catching light slightly
@@ -686,13 +701,13 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
       }
 
       // Tread patches wrap the running surface, so unlike the band they belong
-      // to the wheel rather than to a face of it — placed once, not per side.
+      // to the wheel rather than to a face of it â€” placed once, not per side.
       // Right-hand side only: +z is the car's right, since the renderer places
       // the car at (x, 0, -y) against a sim whose +y is left.
       if (side === 1) {
         for (const streak of scuffGeoms.filter((g) => g.axle === axle)) {
           const scuff = new THREE.Mesh(streak.geom, scuffMat)
-          // Built in the wheel's own frame — circle in XY, axle along Z — so
+          // Built in the wheel's own frame â€” circle in XY, axle along Z â€” so
           // the only placement left is where round the rim it starts, and how
           // far across the tread it sits. Toward the car's centreline, and
           // along the spin axis so rotating the wheel does not move it.
@@ -702,7 +717,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
         }
       }
 
-      // Spokes, outboard face only — as on the real thing, where the inboard
+      // Spokes, outboard face only â€” as on the real thing, where the inboard
       // side of the wheel is brake duct rather than cover.
       for (let k = 0; k < SPOKES; k++) {
         const spoke = new THREE.Mesh(spokeGeom, spokeMat)
@@ -785,8 +800,8 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   }
 
   // Bake the assembly down: the body to one mesh per material and each wheel's
-  // rolling parts likewise (tyre, rim, band, and — kept apart by their fading
-  // materials — spokes and scuffs). The live suspension links deliberately
+  // rolling parts likewise (tyre, rim, band, and â€” kept apart by their fading
+  // materials â€” spokes and scuffs). The live suspension links deliberately
   // stay separate because their endpoints change with the moving upright.
   mergeStatic(cockpitWheel, disposables, !ghost)
   mergeStatic(root, disposables, !ghost)

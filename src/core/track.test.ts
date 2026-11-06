@@ -86,12 +86,12 @@ describe('sector timing lines', () => {
     expect(track.sectorBoundaries[1]).toBeCloseTo((track.length * 2) / 3, 9)
   })
 
-  it('uses Silverstone\'s authored FIA sector positions', () => {
-    const track = loadBaked('silverstone')
-    expect(track.sectorBoundaries).toEqual([1799.6, 4247.2])
-    expect(track.sectorAt(1799.5)).toBe(0)
-    expect(track.sectorAt(1799.6)).toBe(1)
-    expect(track.sectorAt(4247.1)).toBe(1)
-    expect(track.sectorAt(4247.2)).toBe(2)
+  it('uses the remapped timing lines on Silverstone GP', () => {
+    const track = loadBaked('silverstone-gp')
+    expect(track.sectorBoundaries).toEqual([1825.377, 4257.502])
+    expect(track.sectorAt(1825.277)).toBe(0)
+    expect(track.sectorAt(1825.377)).toBe(1)
+    expect(track.sectorAt(4257.402)).toBe(1)
+    expect(track.sectorAt(4257.502)).toBe(2)
   })
 })

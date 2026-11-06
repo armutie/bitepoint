@@ -6,7 +6,7 @@
   "description": "A focused browser racing simulation built for keyboard and mouse.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && npm run api:typecheck && npm run api:build",
+    "build": "tsc --noEmit && vite build && npm run api:typecheck && npm run api:build && npm run multiplayer:build",
     "api:dev": "tsx watch server/main.ts",
     "api:typecheck": "tsc --noEmit -p tsconfig.api.json",
     "api:build": "tsup server/main.ts --format esm --target node22 --out-dir dist-api --clean",
@@ -14,7 +14,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "multiplayer:dev": "tsx watch server/multiplayer.ts",
+    "multiplayer:build": "tsup server/multiplayer.ts --format esm --target node22 --out-dir dist-multiplayer --clean",
+    "multiplayer:start": "node dist-multiplayer/multiplayer.js"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",

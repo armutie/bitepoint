@@ -1,12 +1,15 @@
+import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 
 /** Partition immutable world-space triangles while preserving every authored vertex attribute. */
-export function chunkGeometry(source: THREE.BufferGeometry, metres = 64): THREE.BufferGeometry[] {
+export function chunkGeometry(source: THREE.BufferGeometry, metres = 64): THREE.BufferGeometry[] { return finishBuild(chunkGeometrySteps(source,metres)) }
+export function* chunkGeometrySteps(source: THREE.BufferGeometry, metres = 64): Generator<void, THREE.BufferGeometry[]> {
   const position = source.getAttribute('position'), index = source.index
   const count = index?.count ?? position.count
   const attributes = Object.entries(source.attributes)
   const chunks = new Map<string, Map<string, number[]>>()
   for (let triangle = 0; triangle < count; triangle += 3) {
+    if (triangle % 1536 === 0) yield
     const vertices = [0,1,2].map(v => index ? index.getX(triangle+v) : triangle+v)
     const x = vertices.reduce((sum,v)=>sum+position.getX(v),0)/3
     const z = vertices.reduce((sum,v)=>sum+position.getZ(v),0)/3
@@ -18,9 +21,12 @@ export function chunkGeometry(source: THREE.BufferGeometry, metres = 64): THREE.
       for (const vertex of vertices) for(let component=0;component<attribute.itemSize;component++) output.push(attribute.getComponent(vertex,component))
     }
   }
-  return [...chunks.values()].map(chunk => {
+  const output: THREE.BufferGeometry[] = []
+  for (const chunk of chunks.values()) {
+    yield
     const geometry = new THREE.BufferGeometry()
     for (const [name,attribute] of attributes) geometry.setAttribute(name,new THREE.Float32BufferAttribute(chunk.get(name)!,attribute.itemSize))
-    geometry.computeBoundingBox(); geometry.computeBoundingSphere(); return geometry
-  })
+    geometry.computeBoundingBox(); geometry.computeBoundingSphere(); output.push(geometry)
+  }
+  return output
 }

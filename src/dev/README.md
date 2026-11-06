@@ -47,3 +47,12 @@ did not ask for. Coast down through the target instead. It cost an hour once.
 **Do not reconstruct position by projecting a replay onto the centreline.** It is
 ambiguous at a hairpin — it had a human taking a 20 m corner at 216 km/h, which
 is about thirty g. The recorded trace carries distance directly; use it.
+
+## Overtaking measurements
+
+`overtakeBench.ts` runs two active AI cars through the real physics and traffic planner, with controlled pace differences and rolling starts. It measures actual solo lap advantage, sustained full-clearance passes, waiting time, contact and off-track time. See `docs/overtaking-baseline.md` for the baseline results and limits.
+
+Run `node node_modules/vite-node/vite-node.mjs src/dev/overtakeBench.ts power_8 results.json duels`.
+Additional suites: `threshold`, `bands` (current difficulty settings), `diagnostics` (fixed-line leader and traces), `field` (normal/reversed grids), `repeat` (determinism).
+
+The smart-pair implementation and its measured gains/limits are recorded in docs/smart-overtaking.md. overtakeProfile.ts compares planner CPU cost on identical traffic snapshots.

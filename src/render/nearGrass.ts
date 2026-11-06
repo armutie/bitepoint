@@ -1,18 +1,21 @@
+import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 import type { Track } from '../core/track'
 import type { Terrain } from './terrain'
+import { kerbSpans } from './trackSurface'
 
 function randomSource(seed: number): () => number {
   let state = seed >>> 0
   return () => { state = (Math.imul(state, 1664525) + 1013904223) >>> 0; return state / 0xffffffff }
 }
 
-function turfTexture(): THREE.CanvasTexture {
+function* turfTexture(): Generator<void, THREE.CanvasTexture> {
   const size = 512, canvas = document.createElement('canvas')
   canvas.width = size; canvas.height = size
   const ctx = canvas.getContext('2d')!, rand = randomSource(0x863bef21)
   const image = ctx.createImageData(size, size)
   for (let i = 0; i < size * size; i++) {
+    if (i % 8192 === 0) yield
     const grain = (rand() - 0.5) * 22
     image.data[i * 4] = 58 + grain
     image.data[i * 4 + 1] = 77 + grain
@@ -22,6 +25,7 @@ function turfTexture(): THREE.CanvasTexture {
   ctx.putImageData(image, 0, 0)
   // Fine overlapping cut blades, with a few dry stems, rather than lawn stripes.
   for (let i = 0; i < 16000; i++) {
+    if (i % 128 === 0) yield
     const x = rand() * size, y = rand() * size
     const length = 4 + rand() * 18, lean = (rand() - 0.5) * 10
     const dry = rand() < 0.08
@@ -45,10 +49,11 @@ function shadeAt(x: number, y: number): number {
 }
 
 /** Detailed verge surface and short tufts, restricted to the corridor inside the walls. */
-export function buildNearGrass(track: Track, terrain: Terrain): { root: THREE.Group; dispose(): void } {
+export function buildNearGrass(track: Track, terrain: Terrain): { root: THREE.Group; dispose(): void } { return finishBuild(buildNearGrassSteps(track, terrain)) }
+export function* buildNearGrassSteps(track: Track, terrain: Terrain): Generator<void, { root: THREE.Group; dispose(): void }> {
   const root = new THREE.Group(); root.name = 'trackside-grass'
   const owned: { dispose(): void }[] = []
-  const texture = turfTexture()
+  const texture = yield* turfTexture()
   const groundMat = new THREE.MeshStandardMaterial({ map: texture, vertexColors: true, roughness: 1, metalness: 0, envMapIntensity: 0.2, side: THREE.DoubleSide })
   groundMat.onBeforeCompile = shader => {
     shader.vertexShader = 'varying vec2 turfWorld;\n' + shader.vertexShader
@@ -83,11 +88,10 @@ export function buildNearGrass(track: Track, terrain: Terrain): { root: THREE.Gr
   const positions: number[] = [], colors: number[] = [], uvs: number[] = []
   const rand = randomSource(track.seed ^ 0x7561ab)
   const green = new THREE.Color(), bladeGreen = new THREE.Color()
-  const point = (i: number, d: number) => {
-    const j = (i + 1) % track.n, x = track.cx[i]!, y = track.cy[i]!
-    const dx = track.cx[j]! - x, dy = track.cy[j]! - y, len = Math.hypot(dx, dy)
-    return { x: x - dy / len * d, y: y + dx / len * d }
-  }
+  const point = (i: number, d: number) => ({
+    x: track.cx[i]! + track.edgeNormalX(i) * d,
+    y: track.cy[i]! + track.edgeNormalY(i) * d,
+  })
   const addGround = (p: { x: number; y: number }) => {
     positions.push(p.x, terrain.height(p.x, p.y) - 0.018, -p.y)
     const shade = shadeAt(p.x, p.y)
@@ -106,14 +110,20 @@ export function buildNearGrass(track: Track, terrain: Terrain): { root: THREE.Gr
     root.add(mesh); owned.push(geom)
     bladePositions = []; bladeColors = []; bases = []; chunkLength = 0
   }
+  let station = 0
   for (let i = 0; i < track.n; i++) {
+    if (i % 12 === 0) yield
     const j = (i + 1) % track.n, len = track.segLenAt(i)
+    const spans = track.kerbs ? kerbSpans(track, i, station) : []
+    station += len
     for (const side of [-1, 1]) {
       const gapI = side > 0 ? track.barrierGapLeft[i]! : track.barrierGapRight[i]!
       const gapJ = side > 0 ? track.barrierGapLeft[j]! : track.barrierGapRight[j]!
       // Keep blades clear of painted edges and corner kerbs.
-      const insetI = track.curvature[i]! > 0.0045 ? 1.22 : 0.25
-      const insetJ = track.curvature[j]! > 0.0045 ? 1.22 : 0.25
+      const authoredInset = Math.max(0.25, ...spans.filter(span => span.side === side)
+        .map(span => (span.run?.width ?? 0) + 0.12))
+      const insetI = track.kerbs ? authoredInset : track.curvature[i]! > 0.0045 ? 1.22 : 0.25
+      const insetJ = track.kerbs ? authoredInset : track.curvature[j]! > 0.0045 ? 1.22 : 0.25
       const a = point(i, side * (track.halfRing[i]! + insetI))
       const b = point(j, side * (track.halfRing[j]! + insetJ))
       const c = point(j, side * (track.halfRing[j]! + gapJ - 0.12))

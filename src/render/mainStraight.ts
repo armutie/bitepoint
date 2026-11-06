@@ -1,3 +1,4 @@
+import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { outsideWall, pointAt, clearOfCircuit } from '../core/placement'
@@ -46,7 +47,8 @@ function fenceTexture(): THREE.CanvasTexture {
 }
 
 /** Authored for the driver: a continuous, layered start/finish corridor. */
-export function buildMainStraight(track: Track, terrain: Terrain): { root: THREE.Group; detailRoot: THREE.Group; replacesStart: boolean; dispose(): void } {
+export function buildMainStraight(track: Track, terrain: Terrain): { root: THREE.Group; detailRoot: THREE.Group; replacesStart: boolean; dispose(): void } {return finishBuild(buildMainStraightSteps(track,terrain))}
+export function* buildMainStraightSteps(track: Track, terrain: Terrain): Generator<void, { root: THREE.Group; detailRoot: THREE.Group; replacesStart: boolean; dispose(): void }> {
   const root = new THREE.Group(); root.name = 'main-straight-complex'
   const detailRoot = new THREE.Group(); detailRoot.name = 'main-straight-detail'
   const plan = planMainStraight(track, terrain), resources: Disposable[] = []
@@ -120,6 +122,7 @@ export function buildMainStraight(track: Track, terrain: Terrain): { root: THREE
   }
   const pitSites=plan.sites.filter(s=>s.kind==='pit')
   for (const site of plan.sites) {
+    yield
     setSite(site); const L = site.length, D = site.depth, side = site.side, front = side * D / 2
     if (site.kind === 'pit') {
       // The footprint contains a working lane in front of the garages, not just an office facade.
@@ -257,6 +260,7 @@ export function buildMainStraight(track: Track, terrain: Terrain): { root: THREE
   let triangleCount = 0
   const detailGroups=new Map<number,THREE.Group>()
   for (const [key, parts] of batches) {
+    yield
     const [sectionKey,category]=key.split(':'),geometry=mergeGeometries(parts)!
     for(const part of parts)part.dispose()
     geometry.computeBoundingSphere();resources.push(geometry)
@@ -269,6 +273,7 @@ export function buildMainStraight(track: Track, terrain: Terrain): { root: THREE
     triangleCount+=(geometry.index?.count??geometry.getAttribute('position').count)/3
   }
   for(const [section,parts] of shadows){
+    yield
     const geometry=mergeGeometries(parts)!;for(const part of parts)part.dispose();resources.push(geometry)
     const proxy=new THREE.Mesh(geometry,shadowMaterial);proxy.name='straight-roof-shadow-'+section;proxy.castShadow=true;proxy.matrixAutoUpdate=false;root.add(proxy)
   }

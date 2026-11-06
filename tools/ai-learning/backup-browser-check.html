@@ -1,0 +1,62 @@
+<!doctype html><meta charset="utf-8"><title>Automatic backup browser check</title>
+<style>body{font:18px system-ui;background:#101419;color:#e7eae4;padding:40px}pre{white-space:pre-wrap;line-height:1.6}</style>
+<h1>Automatic backup browser check</h1><pre id="result">Testing native file writing in isolated browser storage…</pre>
+<script type="module">
+import { DrivingDatabase } from '/src/telemetry/database.ts'
+import { FOLDER_CONFIG, backupFilename, startFolderBackups } from '/src/telemetry/folderBackup.ts'
+import { DriveRecorder } from '/src/telemetry/recorder.ts'
+import { DrivingCapture } from '/src/telemetry/capture.ts'
+import { Track } from '/src/core/track.ts'
+import { TimeAttackSim } from '/src/core/sim.ts'
+import { handlingPreset } from '/src/core/carParams.ts'
+import { checksum,decompress } from '/src/telemetry/codec.ts'
+import { COMPACT_ENCODING,E,unpackCompact } from '/src/telemetry/compact.ts'
+const result=document.getElementById('result')
+try{
+  // This fixture must never run against the user's normal game origin.
+  if(location.port!=='5180')throw Error('Use the isolated preview on port 5180 only.')
+  const directory=await navigator.storage.getDirectory(),db=await DrivingDatabase.open()
+  const track=new Track(await(await fetch('/tracks/power_8.json')).json()),recorder=new DriveRecorder(),capture=new DrivingCapture(recorder)
+  const sim=new TimeAttackSim(track,handlingPreset('legacy'),track.id,'legacy',false)
+  const saved=new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(Error('Recorder timeout')),15000)
+    recorder.onStatus=s=>{if(s.state==='saved'){clearTimeout(timeout);resolve()}else if(s.state==='error'){clearTimeout(timeout);reject(Error(s.message))}}
+  })
+  capture.start({track,sims:[sim],race:null,playerSlot:0,preset:'legacy',easy:false,mode:'qualifying',legacyTyres:false,buildId:'browser-check',purpose:'verification'})
+  const request={steer:.12,pedal:.8,shift:0,tc:2,throttlePedal:.8,brakePedal:0,throttleHeld:true,brakeHeld:false,clutchHeld:false,lookBack:false,inputMode:'keyboard',sensitivity:.5,source:'human'}
+  for(let tick=0;tick<138;tick++){
+    capture.begin({...request,source:tick<10?'qualifying-intro':'human'});capture.end(sim.step(.12,.8,0,2))
+    if(tick===73)await new Promise(resolve=>setTimeout(resolve,0))
+  }
+  capture.finish('browser-test');await saved
+  const session=(await db.list()).sort((a,b)=>b.createdAt-a.createdAt)[0]
+  if(session.frames!==128||session.state!=='complete')throw Error('Human-only capture failed')
+  await db.setMeta(FOLDER_CONFIG,{id:'isolated-browser-test',enabled:true,directory})
+  const worker=startFolderBackups(async status=>{
+    try{
+    result.textContent=JSON.stringify(status,null,2)
+    if(status.state==='saved'){
+      const handle=await directory.getFileHandle(backupFilename(session)),file=await handle.getFile(),bytes=await file.arrayBuffer()
+      const magic=new TextDecoder().decode(bytes.slice(0,8)),records=[];let at=8
+      while(at<bytes.byteLength){const view=new DataView(bytes),n=view.getUint32(at,true),p=view.getUint32(at+4,true);at+=8;records.push({header:JSON.parse(new TextDecoder().decode(bytes.slice(at,at+n))),payload:bytes.slice(at+n,at+n+p)});at+=n+p}
+      const asset=records.find(r=>r.header.kind==='asset').header.asset
+      if(asset.encoding!==COMPACT_ENCODING||asset.track||!asset.trackRef)throw Error('Shared map reference missing')
+      const map=await(await directory.getFileHandle(asset.trackRef.file)).getFile()
+      if(await checksum(await map.arrayBuffer())!==asset.trackRef.checksum)throw Error('Map checksum failed')
+      let frames=0,firstTick=null
+      for(const record of records.filter(r=>r.header.kind==='chunk')){
+        const h=record.header,raw=await decompress(new Blob([record.payload]),h.gzip)
+        if(h.format!==COMPACT_ENCODING||await checksum(raw)!==h.checksum)throw Error('Compact chunk checksum failed')
+        const values=unpackCompact(raw,h.rows,h.stride,h.rivals)
+        firstTick??=values[E.simTick];frames+=h.rows
+        if(Math.abs(values[E['own.appliedPedal']]-.8)>1e-6)throw Error('Applied target changed')
+      }
+      const pass=magic==='BPTREC1\n'&&records.at(-1).header.kind==='archive-end'&&frames===128&&firstTick===10
+      result.textContent=JSON.stringify({pass,humanFrames:frames,firstPhysicalTick:firstTick,encoding:asset.encoding,nativeFolderHandleClonedThroughIndexedDB:true,workerFileWrite:true,sharedMapChecksumVerified:true,chunkChecksumsVerified:true,archiveBytes:file.size,mapBytes:map.size,verificationDataOnly:true},null,2)
+      worker.terminate()
+    }
+    }catch(error){result.textContent=String(error.stack||error);worker?.terminate()}
+  })
+  if(!worker)throw Error('Could not start backup worker')
+}catch(error){result.textContent=String(error.stack||error)}
+</script>

@@ -1,7 +1,8 @@
+import { finishBuild } from './buildScheduler'
 import * as THREE from 'three'
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import { buildTreeForm } from './treeForms'
-import { treeFoliageTexture } from './treeFoliage'
+import { treeFoliageTextureSteps } from './treeFoliage'
 import type { Track } from '../core/track'
 import type { Terrain } from './terrain'
 import { planDriverEnvironment, type TreeSite, type BuildingSite } from './driverEnvironmentPlan'
@@ -9,8 +10,8 @@ import { planDriverEnvironment, type TreeSite, type BuildingSite } from './drive
 type Disposable={dispose():void}
 const rng=(seed:number)=>()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}
 
-function addTrees(root:THREE.Group,sites:TreeSite[],terrain:Terrain,disposables:Disposable[]):void {
- const texture=treeFoliageTexture()
+function* addTrees(root:THREE.Group,sites:TreeSite[],terrain:Terrain,disposables:Disposable[]):Generator<void,void> {
+ const texture=yield* treeFoliageTextureSteps()
  const foliage=new THREE.MeshLambertMaterial({map:texture,alphaTest:0.4,side:THREE.DoubleSide,vertexColors:true})
  // Preserve outward crown lighting on both faces of the cutout cards.
  foliage.onBeforeCompile=shader=>{shader.fragmentShader=shader.fragmentShader.replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\n#ifdef DOUBLE_SIDED\nnormal *= faceDirection;\n#endif')}
@@ -25,12 +26,14 @@ function addTrees(root:THREE.Group,sites:TreeSite[],terrain:Terrain,disposables:
  const wood=new THREE.MeshStandardMaterial({color:0x6a6252,bumpMap:barkMap,bumpScale:0.022,roughness:0.95})
  disposables.push(texture,foliage,barkMap,wood)
  for(let variant=0;variant<6;variant++){
+  yield
   const prototype=buildTreeForm(variant);disposables.push(prototype.wood,prototype.leaves,prototype.farLeaves)
   const variantOf=(t:TreeSite)=>t.prototype??(t.variant*2+(Math.floor(t.arc*11+t.height*17)%2))
   const trees=sites.filter(t=>variantOf(t)===variant)
   const chunks=new Map<string,TreeSite[]>()
   for(const t of trees){const key=Math.floor(t.x/100)+','+Math.floor(t.y/100),chunk=chunks.get(key)??[];chunk.push(t);chunks.set(key,chunk)}
   for(const chunk of chunks.values()){
+    yield
    const centre=new THREE.Vector3(chunk.reduce((sum,t)=>sum+t.x,0)/chunk.length,0,-chunk.reduce((sum,t)=>sum+t.y,0)/chunk.length)
    // Keep one crown silhouette at every distance. Texture mipmaps reduce leaf detail
    // naturally; swapping enlarged far cards made whole groups appear to shrink.
@@ -97,7 +100,8 @@ function addBuilding(root:THREE.Group,site:BuildingSite,terrain:Terrain,material
  }
  root.add(group)
 }
-export function buildDriverEnvironment(track:Track,terrain:Terrain):{root:THREE.Group;dispose():void}{
+export function buildDriverEnvironment(track:Track,terrain:Terrain):{root:THREE.Group;dispose():void}{return finishBuild(buildDriverEnvironmentSteps(track,terrain))}
+export function* buildDriverEnvironmentSteps(track:Track,terrain:Terrain):Generator<void,{root:THREE.Group;dispose():void}>{
  const root=new THREE.Group();root.name='driver-environment';const disposables:Disposable[]=[]
  const plan=planDriverEnvironment(track,terrain)
  const materials=[
@@ -107,8 +111,12 @@ export function buildDriverEnvironment(track:Track,terrain:Terrain):{root:THREE.
   new THREE.MeshStandardMaterial({color:0x55575b,roughness:0.9}),
   new THREE.MeshStandardMaterial({color:0x896757,roughness:0.94}),
  ];disposables.push(...materials)
- for(const site of plan.buildings)addBuilding(root,site,terrain,materials,disposables)
- addTrees(root,plan.trees,terrain,disposables)
+ for(const site of plan.buildings){yield;addBuilding(root,site,terrain,materials,disposables)}
+ yield* addTrees(root,plan.trees,terrain,disposables)
  root.userData.buildings=plan.buildings.length;root.userData.trees=plan.trees.length
  return {root,dispose:()=>{for(const d of disposables)d.dispose()}}
 }
+
+
+
+

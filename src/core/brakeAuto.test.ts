@@ -112,3 +112,4 @@ describe('automatic gear selection while coasting', () => {
     }
   })
 })
+

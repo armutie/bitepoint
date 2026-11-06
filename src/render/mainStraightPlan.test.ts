@@ -4,7 +4,7 @@ import { clearOfCircuit } from '../core/placement'
 import { buildTerrain } from './terrain'
 import { planMainStraight } from './mainStraightPlan'
 import croft from '../../public/tracks/power_8.json'
-import silverstone from '../../public/tracks/silverstone.json'
+import silverstone from '../../public/tracks/silverstone-gp.json'
 import technical from '../../public/tracks/technical_8.json'
 
 describe('main straight architecture footprints', () => {

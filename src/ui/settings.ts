@@ -175,10 +175,9 @@ export function loadSettings(): Settings {
       viewport: VIEWPORT_ORDER.includes(parsed.viewport as ViewportMode)
         ? (parsed.viewport as ViewportMode)
         : DEFAULT_SETTINGS.viewport,
-      // v1 has one advertised control scheme and one gearbox. Clamp older
-      // saved choices so a hidden option cannot remain active.
+      // Mouse steering remains the offered control scheme.
       inputMode: 'mouse',
-      gearbox: 'auto',
+      gearbox: parsed.gearbox === 'manual' ? 'manual' : 'auto',
       tcLevel:
         typeof parsed.tcLevel === 'number' && Number.isInteger(parsed.tcLevel)
           ? Math.min(Math.max(parsed.tcLevel, 0), TC_LEVEL_MAX)

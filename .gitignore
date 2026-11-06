@@ -7,3 +7,10 @@ dist-api/
 supabase/.temp/
 supabase/.branches/
 supabase/.env
+
+# Standalone multiplayer room-service bundle
+dist-multiplayer/
+
+# Local driving datasets; export/backup separately from game source
+*.bpt
+*.jsonl
