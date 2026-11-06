@@ -165,12 +165,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
     root.add(venue.root)
     disposables.push(venue)
     replacesStart = true
-    buildStand(track, landmarks, rand, 16, 1, 76, 11)
-    yield
-    buildStand(track, landmarks, rand, 151, 1, 62, 9)
-    buildStand(track, landmarks, rand, 243, 1, 48, 8)
-    yield
-    buildStand(track, landmarks, rand, 5135, 1, 37, 8)
+
   } else {
     buildBridge(track, landmarks)
     const mainStraight = yield* buildMainStraightSteps(track, terrain)
@@ -878,6 +873,7 @@ function buildSponsorBoards(track: Track, s: Strip, rand: () => number): void {
     if (debt < 26) continue
     if (Math.abs(track.signedCurvatureAt(arc)) > 0.0025) continue // straights only
     debt = 0
+    if (onSilverstoneVenue(track, arc)) continue
     for (const side of [1, -1]) {
       if (rand() > 0.75) continue
       // Hung on the wall's actual face, wherever that is here — the whole point
