@@ -27,7 +27,7 @@ import { PALETTE } from './palette'
 import type { Terrain } from './terrain'
 import { buildDriverEnvironmentSteps } from './driverEnvironment'
 import { buildMainStraightSteps } from './mainStraight'
-import { buildSilverstoneVenue, onSilverstoneVenue, SILVERSTONE_VENUE_START } from './silverstoneVenue'
+import { buildSilverstoneVenueSteps } from './silverstoneVenue'
 
 /*
  * Where the wall is, for everything placed against it.
@@ -153,19 +153,20 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   buildGantry(track, landmarks)
   buildGridBoxes(track, overlay)
   yield
-  buildBrakeBoards(track, landmarks)
-  yield
-  buildSponsorBoards(track, solid, rand)
-  yield
+  if (!silverstone) {
+    buildBrakeBoards(track, landmarks)
+    yield
+    buildSponsorBoards(track, solid, rand)
+    yield
+  }
   buildFloodlights(track, terrain, solid)
   yield
   let replacesStart = false
   if (silverstone) {
-    const venue = buildSilverstoneVenue(track)
+    const venue = yield* buildSilverstoneVenueSteps(track)
     root.add(venue.root)
     disposables.push(venue)
     replacesStart = true
-
   } else {
     buildBridge(track, landmarks)
     const mainStraight = yield* buildMainStraightSteps(track, terrain)
@@ -214,7 +215,7 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
   // Corner stands at the two sharpest corners, on the outside, where the
   // spectators would actually stand — and where you brake.
   for (const apex of terrain.corners.slice(0, 2)) {
-    if (onSilverstoneVenue(track, apex.s)) continue
+    if (silverstone) continue
     buildStand(track, solid, rand, apex.s, -Math.sign(apex.k) || 1, 24, 8)
   }
 
@@ -873,7 +874,6 @@ function buildSponsorBoards(track: Track, s: Strip, rand: () => number): void {
     if (debt < 26) continue
     if (Math.abs(track.signedCurvatureAt(arc)) > 0.0025) continue // straights only
     debt = 0
-    if (onSilverstoneVenue(track, arc)) continue
     for (const side of [1, -1]) {
       if (rand() > 0.75) continue
       // Hung on the wall's actual face, wherever that is here — the whole point
@@ -1123,7 +1123,6 @@ function buildGridBoxes(track: Track, s: Strip): void {
 function buildBrakeBoards(track: Track, s: Strip): void {
   const post = new THREE.Color(PALETTE.BRAKE_POST)
   for (const m of track.brakeMarkers) {
-    if (track.id === 'silverstone-gp' && m.s >= SILVERSTONE_VENUE_START) continue
     const accent = new THREE.Color(
       m.distance >= 50 ? PALETTE.BRAKE_ACCENT_FAR : PALETTE.BRAKE_ACCENT_NEAR,
     )

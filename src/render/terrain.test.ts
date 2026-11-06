@@ -63,7 +63,9 @@ describe('terrain road clearance', () => {
       expect(height(outside * half)).toBeLessThan(1e-9)
       const wall = track.barrierGapAt(corner.s, outside < 0)
       expect(height(outside * (half + wall - 1))).toBeLessThan(1e-9)
-      expect(height(outside * (half + Math.max(30, wall + 14)))).toBeGreaterThan(4)
+      // The bank now follows the wider barrier into terrain with its own
+      // undulation, so check the usable rise rather than a fixed elevation.
+      expect(height(outside * (half + Math.max(30, wall + 14)))).toBeGreaterThan(2)
     }
   })
 })

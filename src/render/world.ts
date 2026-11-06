@@ -30,7 +30,6 @@ import { PALETTE } from './palette'
 import { applyRoadWear, makeRubberTextureSteps, makeRoadScuffTextureSteps, roadWearAt } from './roadWear'
 import { buildNearGrassSteps } from './nearGrass'
 import { weatherKerb } from './kerbSurface'
-import { onSilverstoneVenue } from './silverstoneVenue'
 import { kerbPoint, kerbSpans } from './trackSurface'
 import type { Terrain } from './terrain'
 
@@ -300,8 +299,13 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
   const cKerbB = new THREE.Color(track.kerbs ? 0xc9c8bb : PALETTE.KERB_B)
   const cBarrierA = new THREE.Color(PALETTE.BARRIER_A)
   const cBarrierB = new THREE.Color(PALETTE.BARRIER_B)
-  const pitConcrete = new THREE.Color(0xa39f8e)
-  const safetyBarrier = new THREE.Color(0x6c716a)
+  const silverstone = track.id === 'silverstone-gp'
+  const pitConcrete = new THREE.Color(0x92918a)
+  const concreteCap = new THREE.Color(0xb0ada4)
+  const steelBacking = new THREE.Color(0x575e60)
+  const galvanizedRail = new THREE.Color(0x909698)
+  const safetyBarrier = new THREE.Color(0x45494a)
+  const safetyCap = new THREE.Color(0x616664)
   const cCrest = new THREE.Color(PALETTE.BARRIER_CREST)
 
 
@@ -404,9 +408,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
     // Barrier walls: grey and blue segments under a sunlit crest rail. The
     // crest is a narrow top face — it catches the sky light and is what makes
     // the wall read as an object with thickness rather than a fence of paint.
-    const wall = onSilverstoneVenue(track, begin)
-      ? begin < 335 || begin > 5840 ? pitConcrete : safetyBarrier
-      : Math.floor(i / 5) % 2 === 0 ? cBarrierA : cBarrierB
+    const standardWall = Math.floor(i / 5) % 2 === 0 ? cBarrierA : cBarrierB
     for (const side of [1, -1]) {
       // The standoff comes from the track's own baked gap, per vertex and per
       // side, not the flat 9 m this used to draw at. That is not cosmetic: the
@@ -417,6 +419,10 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
       const gj = side > 0 ? track.barrierGapLeft[j]! : track.barrierGapRight[j]!
       const bi = offsetPoint(track, i, side * (hi + gi))
       const bj = offsetPoint(track, j, side * (hj + gj))
+      const pitWall = begin < 330 || begin > 5840 || (side < 0 && begin > 2350 && begin < 2910)
+      const armco = silverstone && !pitWall && (gi + gj) / 2 < 16
+      const wall = !silverstone ? standardWall : pitWall ? pitConcrete : armco ? steelBacking : safetyBarrier
+      const crest = !silverstone ? cCrest : pitWall ? concreteCap : armco ? galvanizedRail : safetyCap
       quadFlat(
         barriers,
         vx(bi.x), 0, vz(bi.y),
@@ -437,9 +443,23 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
         vx(bj.x), BARRIER_HEIGHT, vz(bj.y),
         vx(tj.x), BARRIER_HEIGHT, vz(tj.y),
         vx(ti.x), BARRIER_HEIGHT, vz(ti.y),
-        cCrest,
+        crest,
         1 / 4,
       )
+      if (armco) {
+        const frontI = offsetPoint(track, i, side * (hi + gi - 0.018))
+        const frontJ = offsetPoint(track, j, side * (hj + gj - 0.018))
+        for (const bottom of [0.28, 0.63]) {
+          quadFlat(
+            barriers,
+            vx(frontI.x), bottom, vz(frontI.y),
+            vx(frontJ.x), bottom, vz(frontJ.y),
+            vx(frontJ.x), bottom + 0.17, vz(frontJ.y),
+            vx(frontI.x), bottom + 0.17, vz(frontI.y),
+            galvanizedRail, 1 / 4,
+          )
+        }
+      }
       // Back face of the wall, so it exists from outside the circuit too.
       quadFlat(
         barriers,

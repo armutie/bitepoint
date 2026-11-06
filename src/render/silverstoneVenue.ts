@@ -6,11 +6,10 @@ import type { Track } from '../core/track'
 type Side = -1 | 1
 type CrossSection = readonly [station: number, near: number, far: number]
 
-export const SILVERSTONE_VENUE_START = 4700
-export const SILVERSTONE_VENUE_END = 335
-
 export function onSilverstoneVenue(track: Track, s: number): boolean {
-  return track.id === 'silverstone-gp' && (s >= SILVERSTONE_VENUE_START || s <= SILVERSTONE_VENUE_END)
+  return track.id === 'silverstone-gp' && (
+    s <= 1300 || (s >= 1750 && s <= 3350) || (s >= 3500 && s <= 4300) || s >= 4700
+  )
 }
 
 // Stations and surface edges interpreted from aerial imagery, in metres
@@ -31,6 +30,11 @@ const BOARDS = [
   { s: 5380, distance: 100, sides: [-1, 1], blue: true },
   { s: 5430, distance: 50, sides: [-1, 1], blue: true },
   { s: 223, distance: 150, sides: [1], blue: false },
+  { s: 740, distance: 100, sides: [1], blue: false },
+  { s: 790, distance: 50, sides: [1], blue: false },
+  { s: 1755, distance: 150, sides: [-1, 1], blue: false },
+  { s: 1805, distance: 100, sides: [-1, 1], blue: false },
+  { s: 1855, distance: 50, sides: [-1, 1], blue: false },
 ] as const
 const SIGN_CELL = 256
 const SIGN_COLUMNS = 4
@@ -143,7 +147,7 @@ function crowdTexture(): THREE.CanvasTexture {
   c.fillRect(0, 0, 1024, 256)
   let seed = 89031
   const random = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296
-  const shirts = ['#a34f48', '#445b7b', '#c8bdad', '#776a57', '#794d5c', '#ccc2ab', '#343a49', '#b26346']
+  const shirts = ['#864f4d', '#4c5c76', '#a49c91', '#6d675c', '#65576b', '#b8b2a6', '#343a49', '#885d4b']
   for (let row = 0; row < 5; row++) {
     const base = row * 51
     c.fillStyle = '#343741'
@@ -176,10 +180,10 @@ function eventWallTexture(): THREE.CanvasTexture {
   canvas.height = 512
   const c = canvas.getContext('2d')!
   const bands = [
-    ['#653440', '#eee3d8', 'BRITISH GRAND PRIX'],
-    ['#dfb94b', '#963b2a', 'SILVERSTONE'],
+    ['#59383f', '#dcd1c9', 'BRITISH GRAND PRIX'],
+    ['#9d864f', '#392d26', 'SILVERSTONE'],
     ['#25323d', '#e4e1df', 'BITE POINT'],
-    ['#28545b', '#e4e5da', 'SILVERSTONE'],
+    ['#324c48', '#d7dcd5', 'SILVERSTONE'],
   ] as const
   for (const [i, [background, ink, label]] of bands.entries()) {
     const y = i * 128
@@ -221,7 +225,7 @@ function tint(geometry: THREE.BufferGeometry, color: number): THREE.BufferGeomet
   return geometry
 }
 
-export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispose(): void } {
+export function* buildSilverstoneVenueSteps(track: Track): Generator<void, { root: THREE.Group; dispose(): void }> {
   const root = new THREE.Group()
   root.name = 'silverstone-venue'
   const gravelMap = aggregateTexture()
@@ -230,6 +234,7 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
   const apron = new THREE.MeshLambertMaterial({ color: 0x474743, side: THREE.DoubleSide })
   const paint = new THREE.MeshLambertMaterial({ color: 0xc6c2aa, side: THREE.DoubleSide })
   const verge = new THREE.MeshLambertMaterial({ color: 0x467b6c, side: THREE.DoubleSide })
+  const beckettsPaint = new THREE.MeshLambertMaterial({ color: 0x53536a, side: THREE.DoubleSide })
   const solid = new THREE.MeshLambertMaterial({ vertexColors: true })
   const signs = new THREE.MeshLambertMaterial({ map: atlas, side: THREE.DoubleSide })
   const meshMap = fenceTexture()
@@ -240,11 +245,59 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
   const eventWalls = new THREE.MeshLambertMaterial({ map: wallMap, side: THREE.DoubleSide })
   const fence = new THREE.MeshLambertMaterial({ map: meshMap, alphaTest: 0.23, side: THREE.DoubleSide })
   const resources: Disposable[] = [
-    gravelMap, atlas, meshMap, spectatorsMap, wallMap, gravel, apron, paint, verge, solid, signs, fence, spectators, standMaterial, eventWalls,
+    gravelMap, atlas, meshMap, spectatorsMap, wallMap, gravel, apron, paint, verge, beckettsPaint, solid, signs, fence, spectators, standMaterial, eventWalls,
   ]
 
+  const dispose = (): void => { for (const resource of resources) resource.dispose() }
+  let complete = false
+  try {
   assemble(root, 'stowe-asphalt-apron', [ribbon(track, 1, STOWE_APRON, 0.022)], apron, resources)
   assemble(root, 'stowe-gravel-trap', [ribbon(track, 1, STOWE_GRAVEL, 0.018)], gravel, resources)
+
+  const runoff = (
+    name: string, side: Side, paved: readonly CrossSection[], trap: readonly CrossSection[],
+  ): void => {
+    assemble(root, name + '-asphalt', [ribbon(track, side, paved, 0.022)], apron, resources)
+    assemble(root, name + '-gravel', [ribbon(track, side, trap, 0.017)], gravel, resources)
+  }
+  runoff('abbey-outside', 1,
+    [[326, 0.28, 0.28], [377, 0.28, 6.5], [426, 0.28, 8.7], [506, 0.32, 6], [568, 0.32, 0.32]],
+    [[366, 5, 5], [421, 8.5, 15], [475, 7.8, 20], [532, 4.2, 21], [600, 3, 3]])
+  runoff('farm-outside', -1,
+    [[505, 0.8, 0.8], [568, 0.4, 6.8], [647, 0.5, 8], [720, 0.3, 5], [758, 0.8, 0.8]],
+    [[552, 6, 6], [604, 7.3, 19], [660, 7.8, 23], [713, 5, 19], [765, 3, 3]])
+  runoff('village-outside', 1,
+    [[773, 0.22, 0.22], [839, 0.24, 7.2], [889, 0.24, 13.2], [933, 0.24, 10], [981, 0.24, 0.24]],
+    [[827, 6, 6], [875, 11.5, 23], [916, 11.3, 26], [956, 7, 16], [987, 3, 3]])
+  runoff('the-loop-outside', -1,
+    [[966, 0.3, 0.3], [1000, 0.3, 5.8], [1049, 0.28, 9], [1100, 0.28, 4.3], [1135, 0.3, 0.3]],
+    [[994, 5, 5], [1035, 8, 20.5], [1072, 6.9, 21], [1120, 3.3, 14], [1173, 2.8, 2.8]])
+  runoff('brooklands-outside', -1,
+    [[1800, 0.2, 0.2], [1875, 0.22, 10], [1940, 0.22, 14], [2005, 0.22, 13], [2060, 0.28, 0.28]],
+    [[1825, 5, 5], [1900, 13, 23], [1944, 14, 30], [2000, 13, 23], [2050, 3, 3]])
+  runoff('luffield-outside', 1,
+    [[2066, 0.3, 0.3], [2133, 0.25, 3.8], [2210, 0.25, 5.7], [2290, 0.25, 4], [2350, 0.3, 0.3]],
+    [[2112, 3.4, 3.4], [2160, 4.4, 21.8], [2212, 5.6, 26.5], [2280, 4, 22], [2360, 2.5, 2.5]])
+  runoff('copse-outside', 1,
+    [[2890, 0.35, 0.35], [3010, 0.25, 8.4], [3090, 0.25, 12], [3160, 0.25, 10], [3260, 0.28, 0.28]],
+    [[2980, 7, 7], [3050, 10.2, 23], [3100, 11.6, 31], [3180, 8.2, 26], [3275, 2.5, 2.5]])
+  runoff('maggotts-outside', -1,
+    [[3530, 0.35, 0.35], [3588, 0.3, 4.3], [3642, 0.3, 5.5], [3670, 0.35, 0.35]],
+    [[3573, 3, 3], [3613, 5.2, 15], [3657, 4, 15.5], [3680, 2, 2]])
+  runoff('becketts-right', -1,
+    [[3785, 0.28, 0.28], [3840, 0.24, 5.6], [3890, 0.25, 7.6], [3940, 0.3, 0.3]],
+    [[3821, 4, 4], [3860, 6, 20.7], [3907, 6.5, 22], [3955, 2, 2]])
+  runoff('becketts-left', 1,
+    [[3940, 0.27, 0.27], [3984, 0.24, 7.2], [4040, 0.24, 9.2], [4105, 0.3, 0.3]],
+    [[3965, 5, 5], [4011, 8, 22.5], [4060, 8.8, 24.3], [4110, 2, 2]])
+  runoff('chapel-outside', -1,
+    [[4114, 0.3, 0.3], [4162, 0.3, 5.6], [4212, 0.3, 5], [4265, 0.3, 0.3]],
+    [[4140, 3.5, 3.5], [4188, 5.5, 16.5], [4230, 4.6, 16], [4280, 2.8, 2.8]])
+
+  assemble(root, 'becketts-painted-apron', [ribbon(track, 1,
+    [[3750, 5.4, 5.4], [3792, 4.7, 8.5], [3830, 4.7, 7.2], [3870, 4.7, 4.7]], 0.026,
+  )], beckettsPaint, resources)
+  yield
 
   const pitEnd = track.length + 296
   assemble(root, 'vale-club-paved-runoff-and-pit-lane', [
@@ -264,6 +317,14 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
     ribbon(track, 1, [[5680, 3.3, 3.3], [5715, 3.2, 16], [5778, 3.1, 15],
       [5815, 2.2, 8], [5845, 1.2, 1.2]], 0.018),
   ], gravel, resources)
+  assemble(root, 'national-straight-trackside-surfaces', [
+    ribbon(track, -1, [[2360, 4.6, 4.6], [2440, 3.8, 12.8], [2850, 3.8, 12.8], [2950, 4.6, 4.6]], 0.027),
+    ribbon(track, 1, [[2320, 2.7, 2.7], [2420, 2.7, 8], [2810, 2.7, 9], [2950, 2.7, 2.7]], 0.019),
+  ], apron, resources)
+  assemble(root, 'national-and-copse-painted-verges', [
+    ribbon(track, 1, [[2310, 1.05, 1.05], [2400, 1.05, 2.9], [2820, 1.1, 2.9], [2910, 1.05, 1.05]], 0.028),
+    ribbon(track, 1, [[3060, 1.05, 1.05], [3110, 1.05, 2.25], [3210, 1.05, 2.2], [3280, 1.05, 1.05]], 0.031),
+  ], verge, resources)
   assemble(root, 'painted-runoff-verges', [
     ribbon(track, 1, [[5118, 0.95, 0.95], [5145, 0.95, 2.1], [5280, 0.9, 2.1], [5315, 0.9, 0.9]], 0.030),
     ribbon(track, 1, [[5590, 0.95, 0.95], [5638, 0.95, 2.25], [5800, 0.9, 2.1], [5860, 0.9, 0.9]], 0.032),
@@ -273,12 +334,11 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
       [track.length, 9.5, 9.64], [pitEnd, 9.5, 9.64]], 0.034),
   ], paint, resources)
 
+  yield
   const boardBodies: THREE.BufferGeometry[] = [], boardFaces: THREE.BufferGeometry[] = []
   const wing: THREE.BufferGeometry[] = [], bridge: THREE.BufferGeometry[] = []
-  const fencePosts: THREE.BufferGeometry[] = [], fencePanels: THREE.BufferGeometry[] = []
   const wallFaces: THREE.BufferGeometry[] = []
-  const grandstandSolids: THREE.BufferGeometry[] = [], grandstandFaces: THREE.BufferGeometry[] = []
-  const canopyTrees: THREE.BufferGeometry[] = []
+
   const placement = (station: number, lateral: number, geometry: THREE.BufferGeometry): THREE.BufferGeometry => {
     const p = pointAt(track, station, lateral)
     geometry.rotateY(track.poseAt(station).yaw)
@@ -352,14 +412,20 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
     geometry.computeVertexNormals()
     wallFaces.push(geometry)
   }
-  for (const side of [-1, 1] as const) {
-    fascia(4750, 4956, side, 1)
-    fascia(4960, 5206, side, 2)
-    fascia(5240, 5500, side, 3)
-    fascia(5510, 5678, side, 2)
-    fascia(5682, track.length + 324, side, 0)
-  }
+  // Short, venue-specific fascia blocks leave most of the safety wall exposed.
+  // Use the event colours only where they help identify a particular approach.
+  fascia(39, 74, -1, 0)
+  fascia(158, 191, 1, 0)
+  fascia(755, 790, 1, 2)
+  fascia(1880, 1914, -1, 2)
+  fascia(2630, 2672, -1, 3)
+  fascia(3010, 3044, 1, 3)
+  fascia(4780, 4820, 1, 1)
+  fascia(4900, 4938, -1, 1)
+  fascia(5415, 5449, -1, 3)
+  fascia(5705, 5742, 1, 0)
 
+  yield
   const standQuad = (points: THREE.Vector3[], uv = [0, 0, 1, 0, 1, 1, 0, 1]): THREE.BufferGeometry => {
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(points.flatMap(p => p.toArray()), 3))
@@ -368,7 +434,8 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
     geometry.computeVertexNormals()
     return geometry
   }
-  const grandstand = (start: number, end: number, side: Side, tiers: number, covered: boolean): void => {
+  const grandstand = (name: string, start: number, end: number, side: Side, tiers: number, covered: boolean): void => {
+    const grandstandSolids: THREE.BufferGeometry[] = [], grandstandFaces: THREE.BufferGeometry[] = []
     const modules = Math.ceil((end - start) / 11)
     const length = (end - start) / modules
     const frontAt = (s: number) => track.halfAt(s) + track.barrierGapAt(s, side < 0) + 5.2
@@ -405,8 +472,17 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
       }
       const back = side * (frontAt(station) + rear)
       block(grandstandSolids, station, back, 0, 0.28, 0.34, eaves, 0x899197)
-      plate(s0, s1, rear - 0.1, rear - 0.1, eaves - 1.9, eaves - 0.55, 0x606973)
       if (covered) {
+        plate(s0, s1, rear - 0.1, rear - 0.1, eaves - 1.9, eaves + 1.03, 0x505761)
+        // Slim cantilever ribs and a deep rear wall keep the roof attached to
+        // the seating structure in the low, oblique onboard view.
+        const a = vertex(station, rear, eaves + 0.84)
+        const b = vertex(station, -1.95, eaves - 0.22)
+        const direction = b.clone().sub(a)
+        const rib = new THREE.BoxGeometry(0.23, direction.length(), 0.26)
+        rib.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize()))
+        rib.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2)
+        grandstandSolids.push(tint(rib, 0x68717a))
         plate(s0, s1, -2.0, rear + 1.8, eaves, eaves + 1.15, 0xbcc2c1)
         plate(s0, s1, -2.0, -2.0, eaves - 0.35, eaves, 0x8e9ba2)
       }
@@ -417,45 +493,103 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
         vertex(cap, rear, 1.2 + tiers * 0.86), vertex(cap, 0, 1.25),
       ]), 0x68727a))
     }
+    assemble(root, name + '-structure', grandstandSolids, standMaterial, resources)
+    assemble(root, name + '-spectators', grandstandFaces, spectators, resources)
   }
 
-  // The long roof across Hamilton Straight, the uncovered Stowe stand visible
-  // on approach, and the terraces above Vale have distinct silhouettes.
-  grandstand(-53, 94, 1, 8, true)
-  grandstand(125, 188, 1, 8, true)
-  grandstand(193, 298, 1, 7, true)
-  grandstand(348, 410, 1, 5, false)
-  grandstand(4746, 4894, 1, 2, false)
-  grandstand(4800, 4920, -1, 8, false)
-  grandstand(5020, 5138, 1, 6, false)
-  grandstand(5335, 5400, -1, 5, false)
-  grandstand(5650, 5724, 1, 6, true)
+  // The venue is built in separate sections so stands and trees on the far
+  // side of the lap can be frustum-culled together.
+  for (const [name, start, end, side, tiers, covered] of [
+    ['hamilton-main', -53, 94, 1, 8, true],
+    ['hamilton-centre', 125, 188, 1, 8, true],
+    ['hamilton-end', 193, 298, 1, 7, true],
+    ['abbey-terrace', 348, 420, 1, 5, false],
+    ['farm-terrace', 575, 655, -1, 4, false],
+    ['village-approach', 705, 793, 1, 5, false],
+    ['village-corner', 806, 892, 1, 7, true],
+    ['brooklands-roof', 1882, 1992, -1, 8, true],
+    ['luffield-roof', 2142, 2280, 1, 8, true],
+    ['woodcote-terrace', 2320, 2410, 1, 6, false],
+    ['national-straight-roof', 2550, 2710, 1, 7, true],
+    ['copse-roof', 2944, 3080, 1, 7, true],
+    ['copse-high-stand', 3092, 3160, 1, 9, false],
+    ['becketts-stand', 3810, 3902, -1, 6, true],
+    ['chapel-terrace', 4140, 4210, -1, 4, false],
+    ['hangar-verge', 4746, 4894, 1, 2, false],
+    ['stowe-approach', 4800, 4920, -1, 8, false],
+    ['stowe-corner', 5020, 5138, 1, 6, false],
+    ['vale-terrace', 5335, 5400, -1, 5, false],
+    ['club-roof', 5650, 5724, 1, 6, true],
+  ] as const) {
+    grandstand(name, start, end, side, tiers, covered)
+    yield
+  }
 
-  // A broken line of taller crowns beyond the Stowe bank, with lower trees
-  // in front. This is a distant silhouette with no per-tree draw calls.
-  for (let i = 0; i < 61; i++) {
-    const station = 4938 + i * 4.4
-    const side = i % 9 === 8 ? -1 : 1
-    const distance = track.halfAt(station) + track.barrierGapAt(station, side < 0)
-      + 29 + 4.2 * Math.sin(i * 0.43) + 2.5 * Math.cos(i * 1.21)
-    const position = pointAt(track, station, side * distance)
-    if (!clearOfCircuit(track, position.x, position.y, 8)) continue
-    const height = 6.8 + 3.5 * Math.sin(i * 0.41) ** 2 + (i % 3) * 0.7
-    // Overlapping understory joins the taller crowns to the bank and stops
-    // individual trees reading as floating discs from the end of the straight.
-    const crowns = [[4.9, 0.28, 0.29], [3.5, 0.65, 0.34], [2.85, 0.79, 0.28]] as const
-    for (const [crown, [width, centre, radius]] of crowns.entries()) {
-      const geometry = new THREE.IcosahedronGeometry(1, crown === 1 ? 1 : 0)
-      geometry.scale(width, height * radius, width * (0.82 + 0.25 * Math.sin(i * 0.7) ** 2))
-      geometry.rotateY(i * 2.39 + crown)
-      geometry.translate(
-        position.x + Math.sin(i + crown) * crown * 1.2, height * centre,
-        -position.y + Math.cos(i + crown) * crown * 1.4,
-      )
-      const greens = [0x465139, 0x58644a, 0x657052, 0x4a5942]
-      canopyTrees.push(tint(geometry, greens[(i + crown) % greens.length]!))
+  const woodland = (name: string, start: number, count: number, setback: number): void => {
+    const trees: THREE.BufferGeometry[] = []
+    for (let i = 0; i < count; i++) {
+      const station = start + i * 4.4
+      const distance = track.halfAt(station) + track.barrierGapAt(station, false)
+        + setback + 4.2 * Math.sin(i * 0.43) + 2.5 * Math.cos(i * 1.21)
+      const position = pointAt(track, station, distance)
+      if (!clearOfCircuit(track, position.x, position.y, 8)) continue
+      const height = 6.8 + 3.5 * Math.sin(i * 0.41) ** 2 + (i % 3) * 0.7
+      const crowns = [[4.9, 0.28, 0.29], [3.5, 0.65, 0.34], [2.85, 0.79, 0.28]] as const
+      for (const [crown, [width, centre, radius]] of crowns.entries()) {
+        const geometry = new THREE.IcosahedronGeometry(1, crown === 1 ? 1 : 0)
+        geometry.scale(width, height * radius, width * (0.82 + 0.25 * Math.sin(i * 0.7) ** 2))
+        geometry.rotateY(i * 2.39 + crown)
+        geometry.translate(
+          position.x + Math.sin(i + crown) * crown * 1.2, height * centre,
+          -position.y + Math.cos(i + crown) * crown * 1.4,
+        )
+        const greens = [0x465139, 0x58644a, 0x657052, 0x4a5942]
+        trees.push(tint(geometry, greens[(i + crown) % greens.length]!))
+      }
     }
+    assemble(root, name, trees, solid, resources)
   }
+  woodland('stowe-wooded-skyline', 4938, 61, 29)
+  yield
+  woodland('copse-woodland-behind-grandstands', 2980, 50, 30)
+  yield
+  woodland('village-distant-trees', 867, 24, 24)
+
+  // The smaller National pits are a separate landmark from the Wing. Keep the
+  // garage row low, with the taller glazed control rooms at the Woodcote end.
+  const nationalPits: THREE.BufferGeometry[] = []
+  for (let s = 2440; s <= 2780; s += 8) {
+    const right = -(track.halfAt(s) + 13.8)
+    block(nationalPits, s, right - 5.9, 0, 7.92, 12, 3.75, 0x7d8182)
+    block(nationalPits, s, right + 0.15, 0.12, 6.65, 0.18, 2.78, 0x424a4e)
+    block(nationalPits, s, right + 0.64, 3.22, 7.93, 1.68, 0.32, 0xa5adaf)
+  }
+  for (const [s, height, length] of [[2410, 6.4, 28], [2431, 9.6, 14], [2450, 5.7, 24]] as const) {
+    const offset = -(track.halfAt(s) + 22)
+    block(nationalPits, s, offset, 0, length, 12, height, 0x899398)
+    block(nationalPits, s, offset + 6.1, height - 2.2, length - 1, 0.24, 1.65, 0x526776)
+    block(nationalPits, s, offset + 0.35, height, length + 0.75, 13, 0.34, 0xadb4b2)
+  }
+  assemble(root, 'national-pits-and-control-rooms', nationalPits, solid, resources)
+  yield
+
+  // Offset individual volumes and break their roof heights. Seen from Copse
+  // these read as the trackside residences, with open ground in between.
+  const residences: THREE.BufferGeometry[] = []
+  for (let i = 0; i < 13; i++) {
+    const s = 3340 + i * 24
+    const offset = track.halfAt(s) + track.barrierGapAt(s, false) + 12 + (i % 3) * 2
+    const p = pointAt(track, s, offset)
+    if (!clearOfCircuit(track, p.x, p.y, 11)) continue
+    const h = 4.2 + (i % 4) * 0.68
+    block(residences, s, offset + 1, 0, 13, 9, 2.25, 0x6e706b)
+    block(residences, s - 0.8, offset, 2.1, 14.5, 9.5, h - 2.1, 0x9d9e93)
+    block(residences, s - 1.15, offset - 4.9, 2.53, 12.5, 0.3, Math.min(1.82, h - 2.7), 0x526370)
+    block(residences, s - 1.6, offset - 0.2, h, 15.1, 10.6, 0.23, 0x6f7877)
+    block(residences, s - 2.4, offset - 4.9, 2.19, 12, 1.2, 0.2, 0xb1b0a1)
+  }
+  assemble(root, 'escapade-trackside-residences', residences, solid, resources)
+  yield
 
   // The Wing sits behind a working apron and pit wall, with dark garage
   // openings at ground level and a continuous glazed ribbon above them.
@@ -517,6 +651,7 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
   sign(bridgeS - 1.64, 0, 7.42, 12, 1.45, 3)
 
   const fenceSpan = (start: number, end: number, side: Side): void => {
+    const fencePosts: THREE.BufferGeometry[] = [], fencePanels: THREE.BufferGeometry[] = []
     for (let s = start; s < end; s += 6) {
       const offset = side * (track.halfAt(s) + track.barrierGapAt(s, side < 0) + 0.5)
       block(fencePosts, s, offset, 0.95, 0.075, 0.075, 2.2, 0x888f8d)
@@ -526,21 +661,31 @@ export function buildSilverstoneVenue(track: Track): { root: THREE.Group; dispos
       panel.translate(3, 2.08, 0)
       fencePanels.push(placement(s, offset, panel))
     }
+    assemble(root, 'catch-fence-posts', fencePosts, solid, resources)
+    assemble(root, 'catch-fence-mesh', fencePanels, fence, resources)
   }
   fenceSpan(-40, 296, -1)
   fenceSpan(-40, 296, 1)
   fenceSpan(4750, 4940, 1)
   fenceSpan(4958, 5150, 1)
+  yield
+  fenceSpan(322, 439, 1)
+  fenceSpan(711, 927, 1)
+  fenceSpan(1850, 2015, -1)
+  fenceSpan(2150, 2285, 1)
+  fenceSpan(2430, 2840, -1)
+  fenceSpan(2920, 3190, 1)
+  fenceSpan(3400, 3670, 1)
+  fenceSpan(3820, 3908, -1)
 
-  assemble(root, 'silverstone-grandstand-structure', grandstandSolids, standMaterial, resources)
-  assemble(root, 'silverstone-occupied-terraces', grandstandFaces, spectators, resources)
-  assemble(root, 'stowe-wooded-skyline', canopyTrees, solid, resources)
   assemble(root, 'silverstone-event-wall-fascias', wallFaces, eventWalls, resources)
-  assemble(root, 'silverstone-catch-fence-posts', fencePosts, solid, resources)
-  assemble(root, 'silverstone-catch-fence-mesh', fencePanels, fence, resources)
   assemble(root, 'distance-board-supports', boardBodies, solid, resources)
   assemble(root, 'numbered-distance-boards-and-bridge-sign', boardFaces, signs, resources)
   assemble(root, 'silverstone-wing', wing, solid, resources)
   assemble(root, 'hamilton-straight-footbridge', bridge, solid, resources)
-  return { root, dispose() { for (const resource of resources) resource.dispose() } }
+  complete = true
+  return { root, dispose }
+  } finally {
+    if (!complete) dispose()
+  }
 }
