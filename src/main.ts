@@ -1,7 +1,3 @@
-import { DriveRecorder } from './telemetry/recorder'
-import { DrivingCapture, telemetryBadge } from './telemetry/capture'
-import { buildId as drivingBuildId } from 'virtual:bitepoint-driving-build'
-import { mixedAiGrid } from './core/raceVariation'
 /**
  * Wiring: menus, input, simulation, renderer.
  *
@@ -22,15 +18,6 @@ import {
   SHOW_REFERENCE_DRIVER,
 } from './features'
 import { buildFpsOverlay } from './dev/fpsOverlay'
-
-/**
- * Per-tick decay of the TC lamp once intervention stops — about 180 ms to fade.
- *
- * Slow enough that a lamp being hammered by a bumpy exit reads as one steady
- * light rather than a strobe, fast enough that it is dark again before the next
- * corner and never claims TC is working when it has let go.
- */
-const TC_LAMP_DECAY = 0.9
 import { wrapAngle } from './core/math'
 import {
   DT, lapUsedTc, LapReplay, OFF_TRACK_MARGIN, TimeAttackSim, type CompletedLap,
@@ -55,14 +42,26 @@ import { fieldLivery, liveryCss, PLAYER_LIVERY } from './render/liveries'
 import { Hud, type HudRaceState } from './ui/hud'
 import { RaceFinish } from './ui/raceFinish'
 import { proximityMarkers, type ProximityRival } from './ui/proximity'
-import {
-  Menu, RELEASED_PRESETS, RELEASED_TRACKS, type PauseStatus, type Selection,
-} from './ui/menu'
+import { Menu, type PauseStatus, type Selection } from './ui/menu'
 import type { SessionLap, SessionSummary } from './ui/sessionSummary'
 import { cameraFeel, fullLockFraction, loadSettings, saveSettings, type Settings } from './ui/settings'
+import { RELEASED_PRESETS, RELEASED_TRACKS } from './shared/released'
 import { createLeaderboardServices, sameBoard } from './storage/leaderboard'
 import { keyOf, LocalRecordStore, NamespacedStorage, type LapRecord } from './storage/records'
 import { decodePath, loadAttractLaps, pinnedAttractLaps } from './data/attractLaps'
+import { DriveRecorder } from './telemetry/recorder'
+import { DrivingCapture, telemetryBadge } from './telemetry/capture'
+import { buildId as drivingBuildId } from 'virtual:bitepoint-driving-build'
+import { mixedAiGrid } from './core/raceVariation'
+
+/**
+ * Per-tick decay of the TC lamp once intervention stops — about 180 ms to fade.
+ *
+ * Slow enough that a lamp being hammered by a bumpy exit reads as one steady
+ * light rather than a strobe, fast enough that it is dark again before the next
+ * corner and never claims TC is working when it has let go.
+ */
+const TC_LAMP_DECAY = 0.9
 
 const SELECTION_KEY = 'car-racing:selection'
 

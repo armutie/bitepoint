@@ -1,25 +1,17 @@
 import { createClient, type SupabaseClient, type User } from '@supabase/supabase-js'
 
-import balanced8 from '../../../public/tracks/balanced_8.json' with { type: 'json' }
-import power3 from '../../../public/tracks/power_3.json' with { type: 'json' }
-import power4 from '../../../public/tracks/power_4.json' with { type: 'json' }
-import power8 from '../../../public/tracks/power_8.json' with { type: 'json' }
-import silverstone from '../../../public/tracks/silverstone-gp.json' with { type: 'json' }
 import { applyEasyAids, handlingPreset, type PresetName } from '../../../src/core/carParams.ts'
 import { lapUsedTc, verifyLapRecording } from '../../../src/core/sim.ts'
-import { Track, type TrackData } from '../../../src/core/track.ts'
+import { RELEASED_PRESETS } from '../../../src/shared/released.ts'
+import { RELEASED_TRACK_MAP } from '../../../src/shared/releasedTrackData.ts'
 import { CURRENT_PHYSICS_RULESET } from '../../../src/shared/ruleset.ts'
 import { parseUsername, usernameHint } from '../../../src/shared/playerIdentity.ts'
 import {
   deserializeLapRecord, serializeLapRecord, type LapRecord, type SerializedLapRecord,
 } from '../../../src/storage/records.ts'
 
-const TRACKS = new Map(
-  [balanced8, power3, power4, power8, silverstone]
-    .map((data) => new Track(data as TrackData))
-    .map((track) => [track.id, track]),
-)
-const PRESETS: readonly PresetName[] = ['legacy', 'classic']
+const TRACKS = RELEASED_TRACK_MAP
+const PRESETS = RELEASED_PRESETS
 const MAX_BOARD_SIZE = 100
 const MAX_BODY_BYTES = 4 * 1024 * 1024
 

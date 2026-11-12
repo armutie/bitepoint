@@ -1,4 +1,3 @@
-import { drivingLibraryUrl } from '../telemetry/urls'
 /**
  * Session choice, followed by the circuit and handling or a supported race.
  *
@@ -35,6 +34,13 @@ import { MOUSE_DEADZONE } from '../game/input'
 import { raceSelection, RACE_TRACK } from './sessionSetup'
 import type { RaceEvent } from '../core/qualifying'
 import { fieldLivery, liveryCss, PLAYER_LIVERY } from '../render/liveries'
+import {
+  analyseSession, type SessionAnalysis, type SessionSummary,
+} from './sessionSummary'
+import { usernameHint } from '../shared/playerIdentity'
+import { RELEASED_PRESETS, RELEASED_TRACKS } from '../shared/released'
+import type { PlayerProfile, PlayerProfileClient } from '../storage/player'
+import { drivingLibraryUrl } from '../telemetry/urls'
 
 /**
  * What the session is: a lap against the clock, or a race against a field.
@@ -43,11 +49,6 @@ import { fieldLivery, liveryCss, PLAYER_LIVERY } from '../render/liveries'
  * and handling supported by the current AI.
  */
 export type SessionMode = 'time' | 'race'
-import {
-  analyseSession, type SessionAnalysis, type SessionSummary,
-} from './sessionSummary'
-import { usernameHint } from '../shared/playerIdentity'
-import type { PlayerProfile, PlayerProfileClient } from '../storage/player'
 
 export interface Selection {
   trackId: string
@@ -79,21 +80,6 @@ export interface PauseStatus {
   validLaps: number
 }
 
-/**
- * The release ships five circuits, chosen for what they ask of a setup: Ashford
- * is the balanced reference lap, Croft Bay is pure stop-and-go, Thruxton Vale is
- * the longest, and Elvington Mile is one 670 m straight — two and a half times
- * anything else here, and the only place the low-drag trim's extra 18 km/h has
- * room to pay for the cornering it gives up. Silverstone uses mapped GP
- * coordinates. The rest of the calendar stays
- * visible but locked: a menu that shows what is coming reads as a roadmap, one
- * that hides it reads as thin.
- * Time-trial choices are separate from the supported race pairing.
- */
-export const RELEASED_TRACKS: readonly string[] =
-  ['silverstone-gp', 'power_8', 'power_4', 'balanced_8', 'power_3']
-/** Both setups in `PRESET_ORDER` are drivable; the gate is kept for the next one. */
-export const RELEASED_PRESETS: readonly PresetName[] = ['legacy', 'classic']
 const CONTROLS_SEEN_KEY = 'car-racing:controls-seen'
 const PENDING_LEADERBOARD_LAP_KEY = 'bitepoint:pending-leaderboard-lap:v1'
 
@@ -256,7 +242,7 @@ export class Menu {
   private show(kind: 'full' | 'dialog'): void {
     this.root.classList.remove('is-hidden')
     this.root.classList.toggle('menu-dialog', kind === 'dialog')
-    this.root.classList.remove('menu-controls', 'menu-flow', 'menu-profile', 'menu-session-summary', 'menu-pause')
+    this.root.classList.remove('menu-controls', 'menu-flow', 'menu-profile', 'menu-session-summary', 'menu-pause', 'menu-settings')
     this.mainOpen = false
     this.controlsOpen = false
     this.settingsOpen = false
@@ -566,7 +552,7 @@ export class Menu {
     const eyebrow = el('div', 'eyebrow')
     eyebrow.textContent = 'Before your first lap'
     const title = el('h1', 'menu-title')
-    title.textContent = 'Four things to know'
+    title.append('Four things to know', period())
     header.append(eyebrow, title)
 
     const quick = el('div', 'quick-controls')
@@ -972,13 +958,13 @@ export class Menu {
     this.panel.append(eyebrow)
 
     if (status) {
-      const meta = el('div', 'pause-meta')
-      meta.append(chip(status.trackLabel), sep(), chip(status.carLabel))
-      if (status.easy) {
-        const easy = el('span', 'tag tag-warn')
-        easy.textContent = 'EASY'
-        meta.append(easy)
-      }
+      // The circuit is the title, as it is everywhere else in the flow; the
+      // setup it is being driven with is the line of context under it.
+      const title = el('h1', 'menu-title')
+      title.append(status.trackLabel, period())
+      const meta = el('p', 'pause-context')
+      meta.textContent = [status.carLabel, status.easy ? 'Easy mode' : null]
+        .filter(Boolean).join(' · ')
 
       const stats = el('div', 'pause-stats')
       // The lap you are in, big — it is the one at stake. Before the first
@@ -999,7 +985,7 @@ export class Menu {
         pauseStat('Best', status.bestLap !== null ? formatTime(status.bestLap) : '—', ''),
         pauseStat('Clean laps', String(status.validLaps), ''),
       )
-      this.panel.append(meta, stats)
+      this.panel.append(title, meta, stats)
     }
 
     const actions = el('div', 'menu-actions pause-actions')
@@ -1243,14 +1229,10 @@ export class Menu {
     const eyebrow = el('div', 'eyebrow')
     eyebrow.textContent = 'Session complete'
     const title = el('h1', 'menu-title')
-    title.textContent = 'Run review'
-    const meta = el('div', 'pause-meta')
-    meta.append(chip(summary.trackLabel), sep(), chip(summary.carLabel))
-    if (summary.easy) {
-      const easy = el('span', 'tag tag-warn')
-      easy.textContent = 'EASY'
-      meta.append(easy)
-    }
+    title.append('Run review', period())
+    const meta = el('p', 'pause-context')
+    meta.textContent = [summary.trackLabel, summary.carLabel, summary.easy ? 'Easy mode' : null]
+      .filter(Boolean).join(' · ')
     header.append(eyebrow, title, meta)
 
     const chart = sessionChart(summary, analysis)
@@ -1343,6 +1325,7 @@ export class Menu {
 
   showSettings(): void {
     this.show('full')
+    this.root.classList.add('menu-settings')
     this.settingsOpen = true
     this.panel.replaceChildren()
 
@@ -1359,7 +1342,7 @@ export class Menu {
 
     const header = el('header', 'menu-header set-header')
     const title = el('h1', 'menu-title')
-    title.textContent = 'Settings'
+    title.append('Settings', period())
     // Built always and hidden when idle, like the per-row resets — the slider
     // changes a setting without rebuilding the panel, so a Reset all that only
     // existed if something was already off default would never appear.
@@ -1465,13 +1448,13 @@ export class Menu {
     audioCredit.textContent = 'Engine audio credits'
     audioCredit.target = '_blank'
     audioCredit.rel = 'noopener'
-    audioCredit.className = 'menu-hint'
+    audioCredit.className = 'menu-hint menu-link'
     system.append(audioCredit)
     if (import.meta.env.DEV) {
       const drivingData = document.createElement('a')
       drivingData.href = drivingLibraryUrl(document.baseURI)
       drivingData.textContent = 'Driving recordings'; drivingData.target = '_blank'; drivingData.rel = 'noopener'
-      drivingData.className = 'menu-hint'; drivingData.style.display = 'block'
+      drivingData.className = 'menu-hint menu-link'
       system.append(drivingData)
     }
 
@@ -1711,15 +1694,22 @@ export class Menu {
       const description = el('span', 'flow-mode-description')
       description.textContent = mode.description
       words.append(title, description)
-      const selector = el('span', 'flow-mode-selector')
-      selector.setAttribute('aria-hidden', 'true')
-      choice.append(number, words, selector)
+      choice.append(number, words, modeArrow())
       choice.addEventListener('click', () => this.chooseMode(mode.id))
       wrap.append(choice)
     }
     if (import.meta.env.DEV && !LEGACY_TYRE_MODE) {
-      const multiplayer = el('button', 'flow-mode')
-      multiplayer.textContent = 'Multiplayer'
+      // Same row as the two above, so the dev entry does not read as broken.
+      const multiplayer = el('button', 'flow-mode flow-mode-dev')
+      const number = el('span', 'flow-mode-number')
+      number.textContent = '03'
+      const words = el('span', 'flow-mode-words')
+      const title = el('span', 'flow-mode-title')
+      title.textContent = 'Multiplayer'
+      const description = el('span', 'flow-mode-description')
+      description.textContent = 'Development build. Host or join a room.'
+      words.append(title, description)
+      multiplayer.append(number, words, modeArrow())
       multiplayer.addEventListener('click', () => {
         window.location.href = new URL('multiplayer.html', document.baseURI).href
       })
@@ -2242,15 +2232,18 @@ function pauseStat(label: string, value: string, extra: string): HTMLElement {
   return wrap
 }
 
-function chip(label: string): HTMLElement {
-  const s = el('span', 'pause-chip')
-  s.textContent = label
+/** The amber full stop the flow's headings end on. */
+function period(): HTMLElement {
+  const s = el('span', 'flow-period')
+  s.textContent = '.'
   return s
 }
 
-function sep(): HTMLElement {
-  const s = el('span', 'pause-sep')
-  s.textContent = '·'
+/** Where a mode row goes: forward, not a box to tick. */
+function modeArrow(): HTMLElement {
+  const s = el('span', 'flow-mode-arrow')
+  s.setAttribute('aria-hidden', 'true')
+  s.textContent = '→'
   return s
 }
 

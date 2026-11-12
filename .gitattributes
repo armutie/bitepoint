@@ -1,0 +1,9 @@
+# Store and check out text with LF everywhere, so Windows and the lab/main
+# copies never differ by line endings alone.
+* text=auto eol=lf
+
+*.png binary
+*.glb binary
+*.wav binary
+*.mp3 binary
+*.bpt binary

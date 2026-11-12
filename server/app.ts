@@ -3,14 +3,10 @@ import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 
-import balanced8 from '../public/tracks/balanced_8.json'
-import power3 from '../public/tracks/power_3.json'
-import power4 from '../public/tracks/power_4.json'
-import power8 from '../public/tracks/power_8.json'
-import silverstoneGp from '../public/tracks/silverstone-gp.json'
 import { applyEasyAids, handlingPreset, type PresetName } from '../src/core/carParams'
 import { lapUsedTc, verifyLapRecording } from '../src/core/sim'
-import { Track, type TrackData } from '../src/core/track'
+import { RELEASED_PRESETS } from '../src/shared/released'
+import { RELEASED_TRACK_MAP } from '../src/shared/releasedTrackData'
 import { CURRENT_PHYSICS_RULESET } from '../src/shared/ruleset'
 import { parseUsername, usernameHint } from '../src/shared/playerIdentity'
 import type { LeaderboardEntry } from '../src/storage/leaderboard'
@@ -19,12 +15,8 @@ import {
 } from '../src/storage/records'
 import type { LeaderboardRepository, Player } from './repository'
 
-const TRACKS = new Map(
-  [balanced8, power3, power4, power8, silverstoneGp]
-    .map((data) => new Track(data as TrackData))
-    .map((track) => [track.id, track]),
-)
-const PRESETS: readonly PresetName[] = ['legacy', 'classic']
+const TRACKS = RELEASED_TRACK_MAP
+const PRESETS = RELEASED_PRESETS
 const MAX_BOARD_SIZE = 100
 
 export interface BuildAppOptions {
