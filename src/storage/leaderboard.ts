@@ -179,6 +179,11 @@ export class HttpLeaderboardClient implements LeaderboardClient {
   async list(key: BoardChoice, limit = 50): Promise<LeaderboardPage> {
     const query = new URLSearchParams({
       trackId: key.trackId,
+      // Not read by the one-board server, which ignores it. Sent so that a
+      // server still running the old per-mode function answers with the
+      // standard board instead of rejecting the request: the site and the
+      // Supabase function deploy separately, and either can land first.
+      easy: 'false',
       ruleset: PHYSICS_RULESET,
       limit: String(limit),
     })
