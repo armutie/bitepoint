@@ -36,6 +36,7 @@ interface EntryRow {
   tc: boolean
   abs: boolean
   preset: string
+  easy: boolean
   ghost_available: boolean
 }
 
@@ -49,10 +50,12 @@ interface LeaderboardEntry {
   ghostAvailable: boolean
   assists: { tc: boolean; abs: boolean }
   preset: string
+  /** Easy and standard share one board per circuit; this marks the mode. */
+  easy: boolean
 }
 
 interface LeaderboardPage {
-  key: { trackId: string; easy: boolean; ruleset: string }
+  key: { trackId: string; ruleset: string }
   entries: LeaderboardEntry[]
   scope: 'global'
 }
@@ -114,9 +117,8 @@ async function route(request: Request, cors: Headers): Promise<Response> {
     const key = boardKey(url.searchParams)
     if (!key) return json({ error: 'Leaderboard query is invalid.' }, 400, cors)
     const limit = clampLimit(url.searchParams.get('limit'))
-    const result = await admin.rpc('leaderboard_page', {
+    const result = await admin.rpc('leaderboard_board', {
       p_track_id: key.trackId,
-      p_easy: key.easy,
       p_ruleset: key.ruleset,
       p_limit: limit,
     })
@@ -218,9 +220,8 @@ async function submitLap(request: Request, cors: Headers): Promise<Response> {
   })
   if (stored.error) throw stored.error
 
-  const board = await admin.rpc('leaderboard_page', {
+  const board = await admin.rpc('leaderboard_board', {
     p_track_id: track.id,
-    p_easy: official.easy,
     p_ruleset: CURRENT_PHYSICS_RULESET,
     p_limit: 10000,
   })
@@ -258,6 +259,7 @@ function entry(row: EntryRow): LeaderboardEntry {
     ghostAvailable: row.ghost_available,
     assists: { tc: row.tc, abs: row.abs },
     preset: row.preset,
+    easy: row.easy,
   }
 }
 
@@ -276,14 +278,13 @@ function parseLap(value: unknown): LapRecord | null {
   }
 }
 
-function boardKey(query: URLSearchParams): { trackId: string; easy: boolean; ruleset: string } | null {
+// An `easy` parameter from an older client is ignored: there is one board.
+function boardKey(query: URLSearchParams): { trackId: string; ruleset: string } | null {
   const trackId = query.get('trackId')
-  const easy = query.get('easy')
   const ruleset = query.get('ruleset')
   if (!trackId || !TRACKS.has(trackId)) return null
-  if (easy !== 'true' && easy !== 'false') return null
   if (ruleset !== CURRENT_PHYSICS_RULESET) return null
-  return { trackId, easy: easy === 'true', ruleset }
+  return { trackId, ruleset }
 }
 
 function clampLimit(value: string | null): number {

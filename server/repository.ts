@@ -31,9 +31,13 @@ export interface VerifiedLap {
   replay: SerializedLapRecord
 }
 
+/**
+ * One board per circuit and ruleset. Easy and standard laps share it; each
+ * entry says which it was. Replays are still kept per mode (see `submitLap`),
+ * so a driver's best standard lap keeps its ghost when an easy lap beats it.
+ */
 export interface BoardKey {
   trackId: string
-  easy: boolean
   ruleset: string
 }
 

@@ -24,6 +24,7 @@ import { chunkGeometrySteps } from './meshChunks'
  * what stops them reading as untextured CAD fill.
  */
 import * as THREE from 'three'
+import { stripGeometrySteps } from './stripGeometry'
 
 import type { Track } from '../core/track'
 import { PALETTE } from './palette'
@@ -94,6 +95,15 @@ function quadFlat(
   uvScale: number,
 ): void {
   quad(s, ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, color, color, color, color, uvScale)
+}
+
+/** `stripToMesh`, built a slice at a time — see `stripGeometrySteps`. */
+function* stripToMeshSteps(
+  s: Strip, material: THREE.Material, receiveShadow: boolean,
+): Generator<void, THREE.Mesh> {
+  const mesh = new THREE.Mesh(yield* stripGeometrySteps(s), material)
+  mesh.receiveShadow = receiveShadow
+  return mesh
 }
 
 function stripToMesh(s: Strip, material: THREE.Material, receiveShadow: boolean): THREE.Mesh {
@@ -187,7 +197,7 @@ function* makeAsphaltTextures(): Generator<void, { color: THREE.CanvasTexture; n
   const points = Array.from({ length: cells * cells }, () => [rand(), rand(), rand()] as const)
   const colors = new Float32Array(size * size), heights = new Float32Array(size * size), roughness = new Float32Array(size * size)
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-    if (x === 0 && y % 4 === 0) yield
+    if (x === 0) yield
     const gx = x / size * cells, gy = y / size * cells
     const ix = Math.floor(gx), iy = Math.floor(gy)
     let nearest = Infinity, second = Infinity, stoneTone = 0.5
@@ -215,7 +225,7 @@ function* makeAsphaltTextures(): Generator<void, { color: THREE.CanvasTexture; n
   const ctx = canvas.getContext('2d')!, image = ctx.createImageData(size, size)
   const slopeScale = 0.0012 / (2 * 2.5 / size)
   for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-    if (x === 0 && y % 8 === 0) yield
+    if (x === 0 && y % 2 === 0) yield
     const i = y * size + x
     const dx = (heights[y * size + (x + 1) % size]! - heights[y * size + (x + size - 1) % size]!) * slopeScale
     const dy = (heights[((y + 1) % size) * size + x]! - heights[((y + size - 1) % size) * size + x]!) * slopeScale
@@ -310,7 +320,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
 
 
   for (let i = 0; i < n; i++) {
-    if (i % 12 === 0) yield
+    if (i % 3 === 0) yield
     const j = (i + 1) % n
     const hi = track.halfRing[i]!
     const hj = track.halfRing[j]!
@@ -391,6 +401,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
       const edgePaint = stripe.clone().multiplyScalar(0.92)
       const acrossSteps = span.across, alongSteps = span.steps
       for (let l = 0; l < alongSteps; l++) {
+        if (l > 0 && l % 2 === 0) yield
         const t0 = span.from + (span.to - span.from) * l / alongSteps
         const t1 = span.from + (span.to - span.from) * (l + 1) / alongSteps
         for (let c = 0; c < acrossSteps; c++) {
@@ -481,7 +492,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
   const cPost = new THREE.Color(0x2a2e36)
   let postDebt = 0
   for (let i = 0; i < n; i++) {
-    if (i % 12 === 0) yield
+    if (i % 3 === 0) yield
     postDebt += track.segLenAt(i)
     if (postDebt < 4.0) continue
     postDebt = 0
@@ -510,7 +521,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
   const skirts = newStrip()
   const cBlack = new THREE.Color(0x000000)
   for (let i = 0; i < n; i++) {
-    if (i % 12 === 0) yield
+    if (i % 3 === 0) yield
     const j = (i + 1) % n
     const hi = track.halfRing[i]!
     const hj = track.halfRing[j]!
@@ -598,7 +609,7 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
   ] as const) {
     yield
     if (strip.positions.length === 0) continue
-    const mesh = stripToMesh(strip, mat, shadow)
+    const mesh = yield* stripToMeshSteps(strip, mat, shadow)
     if (strip === tarmac) mesh.geometry.setAttribute('roadWear', new THREE.Float32BufferAttribute(roadWear, 3))
     if (strip === kerbs) {
       mesh.name = 'solid-kerbs'
@@ -609,14 +620,14 @@ export function* buildWorldSteps(track: Track, terrain: Terrain): Generator<void
       const sums = new Map<string, THREE.Vector3>()
       const key = (v: number): string => `${positions.getX(v).toFixed(5)},${positions.getY(v).toFixed(5)},${positions.getZ(v).toFixed(5)}`
       for (let v = 0; v < positions.count; v++) {
-        if (v % 2048 === 0) yield
+        if (v % 128 === 0) yield
         const k = key(v), sum = sums.get(k) ?? new THREE.Vector3()
         sum.add(new THREE.Vector3(normals.getX(v), normals.getY(v), normals.getZ(v)))
         sums.set(k, sum)
       }
       for (const normal of sums.values()) normal.normalize()
       for (let v = 0; v < positions.count; v++) {
-        if (v % 2048 === 0) yield
+        if (v % 128 === 0) yield
         const normal = sums.get(key(v))!
         normals.setXYZ(v, normal.x, normal.y, normal.z)
       }
@@ -751,7 +762,7 @@ function* buildGround(
   const white = new THREE.Color(1, 1, 1)
   const tmp = new THREE.Color()
   for (let i = 0; i < pos.count; i++) {
-    if (i % 256 === 0) yield
+    if (i % 64 === 0) yield
     const wx = pos.getX(i) + cx0
     const wz = pos.getZ(i) + cz0
     // three -> sim for the height query.

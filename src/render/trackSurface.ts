@@ -107,7 +107,7 @@ export class TrackSurface {
       }
     }
     for (let i=0;i<track.n;i++) {
-      if (i % 12 === 0) yield
+      if (i % 4 === 0) yield
       for (const span of kerbSpans(track, i, begin)) {
         const point = (l: number, c: number): SurfacePoint => {
           const t = span.from + (span.to - span.from) * l / span.steps

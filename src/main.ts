@@ -37,8 +37,10 @@ import { Sound } from './audio/sound'
 import { attractLineFromPath, bakeAttractLine, type AttractLine } from './render/attractLine'
 import { GhostPath } from './render/ghostPath'
 import { CAMERA_LABEL } from './render/cameras'
+import { Crossfade } from './render/crossfade'
 import { Renderer } from './render/renderer'
 import { fieldLivery, liveryCss, PLAYER_LIVERY } from './render/liveries'
+import { Curtain } from './ui/curtain'
 import { Hud, type HudRaceState } from './ui/hud'
 import { RaceFinish } from './ui/raceFinish'
 import { proximityMarkers, type ProximityRival } from './ui/proximity'
@@ -47,6 +49,7 @@ import type { SessionLap, SessionSummary } from './ui/sessionSummary'
 import { cameraFeel, fullLockFraction, loadSettings, saveSettings, type Settings } from './ui/settings'
 import { RELEASED_PRESETS, RELEASED_TRACKS } from './shared/released'
 import { createLeaderboardServices, sameBoard } from './storage/leaderboard'
+import { recordRank } from './storage/rankMemory'
 import { keyOf, LocalRecordStore, NamespacedStorage, type LapRecord } from './storage/records'
 import { decodePath, loadAttractLaps, pinnedAttractLaps } from './data/attractLaps'
 import { DriveRecorder } from './telemetry/recorder'
@@ -84,6 +87,8 @@ async function boot(): Promise<void> {
   canvas.className = 'viewport'
   stage.append(canvas)
   app.append(stage)
+  const crossfade = new Crossfade(canvas)
+  const curtain = new Curtain(document.body)
 
   const manifest = await loadManifest()
   if (manifest.length === 0) throw new Error('no circuits in the manifest')
@@ -108,6 +113,22 @@ async function boot(): Promise<void> {
    *     await exportLap()                       the current selection's best
    *     await exportLap('power_8', 'legacy')    a specific one
    */
+  /**
+   * Show the leaderboard banner without a verified lap, from the console, to
+   * judge how it looks. Dev only: a real one needs a signed-in profile and the
+   * Supabase board.
+   *
+   *     previewRankBanner(14)       first time on the board
+   *     previewRankBanner(8, 6)     climbed six places
+   */
+  if (import.meta.env.DEV) {
+    (window as unknown as Record<string, unknown>)['previewRankBanner'] = (rank = 14, gained: number | null = null): void => {
+      // As it happens for real: the lap first, the verdict a second later.
+      hud.flashLap(92.418, true, true)
+      setTimeout(() => hud.flashRank(rank, gained), 1000)
+    }
+  }
+
   ;(window as unknown as Record<string, unknown>)['exportLap'] = async (
     trackId?: string, preset?: string, easy?: boolean,
   ): Promise<string> => {
@@ -330,7 +351,16 @@ async function boot(): Promise<void> {
       promise: loadTrack(trackId).then(async loaded => {
         if (trackJob === job) {
           const t0 = performance.now()
-          const applied = await renderer.setTrack(loaded, () => trackJob === job)
+          // Behind the menu, hold the old circuit's picture over the swap and
+          // dissolve it once the new one is drawing. In a session there is no
+          // picture to protect: the session screen is still loading.
+          // Pace the build to the frame rate only while there is a circuit on
+          // screen to keep smooth. On first load there is none, and once
+          // Drive has been pressed the driver is waiting on it: full speed.
+          const applied = await renderer.setTrack(loaded, () => trackJob === job, async () => {
+            if (!running) await crossfade.hold()
+          }, () => track !== null && !running && !menu.waitingToDrive && !curtain.covering)
+            .finally(() => crossfade.release())
           if (applied && trackJob === job) {
             track = loaded
             hud.setTrack(loaded)
@@ -422,6 +452,26 @@ async function boot(): Promise<void> {
       menu.showRaceEvent()
       return
     }
+    // Draw the curtain before any of the setup below, so the work happens out
+    // of sight rather than as a frozen frame of the menu circuit.
+    await curtain.cover(
+      manifest.find((t) => t.id === sel.trackId)?.label ?? 'Circuit',
+      [presetLabel(sel.preset), sel.mode === 'time' ? 'Time trial' : oneShot ? 'Qualifying' : 'Race']
+        .join(' · '),
+    )
+    menu.hide()
+    try {
+      await setUpSession(sel, event, oneShot)
+    } catch (error) {
+      curtain.lift()
+      throw error
+    }
+  }
+
+  /** Everything `start` does behind the curtain. Lifts it, one way or another. */
+  async function setUpSession(
+    sel: Selection, event: RaceEvent | null, oneShot: boolean,
+  ): Promise<void> {
     driveCapture?.finish('new-session')
     running = false
     qualifying = null
@@ -440,7 +490,8 @@ async function boot(): Promise<void> {
     const loaded = await ensureTrack(sel.trackId)
     if (!track || track.id !== sel.trackId) {
       const t0 = performance.now()
-      await renderer.setTrack(loaded)
+      // Behind the curtain: nothing to keep smooth, so build at full speed.
+      await renderer.setTrack(loaded, undefined, undefined, () => false)
       track = loaded
       hud.setTrack(loaded)
       lastBuildMs = performance.now() - t0
@@ -509,6 +560,7 @@ async function boot(): Promise<void> {
           `[race] no baked racing line for ${sel.trackId}/${sel.preset}` +
           ' — the race event cannot start.',
         )
+        curtain.lift()
         menu.showRaceEvent()
         return
       }
@@ -610,6 +662,7 @@ async function boot(): Promise<void> {
     loop.resumeSimulation(true)
     running = true
     paused = false
+    curtain.liftAfterFrame()
   }
 
   /** What the pause screen reports, or null before a car is on a circuit. */
@@ -886,7 +939,16 @@ async function boot(): Promise<void> {
       // Remote acceptance is deliberately off the driving path. The API
       // replays and derives the time; a slow or unavailable board must never
       // stall the next lap, which has already begun.
-      void leaderboard.submit(record, 'Driver').catch((error: unknown) => {
+      void leaderboard.submit(record, 'Driver').then((entry) => {
+        // Null when the lap was not published (no signed-in profile, or the
+        // offline board): nothing was ranked, so there is nothing to say.
+        if (!entry) return
+        const news = recordRank(safeLocalStorage(), record.trackId, entry.rank)
+        // Only while still driving this circuit: a banner that lands on the
+        // menu, or on the next session, is about something you have left.
+        if (!news || !running || track?.id !== record.trackId) return
+        hud.flashRank(news.rank, news.gained)
+      }).catch((error: unknown) => {
         console.warn('[leaderboard] lap submission failed', error)
       })
       if (isBest) {
@@ -1033,6 +1095,7 @@ async function boot(): Promise<void> {
         // there is no session — a paused one keeps its own scene, held still.
         attractTime += dtWall
         renderer.renderFlyover(track, attractTime, dtWall)
+        crossfade.afterFrame()
         // The menu is silent. The attract field is ten cars lapping with
         // nobody driving them, and scoring that would be background music.
         sound.idle()
@@ -1083,6 +1146,7 @@ async function boot(): Promise<void> {
           paused ? 0 : dtWall,
           { lateral: proj.lateral, half: proj.half, margin: OFF_TRACK_MARGIN },
         )
+        curtain.afterFrame()
 
         // A held frame is silent, and it stops here.
         //
@@ -1389,6 +1453,11 @@ function interpolate(a: CarState, b: CarState, alpha: number): CarState {
     yaw: a.yaw + wrapAngle(b.yaw - a.yaw) * t,
     steer: a.steer + (b.steer - a.steer) * t,
   }
+}
+
+/** localStorage, or null where reading it throws (some private modes). */
+function safeLocalStorage(): Storage | null {
+  try { return window.localStorage } catch { return null }
 }
 
 async function loadBests(store: LocalRecordStore): Promise<Map<string, LapRecord>> {

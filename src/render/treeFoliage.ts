@@ -12,7 +12,7 @@ export function* treeFoliageTextureSteps():Generator<void,THREE.CanvasTexture> {
   const clumps=Array.from({length:9},(_,i)=>{const angle=i*2.399,reach=i===0?0:70+r()*70;return {x:256+Math.cos(angle)*reach,y:256+Math.sin(angle)*reach,rx:58+r()*40,ry:56+r()*35}})
   // Back to front: shaded interiors first, interlocking lit leaf surfaces second.
   for(let layer=0;layer<3;layer++)for(let i=0;i<800;i++){
-   if(i%64===0)yield
+   if(i%16===0)yield
    const clump=clumps[i%clumps.length]!,angle=r()*Math.PI*2,reach=Math.sqrt(r())
    const x=clump.x+Math.cos(angle)*reach*clump.rx,y=clump.y+Math.sin(angle)*reach*clump.ry
    if(x<24||x>488||y<24||y>488)continue

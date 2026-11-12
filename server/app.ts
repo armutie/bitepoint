@@ -78,7 +78,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   })
 
   app.get<{
-    Querystring: { trackId?: string; easy?: string; ruleset?: string; limit?: string }
+    Querystring: { trackId?: string; ruleset?: string; limit?: string }
   }>('/v1/leaderboards', async (request, reply) => {
     const key = boardKey(request.query)
     if (!key) return fail(reply, 400, 'Leaderboard query is invalid.')
@@ -189,15 +189,14 @@ function parseLap(value: unknown): LapRecord | null {
   }
 }
 
+// An `easy` parameter from an older client is ignored: there is one board.
 function boardKey(query: {
   trackId?: string
-  easy?: string
   ruleset?: string
-}): { trackId: string; easy: boolean; ruleset: string } | null {
+}): { trackId: string; ruleset: string } | null {
   if (!query.trackId || !TRACKS.has(query.trackId)) return null
-  if (query.easy !== 'true' && query.easy !== 'false') return null
   if (query.ruleset !== CURRENT_PHYSICS_RULESET) return null
-  return { trackId: query.trackId, easy: query.easy === 'true', ruleset: query.ruleset }
+  return { trackId: query.trackId, ruleset: query.ruleset }
 }
 
 function clampLimit(value: string | undefined): number {

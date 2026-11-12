@@ -9,7 +9,7 @@ export function* chunkGeometrySteps(source: THREE.BufferGeometry, metres = 64): 
   const attributes = Object.entries(source.attributes)
   const chunks = new Map<string, Map<string, number[]>>()
   for (let triangle = 0; triangle < count; triangle += 3) {
-    if (triangle % 1536 === 0) yield
+    if (triangle % 384 === 0) yield
     const vertices = [0,1,2].map(v => index ? index.getX(triangle+v) : triangle+v)
     const x = vertices.reduce((sum,v)=>sum+position.getX(v),0)/3
     const z = vertices.reduce((sum,v)=>sum+position.getZ(v),0)/3

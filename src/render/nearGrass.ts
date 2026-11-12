@@ -26,7 +26,7 @@ function* turfTexture(): Generator<void, THREE.CanvasTexture> {
   ctx.putImageData(image, 0, 0)
   // Fine overlapping cut blades, with a few dry stems, rather than lawn stripes.
   for (let i = 0; i < 16000; i++) {
-    if (i % 128 === 0) yield
+    if (i % 32 === 0) yield
     const x = rand() * size, y = rand() * size
     const length = 4 + rand() * 18, lean = (rand() - 0.5) * 10
     const dry = rand() < 0.08
@@ -159,7 +159,7 @@ export function* buildNearGrassSteps(track: Track, terrain: Terrain): Generator<
       }
     }
     chunkLength += len
-    if (chunkLength > 40) flush()
+    if (chunkLength > 40) { flush(); yield }
   }
   flush()
   const ground = new THREE.BufferGeometry()

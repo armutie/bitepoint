@@ -20,7 +20,7 @@ import {
 } from '../core/raceSession'
 import { isClean, type Assists, type LeaderboardClient, type LeaderboardEntry } from '../storage/leaderboard'
 import { ASSISTS_ADJUSTABLE, LEGACY_TYRE_MODE, SHOW_REFERENCE_DRIVER } from '../features'
-import { formatTime, keyOf, type LapRecord, type RecordKey } from '../storage/records'
+import { formatTime, keyOf, type LapRecord } from '../storage/records'
 import { carBars, carTags, powerToWeight } from './carStats'
 import { buildTrackMap } from './trackMap'
 import { icon, type IconName } from './icons'
@@ -135,7 +135,12 @@ export class Menu {
   private profileOpen = false
   /** Board filters are browsing state; changing them must not rebuild the 3D preview. */
   private leaderboardTrackId: string
-  private leaderboardEasy: boolean
+  /**
+   * Hide easy-mode laps. Not persisted, for the reason `assistFilter` is not:
+   * a filter that survives a reload is a board that looks thin for reasons
+   * nobody remembers setting.
+   */
+  private leaderboardHideEasy = false
   /** A local PB the driver explicitly asked to publish after choosing a name. */
   private pendingLeaderboardLap: LapRecord | null
   /**
@@ -173,7 +178,6 @@ export class Menu {
     if (initial.mode === 'time') this.timeSelection = { trackId: initial.trackId, preset: initial.preset }
     this.settings = settings
     this.leaderboardTrackId = initial.trackId
-    this.leaderboardEasy = initial.easy
     this.pendingLeaderboardLap = restorePendingLeaderboardLap(deps.bests)
     this.root = el('div', 'menu')
     this.panel = el('div', 'menu-panel')
@@ -213,10 +217,42 @@ export class Menu {
     return !this.root.classList.contains('is-hidden')
   }
 
+  /**
+   * The circuit behind the menu is (or is no longer) being built.
+   *
+   * This used to disable Continue and Drive until the build finished, which
+   * held the whole menu hostage to a background job. Now nothing is locked:
+   * the setup steps do not need the circuit at all, and Drive, pressed early,
+   * waits for it — see `whenReady`.
+   */
   setLoading(label: string | null): void {
     this.loading.textContent = label ? `Loading ${label}…` : ''
     this.root.setAttribute('aria-busy', String(!!label))
-    this.panel.querySelectorAll<HTMLButtonElement>('.flow-continue').forEach(button => { button.disabled = !!label })
+    if (!label && this.queuedDrive) {
+      const drive = this.queuedDrive
+      this.queuedDrive = null
+      drive()
+    }
+  }
+
+  /** A Drive pressed while the circuit was still loading, run when it lands. */
+  private queuedDrive: (() => void) | null = null
+
+  /** True while a driver is waiting on the circuit, so the build can stop pacing itself. */
+  get waitingToDrive(): boolean {
+    return this.queuedDrive !== null
+  }
+
+  /**
+   * Run `action` now if the circuit is ready, or the moment it is. The button
+   * says so rather than going dead: a disabled Drive with no reason given
+   * reads as a broken menu.
+   */
+  private whenReady(button: HTMLButtonElement, action: () => void): void {
+    if (!this.loading.textContent) { action(); return }
+    this.queuedDrive = action
+    button.disabled = true
+    button.textContent = 'Starting…'
   }
 
   hide(): void {
@@ -278,6 +314,8 @@ export class Menu {
 
   private renderFlow(): void {
     this.pausedStatus = undefined
+    // Leaving the screen a queued Drive was pressed on cancels it.
+    this.queuedDrive = null
     const focused = document.activeElement
     const keyboardFocus = focused instanceof HTMLElement && focused.matches(':focus-visible')
     const focusedLabel = focused?.getAttribute('aria-label')
@@ -371,7 +409,6 @@ export class Menu {
         else this.backFlow()
       })
       const next = el('button', 'flow-continue')
-      next.disabled = !!this.loading.textContent
       next.textContent = this.flowStep === 'circuit' ? 'Continue'
         : SHOW_REFERENCE_DRIVER ? 'Watch' : this.flowStep === 'race'
           ? this.raceEvent?.completed ? 'New event' : this.raceEvent?.qualifying ? 'To the grid' : 'Start qualifying'
@@ -383,7 +420,7 @@ export class Menu {
         } else if (this.flowStep === 'race' && this.raceEvent?.completed) {
           this.onNewEvent()
           this.renderFlow()
-        } else if (hasSeenControls()) this.startDrive()
+        } else if (hasSeenControls()) this.whenReady(next, () => this.startDrive())
         else this.showQuickStart()
       })
       actions.append(back, next)
@@ -543,6 +580,7 @@ export class Menu {
 
   /** One small first-run gate; reading the full reference also dismisses it. */
   private showQuickStart(): void {
+    this.queuedDrive = null
     this.show('dialog')
     this.root.classList.add('menu-controls')
     this.controlsOpen = true
@@ -575,7 +613,7 @@ export class Menu {
     start.textContent = 'Drive'
     start.addEventListener('click', () => {
       markControlsSeen()
-      this.startDrive()
+      this.whenReady(start, () => this.startDrive())
     })
     actions.append(back, start)
     this.panel.append(header, quick)
@@ -583,16 +621,15 @@ export class Menu {
     this.panel.append(actions)
   }
 
+  /** The menu stays up until the session's loading curtain has covered it. */
   private startDrive(): void {
     if (this.selection.mode === 'race') this.selection = raceSelection(this.selection)
-    this.hide()
     if (this.selection.mode === 'race' && !this.raceEvent?.qualifying) this.onQualify(this.selection)
     else this.onStart(this.selection)
   }
 
   private openLeaderboard(): void {
     this.leaderboardTrackId = this.selection.trackId
-    this.leaderboardEasy = this.selection.easy
     void this.showLeaderboard()
   }
 
@@ -621,12 +658,15 @@ export class Menu {
     body.append(loading)
     this.panel.append(header, filters, body, this.leaderboardFooter())
 
-    const key = { trackId: this.leaderboardTrackId, easy: this.leaderboardEasy }
+    const key = { trackId: this.leaderboardTrackId }
+    const hideEasy = this.leaderboardHideEasy
+    const shown = (assists: Assists | undefined, easy: boolean | undefined): boolean =>
+      matchesFilter(assists, this.assistFilter) && !(hideEasy && easy)
     try {
       await this.publishPendingLeaderboardLap()
       const page = await this.deps.leaderboard.list(key)
       // Do not paint a request that resolved after the user moved to another board.
-      if (key.trackId !== this.leaderboardTrackId || key.easy !== this.leaderboardEasy) return
+      if (key.trackId !== this.leaderboardTrackId || hideEasy !== this.leaderboardHideEasy) return
       body.replaceChildren()
       const scope = el('div', 'leaderboard-scope')
       scope.textContent = page.scope === 'global'
@@ -642,10 +682,10 @@ export class Menu {
         | { kind: 'remote'; time: number; entry: LeaderboardEntry }
         | { kind: 'local'; time: number; record: LapRecord }
       > = page.entries
-        .filter((entry) => matchesFilter(entry.assists, this.assistFilter))
+        .filter((entry) => shown(entry.assists, entry.easy))
         .map((entry) => ({ kind: 'remote', time: entry.time, entry }))
       const local = this.localLeaderboardLap(key, page.scope)
-      if (local && matchesFilter(assistsForLap(local), this.assistFilter)) {
+      if (local && shown(assistsForLap(local), local.easy)) {
         rows.push({ kind: 'local', time: local.time, record: local })
       }
       rows.sort((a, b) => a.time - b.time)
@@ -656,9 +696,11 @@ export class Menu {
         body.append(empty)
       } else if (rows.length === 0) {
         const empty = el('div', 'leaderboard-empty')
-        empty.textContent = this.assistFilter === 'clean'
-          ? 'No laps without assists yet.'
-          : 'No laps match that filter.'
+        empty.textContent = hideEasy && this.assistFilter === 'all'
+          ? 'No standard-mode laps yet.'
+          : this.assistFilter === 'clean'
+            ? 'No laps without assists yet.'
+            : 'No laps match that filter.'
         body.append(empty)
       } else {
         const list = el('div', 'leaderboard-list')
@@ -720,12 +762,15 @@ export class Menu {
   }
 
   /** A private PB overlays the global board until it has a public owner. */
-  private localLeaderboardLap(key: RecordKey, scope: 'global' | 'personal'): LapRecord | null {
+  private localLeaderboardLap(key: { trackId: string }, scope: 'global' | 'personal'): LapRecord | null {
     if (scope !== 'global' || !this.deps.profiles) return null
-    const local = this.deps.bests.get(keyOf(key)) ?? null
+    // Bests are still stored per mode; the board has one row for the faster.
+    const local = [false, true]
+      .map((easy) => this.deps.bests.get(keyOf({ trackId: key.trackId, easy })))
+      .reduce<LapRecord | null>((best, lap) => lap && (!best || lap.time < best.time) ? lap : best, null)
     if (!local) return null
     if (!this.deps.profiles.current?.locked) return local
-    return this.pendingLeaderboardLap && keyOf(this.pendingLeaderboardLap) === keyOf(key) ? local : null
+    return this.pendingLeaderboardLap?.trackId === key.trackId ? local : null
   }
 
   /** Identity is an action in the header, never a panel above the times. */
@@ -776,22 +821,24 @@ export class Menu {
     })
     circuit.append(circuitLabel, select)
 
+    // One board per circuit: easy laps are on it, marked, and this only
+    // narrows the view. It is not a second board.
     const mode = el('div', 'leaderboard-control leaderboard-mode-control')
     const modeLabel = el('span', 'leaderboard-control-label')
-    modeLabel.textContent = 'Mode'
+    modeLabel.textContent = 'Laps'
     const choices = el('div', 'leaderboard-mode')
     choices.setAttribute('role', 'group')
-    choices.setAttribute('aria-label', 'Leaderboard mode')
-    for (const [easy, label] of [[false, 'Standard'], [true, 'Easy']] as const) {
+    choices.setAttribute('aria-label', 'Which laps to show')
+    for (const [hide, label] of [[false, 'All'], [true, 'Standard only']] as const) {
       const button = el('button', 'leaderboard-mode-option')
       button.type = 'button'
       button.textContent = label
-      const selected = this.leaderboardEasy === easy
+      const selected = this.leaderboardHideEasy === hide
       button.classList.toggle('is-selected', selected)
       button.setAttribute('aria-pressed', String(selected))
       button.addEventListener('click', () => {
-        if (this.leaderboardEasy === easy) return
-        this.leaderboardEasy = easy
+        if (this.leaderboardHideEasy === hide) return
+        this.leaderboardHideEasy = hide
         void this.showLeaderboard()
       })
       choices.append(button)
@@ -830,6 +877,7 @@ export class Menu {
     // a different wing, which is the one thing the merge takes away.
     const setup = entry.preset ? PRESET_INFO[entry.preset as MenuPresetName] : undefined
     if (setup) marks.append(assistBadge(setup.label, 'is-setup', `Set on ${setup.label}`))
+    if (entry.easy) marks.append(easyBadge())
     if (ASSISTS_ADJUSTABLE) {
       if (entry.assists?.tc) marks.append(assistBadge('TC', 'is-tc', 'Traction control was used'))
       if (entry.assists?.abs) marks.append(assistBadge('ABS', 'is-abs', 'Anti-lock braking was on'))
@@ -840,10 +888,11 @@ export class Menu {
     ghost.disabled = !entry.ghostAvailable || selected
     ghost.title = entry.ghostAvailable ? 'Use this verified replay as your ghost' : 'Replay unavailable'
     ghost.addEventListener('click', () => {
+      // The ghost replays in its own mode, so choosing an easy lap's ghost
+      // does not switch you into easy mode, or the reverse.
       this.selection = {
         ...this.selection,
         trackId: this.leaderboardTrackId,
-        easy: this.leaderboardEasy,
         ghost: true,
         ghostEntryId: entry.id,
       }
@@ -864,6 +913,7 @@ export class Menu {
     const marks = el('span', 'leaderboard-assists')
     const setup = PRESET_INFO[record.preset as MenuPresetName]
     if (setup) marks.append(assistBadge(setup.label, 'is-setup', `Set on ${setup.label}`))
+    if (record.easy) marks.append(easyBadge())
     marks.append(assistBadge('UNSAVED', 'is-unsaved', 'This lap exists only on this device'))
     if (ASSISTS_ADJUSTABLE) {
       const assists = assistsForLap(record)
@@ -910,7 +960,6 @@ export class Menu {
     const personal = el('button', 'btn')
     const followingPersonal =
       this.selection.trackId === this.leaderboardTrackId &&
-      this.selection.easy === this.leaderboardEasy &&
       this.selection.ghostEntryId === null
     personal.textContent = followingPersonal ? 'Following personal best' : 'Use personal best'
     personal.disabled = followingPersonal
@@ -918,7 +967,6 @@ export class Menu {
       this.selection = {
         ...this.selection,
         trackId: this.leaderboardTrackId,
-        easy: this.leaderboardEasy,
         ghost: true,
         ghostEntryId: null,
       }
@@ -1850,12 +1898,42 @@ export class Menu {
   private renderSetup(): HTMLElement {
     const wrap = el('div', 'menu-toggles')
     wrap.append(
-      switchToggle('Easy mode', 'Aids wound up, grip on the grass. Times kept apart.', this.selection.easy, (v) => {
+      switchToggle('Easy mode', 'Aids wound up, grip on the grass. Marked on the board.', this.selection.easy, (v) => {
         this.selection = { ...this.selection, easy: v, ghostEntryId: null }
         this.onSelectionChange(this.selection)
         this.renderFlow()
       }),
+      this.renderGearboxChoice(),
     )
+    return wrap
+  }
+
+  /**
+   * Automatic or manual, as a choice between two named options rather than a
+   * "Manual: on/off" switch — neither is the default being departed from.
+   * The same setting as the Gearbox row in Settings, not a second copy: it is
+   * a choice made before the lap, so it sits with Easy mode too.
+   */
+  private renderGearboxChoice(): HTMLElement {
+    const wrap = el('div', 'flow-choice')
+    const title = el('span', 'switch-title')
+    title.textContent = 'Gearbox'
+    const picker = segmented(
+      [{ id: 'auto', label: 'Automatic' }, { id: 'manual', label: 'Manual' }],
+      this.settings.gearbox,
+      (v) => {
+        this.settings = { ...this.settings, gearbox: v as Settings['gearbox'] }
+        this.onSettingsChange(this.settings)
+        this.renderFlow()
+      },
+    )
+    picker.setAttribute('role', 'group')
+    picker.setAttribute('aria-label', 'Gearbox')
+    const blurb = el('span', 'switch-blurb')
+    blurb.textContent = this.settings.gearbox === 'manual'
+      ? 'Shift with E / Q or the mouse buttons.'
+      : 'The car shifts for you.'
+    wrap.append(title, picker, blurb)
     return wrap
   }
 
@@ -2046,6 +2124,10 @@ const ASSIST_FILTERS: readonly [AssistFilter, string, string][] = [
 function matchesFilter(a: Assists | undefined, f: AssistFilter): boolean {
   if (f === 'all' || !a) return true
   return f === 'clean' ? isClean(a) : !a.abs
+}
+
+function easyBadge(): HTMLElement {
+  return assistBadge('EASY', 'is-easy', 'Driven in easy mode: aids on, full grip on the grass')
 }
 
 function assistBadge(label: string, extra: string, title: string): HTMLElement {

@@ -66,6 +66,16 @@ html, body, #app {
 }
 
 .viewport { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+/* The old circuit's last frame, held over a circuit change and dissolved away. */
+.viewport-crossfade {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  display: block; pointer-events: none; opacity: 0;
+}
+.viewport-crossfade.is-held { opacity: 1; }
+.viewport-crossfade.is-fading { transition: opacity var(--crossfade-ms, 450ms) ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .viewport-crossfade.is-fading { transition-duration: 1ms; }
+}
 .is-hidden { display: none !important; }
 
 /* Small open double chevrons around the cockpit, clear of the instruments. */
@@ -312,11 +322,20 @@ html, body, #app {
   left: 50%;
   transform: translateX(-50%) translateY(-6px);
   text-align: center;
+  /* The same plate as the timing card: bare text over a bright sky was hard to
+     read, and the small labels disappeared first. */
+  min-width: 220px;
+  padding: 10px 20px 12px;
+  background: var(--hud-card);
+  border: 1px solid var(--hud-divider);
+  border-radius: 3px;
+  white-space: nowrap;
   opacity: 0;
   pointer-events: none;
   transition: opacity 260ms, transform 260ms;
 }
 .lap-banner.is-on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
 .lap-banner-label {
   font-family: var(--mono);
   font-size: 10px;
@@ -334,6 +353,38 @@ html, body, #app {
 .lap-banner.is-best .lap-banner-time { color: var(--hud-good); }
 .lap-banner.is-void .lap-banner-label,
 .lap-banner.is-void .lap-banner-time { color: var(--hud-warn); }
+
+/* The leaderboard's verdict on the lap: closed until the server has verified
+   it, then opens under the time. */
+.lap-banner-rank {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 10px;
+  max-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 260ms ease, margin-top 260ms ease, opacity 260ms ease;
+}
+.lap-banner.has-rank .lap-banner-rank { max-height: 40px; margin-top: 6px; opacity: 1; }
+.lap-banner-rank-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--hud-label);
+}
+.lap-banner-place {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.lap-banner-change { font-family: var(--mono); font-size: 12px; color: var(--ahead); }
+.lap-banner.is-first-rank .lap-banner-change { color: var(--hud-ink); }
+@media (prefers-reduced-motion: reduce) { .lap-banner-rank { transition: opacity 1ms; } }
 
 /* A flag, not an alarm: it no longer skews or pulses. You already know you put
    a wheel on the grass — this only has to confirm the lap is gone. */
@@ -563,6 +614,7 @@ html, body, #app {
 .assist.is-tc { color: var(--hud-warn); }
 .assist.is-abs { color: #58a6ff; }
 .assist.is-unsaved { color: var(--accent); border-color: var(--edge-hot); }
+.assist.is-easy { color: rgb(120, 200, 230); border-color: rgba(120, 200, 230, 0.4); }
 .leaderboard-legend {
   margin-top: 10px;
   font-size: 11px;
@@ -2485,3 +2537,70 @@ kbd {
   padding: 14px 20px;
 }
 .menu-settings .settings-actions .btn:hover { background: var(--accent); }
+
+/* =====================  LOADING CURTAIN  =====================
+ * Between the menu and a session. Fades in over the menu, hides the setup
+ * work, and fades out once the session's first frame is drawn. */
+.curtain {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity var(--curtain-ms, 220ms) ease, visibility 0s linear var(--curtain-ms, 220ms);
+}
+.curtain.is-on {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity var(--curtain-ms, 220ms) ease, visibility 0s;
+}
+.curtain-inner { width: min(560px, calc(100% - 48px)); }
+.curtain-kicker {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font: 10.5px var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.curtain-title {
+  margin: 0;
+  font-size: clamp(40px, 6vw, 72px);
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.06em;
+}
+.curtain-context { margin: 14px 0 0; color: var(--muted); font: 12px var(--mono); }
+/* An indeterminate bar: the work has no honest percentage, so it does not
+   pretend to one. */
+.curtain-bar {
+  position: relative;
+  height: 2px;
+  margin-top: 30px;
+  overflow: hidden;
+  background: var(--edge);
+}
+.curtain-bar span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 30%;
+  background: var(--accent);
+  animation: curtain-sweep 1.1s ease-in-out infinite;
+}
+@keyframes curtain-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .curtain, .curtain.is-on { transition-duration: 1ms; }
+  .curtain-bar span { animation: none; width: 100%; opacity: 0.5; }
+}
+
+/* A two-way choice in the setup toggles row (Gearbox), sized to sit beside the
+   Easy mode switch. */
+.flow-choice { display: flex; flex-direction: column; gap: 6px; max-width: 290px; }
+.flow-choice .segmented { margin-top: 2px; }

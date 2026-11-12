@@ -17,6 +17,7 @@ import { finishBuild } from './buildScheduler'
  * underside at 7.0 with a 1.7 banner; barrier gap matching world.ts.
  */
 import * as THREE from 'three'
+import { stripGeometrySteps } from './stripGeometry'
 
 import { gridPose, GRID_SLOTS } from '../core/grid'
 import {
@@ -237,10 +238,8 @@ export function* buildScenerySteps(track: Track, terrain: Terrain): Generator<vo
     [solid, solidMat, decorativeRoot],
     [overlay, overlayMat, decorativeRoot],
   ] as const) {
-    const geom = new THREE.BufferGeometry()
-    geom.setAttribute('position', new THREE.Float32BufferAttribute(strip.positions, 3))
-    geom.setAttribute('color', new THREE.Float32BufferAttribute(strip.colors, 3))
-    geom.computeVertexNormals()
+    // In slices: the solid strip alone is large enough to stall a frame.
+    const geom = yield* stripGeometrySteps(strip)
     const mesh = new THREE.Mesh(geom, mat)
     // The player's car shadow is the grounding cue. Casting the entire
     // circuit's furniture into a moving shadow map costs far more than these

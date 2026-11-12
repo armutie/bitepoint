@@ -77,7 +77,7 @@ describe('verified lap submission', () => {
 
     const board = await app.inject({
       method: 'GET',
-      url: `/v1/leaderboards?trackId=balanced_8&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
+      url: `/v1/leaderboards?trackId=balanced_8&ruleset=${CURRENT_PHYSICS_RULESET}`,
     })
     expect(board.json()).toMatchObject({
       scope: 'global',
@@ -110,18 +110,18 @@ describe('leaderboard calendar', () => {
     const app = await buildApp({ repository: new MemoryLeaderboardRepository() })
     const response = await app.inject({
       method: 'GET',
-      url: `/v1/leaderboards?trackId=${trackId}&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
+      url: `/v1/leaderboards?trackId=${trackId}&ruleset=${CURRENT_PHYSICS_RULESET}`,
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
-      key: { trackId, easy: false, ruleset: CURRENT_PHYSICS_RULESET },
+      key: { trackId, ruleset: CURRENT_PHYSICS_RULESET },
       entries: [],
       scope: 'global',
     })
     const retired = await app.inject({
       method: 'GET',
-      url: `/v1/leaderboards?trackId=silverstone&easy=false&ruleset=${CURRENT_PHYSICS_RULESET}`,
+      url: `/v1/leaderboards?trackId=silverstone&ruleset=${CURRENT_PHYSICS_RULESET}`,
     })
     expect(retired.statusCode).toBe(400)
     await app.close()

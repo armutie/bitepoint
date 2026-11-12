@@ -1,4 +1,4 @@
-import { runBuild } from './buildScheduler'
+import { afterNextPaint, runBuild, type BuildStats } from './buildScheduler'
 import { RenderProfiler } from './renderProfiler'
 /**
  * The three.js layer: one renderer, one scene, and the handful of things in it.
@@ -247,33 +247,68 @@ export class Renderer {
   }
 
 
-  /** Keep the previous circuit live while the next one is prepared cooperatively. */
-  async setTrack(track: Track, current: () => boolean = () => true): Promise<boolean> {
+  /**
+   * Keep the previous circuit live while the next one is prepared cooperatively.
+   *
+   * The swap itself used to be the rough part: the first frame of a new circuit
+   * compiled its shaders and uploaded every texture, and threw away and rebuilt
+   * the ten menu cars, all at once — about a second with nothing on screen
+   * moving. Now the GPU work is done before the swap, while the old circuit is
+   * still being drawn, and `beforeSwap` lets the caller freeze the old picture
+   * so the change can be dissolved rather than cut.
+   */
+  async setTrack(
+    track: Track,
+    current: () => boolean = () => true,
+    beforeSwap?: () => Promise<void>,
+    paced?: () => boolean,
+  ): Promise<boolean> {
     const began = performance.now()
-    let longestSlice = 0
+    let stats = null as BuildStats | null
+    // Longest single step per phase, dev only: a step longer than a frame drops
+    // frames however the build is scheduled, so these say where to split next.
+    const longestStep: Record<string, number> = {}
+    const timed = import.meta.env.DEV
+      ? function* <R>(label: string, steps: Generator<void, R>): Generator<void, R> {
+        for (;;) {
+          const t = performance.now()
+          const next = steps.next()
+          longestStep[label] = Math.max(longestStep[label] ?? 0, performance.now() - t)
+          if (next.done) return next.value
+          yield
+        }
+      }
+      : <R>(_label: string, steps: Generator<void, R>): Generator<void, R> => steps
     const prepare = function* (): Generator<void, { world: World; scenery: Scenery; surface: TrackSurface }> {
       let world: World | null = null, scenery: Scenery | null = null, complete = false
       try {
 
-        const surface = yield* TrackSurface.buildSteps(track)
+        const surface = yield* timed('surface', TrackSurface.buildSteps(track))
         yield
 
-        const terrain = yield* buildTerrainSteps(track)
+        const terrain = yield* timed('terrain', buildTerrainSteps(track))
         yield
 
-        world = yield* buildWorldSteps(track, terrain)
+        world = yield* timed('world', buildWorldSteps(track, terrain))
         yield
 
-        scenery = yield* buildScenerySteps(track, terrain)
+        scenery = yield* timed('scenery', buildScenerySteps(track, terrain))
         complete = true
         return { world, scenery, surface }
       } finally {
         if (!complete) { world?.dispose(); scenery?.dispose() }
       }
     }
-    const prepared = await runBuild(prepare(), current, ms => { longestSlice = ms })
+    const prepared = await runBuild(prepare(), current, (_ms, s) => { stats = s }, undefined, paced)
     if (!prepared) return false
     if (!current()) { prepared.world.dispose(); prepared.scenery.dispose(); return false }
+    const warmStart = performance.now()
+    await this.warm(prepared.world.root, prepared.scenery.root)
+    const warmMs = performance.now() - warmStart
+    if (!current()) { prepared.world.dispose(); prepared.scenery.dispose(); return false }
+    await beforeSwap?.()
+    if (!current()) { prepared.world.dispose(); prepared.scenery.dispose(); return false }
+    const swapStart = performance.now()
     this.setDebugLine(null)
     if (this.world) { this.scene.remove(this.world.root); this.world.dispose() }
     if (this.scenery) { this.scene.remove(this.scenery.root); this.scenery.dispose() }
@@ -285,9 +320,58 @@ export class Renderer {
     this.world.root.traverse(o => { o.matrixAutoUpdate = false; o.matrixWorldAutoUpdate = false })
     this.scenery.root.traverse(o => { o.matrixAutoUpdate = false })
     this.buildAttractField(track)
-    if (import.meta.env.DEV) console.info('[track-build]', track.id,
-      JSON.stringify({ totalMs: Math.round(performance.now() - began), longestSliceMs: Math.round(longestSlice) }))
+    if (import.meta.env.DEV) console.info('[track-build]', track.id, JSON.stringify({
+      totalMs: Math.round(performance.now() - began),
+      workMs: Math.round(stats?.workMs ?? 0),
+      slices: stats?.slices ?? 0,
+      frames: stats?.frames ?? 0,
+      meanFrameMs: Math.round((stats?.meanFrameMs ?? 0) * 10) / 10,
+      slowFrames: stats?.slowFrames ?? 0,
+      longestSliceMs: Math.round(stats?.longestSliceMs ?? 0),
+      longestStepMs: Object.fromEntries(Object.entries(longestStep).map(([k, v]) => [k, Math.round(v)])),
+      warmMs: Math.round(warmMs),
+      swapMs: Math.round(performance.now() - swapStart),
+    }))
     return true
+  }
+
+  /**
+   * Compile the shaders and upload the textures a new circuit will need, before
+   * it is shown. Compiling against `this.scene` uses its lights, so the programs
+   * are the ones the first real frame will ask for.
+   */
+  private async warm(...roots: THREE.Object3D[]): Promise<void> {
+    const group = new THREE.Group()
+    const textures = new Set<THREE.Texture>()
+    for (const root of roots) {
+      root.traverse((o) => {
+        const material = (o as THREE.Mesh).material
+        if (!material) return
+        for (const m of Array.isArray(material) ? material : [material]) {
+          for (const value of Object.values(m)) {
+            if (value instanceof THREE.Texture) textures.add(value)
+          }
+        }
+      })
+    }
+    // One upload per frame: a 1024 px texture with mipmaps blocks the main
+    // thread while it uploads, and doing them back to back was a stall.
+    for (const texture of textures) {
+      this.renderer.initTexture(texture)
+      await afterNextPaint(50)
+    }
+    // Borrow the roots for the compile and hand them straight back; `add`
+    // re-parents, so remember where each one was.
+    const parents = roots.map((root) => root.parent)
+    group.add(...roots)
+    try {
+      await this.renderer.compileAsync(group, this.rig.camera, this.scene)
+    } finally {
+      roots.forEach((root, i) => {
+        group.remove(root)
+        parents[i]?.add(root)
+      })
+    }
   }
 
 
@@ -304,20 +388,26 @@ export class Renderer {
    * target speed, they never crash, and ten of them cost microseconds.
    */
   private buildAttractField(track: Track): void {
-    for (const c of this.attract) {
-      this.attractGroup.remove(c.model.root)
-      c.model.dispose()
-    }
+    // The cars do not depend on the circuit, so they are built once and kept.
+    // Rebuilding ten of them on every circuit change was part of the hitch at
+    // the swap.
+    const models = this.attract.map((c) => c.model)
     this.attract = []
     this.attractTrack = track
+    // The previous circuit's racing lines mean nothing here; follow the
+    // centreline until this circuit's laps arrive through `setAttractLines`.
+    this.attractLines = []
 
     const p = handlingPreset('f1')
     this.attractWheelRadius = p.wheelRadius
     const L = track.length
     for (let i = 0; i < ATTRACT_COUNT; i++) {
-      const model = buildCar(p, ATTRACT_SKINS[i % ATTRACT_SKINS.length]!, { detail: 'field' })
+      let model = models[i]
+      if (!model) {
+        model = buildCar(p, ATTRACT_SKINS[i % ATTRACT_SKINS.length]!, { detail: 'field' })
+        this.attractGroup.add(model.root)
+      }
       model.root.visible = false
-      this.attractGroup.add(model.root)
       // Fallback state: evenly round the lap, alternating lanes, and a pace
       // spread wide enough that the order keeps changing.
       this.attract.push({

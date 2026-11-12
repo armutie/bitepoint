@@ -19,6 +19,7 @@
  * stays crisp at every pixel ratio and costs no frame time to lay out again when
  * only the numbers change.
  */
+import { ordinal } from './ordinal'
 import { formatDelta, formatTime } from '../storage/records'
 import { ASSISTS_ADJUSTABLE } from '../features'
 import { buildHudMap, type HudMap } from './hudMap'
@@ -254,6 +255,8 @@ export class Hud {
   private readonly board: HTMLElement
   private readonly boardRows: HTMLElement
   private bannerTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly rankPlace: HTMLElement
+  private readonly rankChange: HTMLElement
   private invalidTimer: ReturnType<typeof setTimeout> | null = null
   private chipsTimer: ReturnType<typeof setTimeout> | null = null
   private lapWasInvalid = false
@@ -332,7 +335,19 @@ export class Hud {
     this.lapBanner = el('div', 'lap-banner')
     this.lapBannerLabel = el('div', 'lap-banner-label')
     this.lapBannerTime = el('div', 'lap-banner-time')
-    this.lapBanner.append(this.lapBannerLabel, this.lapBannerTime)
+    // The leaderboard's verdict on the same lap, as a last line of the same
+    // banner. It arrives a second or so after the line, once the server has
+    // replayed the lap, and opens underneath the time rather than as a second
+    // pop-up competing with it.
+    // "Leaderboard updated · 8th ▲ 6 places". A place on a timing board, not
+    // P8: that is a race position, and this is not a race.
+    const rankRow = el('div', 'lap-banner-rank')
+    const rankLabel = el('span', 'lap-banner-rank-label')
+    rankLabel.textContent = 'Leaderboard updated ·'
+    this.rankPlace = el('span', 'lap-banner-place')
+    this.rankChange = el('span', 'lap-banner-change')
+    rankRow.append(rankLabel, this.rankPlace, this.rankChange)
+    this.lapBanner.append(this.lapBannerLabel, this.lapBannerTime, rankRow)
 
     // One instrument binnacle, bottom centre, exactly as pygame groups it:
     // shift lights over pedals, speed and gear, with the steering trace below.
@@ -639,6 +654,24 @@ export class Hud {
     if (this.bannerTimer) clearTimeout(this.bannerTimer)
     this.bannerTimer = setTimeout(() => this.lapBanner.classList.remove('is-on'), 3400)
     this.sectorHoldUntil = performance.now() + 4000
+  }
+
+  /**
+   * Add where a verified lap put you on the circuit's board to the lap banner.
+   * `gained` is places climbed since you were last ranked here, or null the
+   * first time. If the banner has already faded — a slow verification — it
+   * comes back with the same lap, now ranked.
+   */
+  flashRank(rank: number, gained: number | null): void {
+    this.rankPlace.textContent = ordinal(rank)
+    this.rankChange.textContent = gained === null
+      ? 'New entry'
+      : `\u25B2 ${gained} ${gained === 1 ? 'place' : 'places'}`
+    this.lapBanner.classList.toggle('is-first-rank', gained === null)
+    this.lapBanner.classList.add('is-on', 'has-rank')
+    // Long enough to read the new line, however late it arrived.
+    if (this.bannerTimer) clearTimeout(this.bannerTimer)
+    this.bannerTimer = setTimeout(() => this.lapBanner.classList.remove('is-on'), 3200)
   }
 
   /** Freeze the displayed clock without releasing the held pedal telemetry. */

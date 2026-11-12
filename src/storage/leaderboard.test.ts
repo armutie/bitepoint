@@ -73,7 +73,7 @@ describe('personal leaderboard fallback', () => {
 
 describe('leaderboard identity', () => {
   it('pins every board to the current physics ruleset', () => {
-    expect(withRuleset(KEY)).toEqual({ ...KEY, ruleset: PHYSICS_RULESET })
+    expect(withRuleset(KEY)).toEqual({ trackId: KEY.trackId, ruleset: PHYSICS_RULESET })
   })
 
   it('normalises public driver names', () => {
@@ -146,5 +146,29 @@ describe('isClean', () => {
     expect(isClean({ tc: false, abs: false })).toBe(true)
     expect(isClean({ tc: true, abs: false })).toBe(false)
     expect(isClean({ tc: false, abs: true })).toBe(false)
+  })
+})
+
+describe('one board per circuit, locally', () => {
+  it('lists easy and standard laps together and marks the easy ones', async () => {
+    const standard = lap(62.0, '2026-11-12T09:00:00.000Z')
+    const easy: LapRecord = {
+      ...lap(60.5, '2026-11-12T10:00:00.000Z'),
+      easy: true,
+      recording: { ...standard.recording, easy: true },
+    }
+    const records: RecordStore = {
+      best: async (key) => keyOf(key) === keyOf(standard) ? standard : keyOf(key) === keyOf(easy) ? easy : null,
+      submit: async () => false,
+      past: async () => [],
+      all: async () => [standard, easy],
+      clear: async () => {},
+    }
+    const page = await new PersonalLeaderboardClient(records).list({ trackId: KEY.trackId })
+
+    expect(page.entries.map((entry) => [entry.time, entry.easy])).toEqual([
+      [60.5, true],
+      [62.0, false],
+    ])
   })
 })

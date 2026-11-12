@@ -35,7 +35,8 @@ export class MemoryLeaderboardRepository implements LeaderboardRepository {
   }
 
   async submitLap(input: VerifiedLap): Promise<LeaderboardEntry> {
-    const oldBest = this.bestForPlayer(input.playerId, input)
+    // Replays are kept per mode, so an easy PB never deletes the standard ghost.
+    const oldBest = this.bestForPlayer(input.playerId, input, input.easy)
     const isPersonalBest = !oldBest || input.time < oldBest.time
     if (isPersonalBest && oldBest) oldBest.replay = null
     this.laps.push({ ...input, replay: isPersonalBest ? input.replay : null })
@@ -61,9 +62,9 @@ export class MemoryLeaderboardRepository implements LeaderboardRepository {
 
   async close(): Promise<void> {}
 
-  private bestForPlayer(playerId: string, key: BoardKey): MemoryLap | null {
+  private bestForPlayer(playerId: string, key: BoardKey, easy: boolean): MemoryLap | null {
     return this.laps
-      .filter((lap) => lap.playerId === playerId && sameBoard(lap, key))
+      .filter((lap) => lap.playerId === playerId && sameBoard(lap, key) && lap.easy === easy)
       .reduce<MemoryLap | null>((best, lap) => !best || lap.time < best.time ? lap : best, null)
   }
 
@@ -90,9 +91,10 @@ export class MemoryLeaderboardRepository implements LeaderboardRepository {
       ghostAvailable: lap.replay !== null,
       assists: { tc: lap.tc, abs: lap.abs },
       preset: lap.preset,
+      easy: lap.easy,
     }
   }
 }
 
 const sameBoard = (a: BoardKey, b: BoardKey): boolean =>
-  a.trackId === b.trackId && a.easy === b.easy && a.ruleset === b.ruleset
+  a.trackId === b.trackId && a.ruleset === b.ruleset

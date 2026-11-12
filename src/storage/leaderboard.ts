@@ -24,8 +24,18 @@ export const PHYSICS_RULESET = LEGACY_TYRE_MODE
   ? LEGACY_PHYSICS_RULESET
   : CURRENT_PHYSICS_RULESET
 
-export interface LeaderboardKey extends RecordKey {
+/**
+ * One circuit, one board. Easy and standard laps share it and are told apart
+ * by a mark on the row — see `LeaderboardEntry.easy`.
+ */
+export interface LeaderboardKey {
+  trackId: string
   ruleset: string
+}
+
+/** What a board is chosen by: the circuit. Any `RecordKey` will do. */
+export interface BoardChoice {
+  trackId: string
 }
 
 /**
@@ -37,8 +47,8 @@ export interface LeaderboardKey extends RecordKey {
  * outright fastest lap AND the fastest unassisted one on the same list, which
  * two boards can never show you at once.
  *
- * `easy` is not in here. That is a different world rather than a driver aid —
- * full grip on the grass — and it keys the board itself.
+ * `easy` is not in here either, but for a different reason: it is a mode, not
+ * a dial, so it gets its own mark on the entry (`LeaderboardEntry.easy`).
  */
 export interface Assists {
   /** Traction control was above zero at some point. See `lapUsedTc`. */
@@ -71,6 +81,12 @@ export interface LeaderboardEntry {
    * setup is a property of the lap. Optional for the same reason `assists` is.
    */
   preset?: string
+  /**
+   * Driven in easy mode. Easy and standard laps used to be separate boards;
+   * now each circuit has one, and this is how an easy lap is told apart.
+   * Optional so an older server that never sends it renders as standard.
+   */
+  easy?: boolean
 }
 
 export interface LeaderboardPage {
@@ -81,7 +97,7 @@ export interface LeaderboardPage {
 }
 
 export interface LeaderboardClient {
-  list(key: RecordKey, limit?: number): Promise<LeaderboardPage>
+  list(key: BoardChoice, limit?: number): Promise<LeaderboardPage>
   ghost(entryId: string): Promise<LapRecord>
   /** The server derives the accepted time by replaying `record.recording`. */
   submit(record: LapRecord, playerName: string): Promise<LeaderboardEntry | null>
@@ -96,10 +112,15 @@ export class PersonalLeaderboardClient implements LeaderboardClient {
 
   constructor(private readonly records: RecordStore) {}
 
-  async list(key: RecordKey, limit = 50): Promise<LeaderboardPage> {
-    const best = await this.records.best(key)
-    const laps = [...(best ? [best] : []), ...await this.records.past(key)]
-      .sort((a, b) => a.time - b.time)
+  async list(key: BoardChoice, limit = 50): Promise<LeaderboardPage> {
+    // Local records are still stored per mode; the board shows both.
+    const laps: LapRecord[] = []
+    for (const easy of [false, true]) {
+      const modeKey = { trackId: key.trackId, easy }
+      const best = await this.records.best(modeKey)
+      laps.push(...(best ? [best] : []), ...await this.records.past(modeKey))
+    }
+    laps.sort((a, b) => a.time - b.time)
       .slice(0, limit)
     this.ghosts.clear()
     const entries = laps.map((lap, index) => {
@@ -121,6 +142,7 @@ export class PersonalLeaderboardClient implements LeaderboardClient {
           abs: lap.recording.abs ?? false,
         },
         preset: lap.recording.preset,
+        easy: lap.easy,
       }
     })
     return { key: withRuleset(key), entries, scope: 'personal' }
@@ -154,10 +176,9 @@ export class HttpLeaderboardClient implements LeaderboardClient {
     private readonly profiles: PlayerProfileClient,
   ) {}
 
-  async list(key: RecordKey, limit = 50): Promise<LeaderboardPage> {
+  async list(key: BoardChoice, limit = 50): Promise<LeaderboardPage> {
     const query = new URLSearchParams({
       trackId: key.trackId,
-      easy: String(key.easy),
       ruleset: PHYSICS_RULESET,
       limit: String(limit),
     })
@@ -229,10 +250,12 @@ export function createLeaderboardServices(records: RecordStore): LeaderboardServ
   return { leaderboard: new HttpLeaderboardClient(url, profiles), profiles }
 }
 
-export const withRuleset = (key: RecordKey): LeaderboardKey => ({ ...key, ruleset: PHYSICS_RULESET })
+export const withRuleset = (key: BoardChoice): LeaderboardKey =>
+  ({ trackId: key.trackId, ruleset: PHYSICS_RULESET })
 
-export function sameBoard(a: RecordKey, b: RecordKey): boolean {
-  return keyOf(a) === keyOf(b)
+/** Same circuit, so the same board — whichever mode either lap was driven in. */
+export function sameBoard(a: BoardChoice, b: BoardChoice): boolean {
+  return a.trackId === b.trackId
 }
 
 export function cleanPlayerName(name: string): string {

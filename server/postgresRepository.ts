@@ -25,6 +25,7 @@ interface EntryRow {
   tc: boolean
   abs: boolean
   preset: string
+  easy: boolean
   ghost_available: boolean
   player_id: string
 }
@@ -141,12 +142,11 @@ async function rankedBoard(sql: QuerySql, key: BoardKey, limit: number): Promise
     WITH personal_bests AS (
       SELECT DISTINCT ON (l.player_id)
         l.id, l.player_id, p.username, l.time, l.recorded_at,
-        l.tc, l.abs, l.preset, (r.lap_id IS NOT NULL) AS ghost_available
+        l.tc, l.abs, l.preset, l.easy, (r.lap_id IS NOT NULL) AS ghost_available
       FROM laps l
       JOIN players p ON p.id = l.player_id
       LEFT JOIN lap_replays r ON r.lap_id = l.id
       WHERE l.track_id = ${key.trackId}
-        AND l.easy = ${key.easy}
         AND l.ruleset = ${key.ruleset}
       ORDER BY l.player_id, l.time ASC, l.recorded_at ASC, l.id ASC
     ), ranked AS (
@@ -177,5 +177,6 @@ function entryFromRow(row: EntryRow): LeaderboardEntry {
     ghostAvailable: row.ghost_available,
     assists: { tc: row.tc, abs: row.abs },
     preset: row.preset,
+    easy: row.easy,
   }
 }
