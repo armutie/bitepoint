@@ -10,7 +10,7 @@ import './styles.css'
 
 import { reverseSelected, useLegacyTyreModel, type CarState } from './core/car'
 import {
-  applyEasyAids, handlingPreset, presetLabel, PRESET_INFO, PRESET_ORDER,
+  applyEasyAids, EASY_TC_LEVEL, handlingPreset, presetLabel, PRESET_INFO, PRESET_ORDER,
   TC_LEVEL_MAX, type PresetName,
 } from './core/carParams'
 import {
@@ -282,7 +282,6 @@ async function boot(): Promise<void> {
    *
    * `TC_LEVEL_DEFAULT` (4) is the other candidate and is what this was.
    */
-  const EASY_TC_LEVEL = 1
   /**
    * The race in progress, or null in a time trial.
    *

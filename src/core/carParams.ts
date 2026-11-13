@@ -565,6 +565,9 @@ export function handlingPreset(name: PresetName): CarParams {
  * up. Grass grip is deliberately absent: that is a property of the surface, not
  * the vehicle, and lives on the sim rather than here.
  */
+/** Traction control in easy mode; off otherwise. Shared by single player and multiplayer. */
+export const EASY_TC_LEVEL = 1
+
 export function applyEasyAids(p: CarParams): CarParams {
   p.tractionControl = true
   p.tcSlip = 0.07

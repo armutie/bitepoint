@@ -1,14 +1,17 @@
 import type { CarState } from '../core/car'
-import type { PresetName } from '../core/carParams'
+import { applyEasyAids, EASY_TC_LEVEL, handlingPreset, type CarParams, type PresetName } from '../core/carParams'
 import type { RaceAction, RacePhase } from '../core/race'
 import { CURRENT_PHYSICS_RULESET } from '../shared/ruleset'
 
-export const PROTOCOL = `bitepoint-mp-4:${CURRENT_PHYSICS_RULESET}`
+// 5: easy mode replaced the ABS choice.
+export const PROTOCOL = `bitepoint-mp-5:${CURRENT_PHYSICS_RULESET}`
 export const TRACKS = ['power_8', 'silverstone-gp', 'power_4', 'balanced_8', 'power_3'] as const
 export type Slot = 0 | 1
 export interface RoomConfig {
   protocol: string; trackId: string; preset: PresetName; laps: number
-  contact: boolean; manual: boolean; abs: boolean
+  contact: boolean; manual: boolean
+  /** Easy mode for both drivers, exactly as single player applies it. */
+  easy: boolean
 }
 export interface InputFrame extends RaceAction { seq: number; shift: number; tcLevel: number }
 export const IDLE: InputFrame = { seq: 0, steer: 0, throttle: 0, shift: 0, tcLevel: 2 }
@@ -37,14 +40,14 @@ export interface Signal {
  */
 export function canonicalConfig(c: RoomConfig): RoomConfig {
   return { protocol: c.protocol, trackId: c.trackId, preset: c.preset, laps: c.laps,
-    contact: c.contact, manual: c.manual, abs: c.abs }
+    contact: c.contact, manual: c.manual, easy: c.easy }
 }
 export function validConfig(v: unknown): v is RoomConfig {
   if (!v || typeof v !== 'object') return false
   const c = v as RoomConfig
   return c.protocol === PROTOCOL && (TRACKS as readonly string[]).includes(c.trackId)
     && ['legacy', 'classic'].includes(c.preset) && Number.isInteger(c.laps) && c.laps >= 1 && c.laps <= 10
-    && typeof c.contact === 'boolean' && typeof c.manual === 'boolean' && typeof c.abs === 'boolean'
+    && typeof c.contact === 'boolean' && typeof c.manual === 'boolean' && typeof c.easy === 'boolean'
 }
 export function validInput(v: unknown): v is InputFrame {
   if (!v || typeof v !== 'object') return false
@@ -69,3 +72,16 @@ export function validSnapshot(v: unknown): v is Snapshot {
     && Array.isArray(s.scores) && s.scores.length === 2
     && s.scores.every(c => c && Number.isFinite(c.laps) && Number.isFinite(c.lapTime) && Number.isFinite(c.position))
 }
+
+/**
+ * The car both drivers race, from the room's settings: the handling preset,
+ * with easy aids if the room is in easy mode, exactly as single player builds
+ * it. ABS stays off, as it is in single player.
+ */
+export function roomCarParams(c: RoomConfig): CarParams {
+  const p = handlingPreset(c.preset)
+  return c.easy ? applyEasyAids(p) : p
+}
+
+/** Traction control is the mode's, not a personal setting: the same for both. */
+export const roomTcLevel = (c: RoomConfig): number => c.easy ? EASY_TC_LEVEL : 0

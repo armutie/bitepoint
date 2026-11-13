@@ -34,17 +34,25 @@ export interface NetsimOptions {
    * latency, so the host sees the guest where the guest actually is.
    */
   hostLead?: boolean
+  /** Start the cars alongside at speed, close enough that steering makes them touch. */
+  sideBySide?: boolean
+  /** Which way the side-by-side drivers lean: toward each other for one sign. */
+  leanSign?: 1 | -1
 }
 
 export interface NetsimReport {
   /** How far the guest's own car jumps when a correction lands, metres (p95). */
   guestSnapP95: number
+  /** The single worst jump of the guest's own car, metres. */
+  guestSnapMax: number
   /** Guest's view of the host car vs where the host car really is, metres (p95). */
   guestViewErrorP95: number
   /** Host's view of the guest car vs where the guest car really is, metres (p95). */
   hostViewErrorP95: number
   /** Time from the guest's input to the authority applying it, ms (mean). */
   guestInputDelayMs: number
+  /** Ticks with car-to-car contact, after warm-up: proof a contact run touched. */
+  impacts: number
 }
 
 const p95 = (xs: number[]): number => {
@@ -74,6 +82,14 @@ export function runNetsim(track: Track, config: RoomConfig, opts: NetsimOptions)
 
   const authority = new RaceAuthority(track, config)
   authority.race.phase = 'racing'
+  if (opts.sideBySide) {
+    const pose = track.poseAt(250)
+    for (const slot of [0, 1] as const) {
+      const car = authority.race.sims[slot]!.car, lateral = slot === 0 ? -0.9 : 0.9
+      car.setPose(pose.x - Math.sin(pose.yaw) * lateral, pose.y + Math.cos(pose.yaw) * lateral, pose.yaw)
+      car.s.vx = 30; car.s.wheelVr = 30
+    }
+  }
   const host = new Predictor(track, config, 0), guest = new Predictor(track, config, 1)
   host.reconcile(authority.snapshot()); guest.reconcile(authority.snapshot())
   const drive = [driver(11), driver(23)]
@@ -82,10 +98,15 @@ export function runNetsim(track: Track, config: RoomConfig, opts: NetsimOptions)
   const lead = opts.hostLead ? hostLeadTicks(2 * opts.link.latencyMs + opts.link.jitterMs) : 0
 
   const snaps: number[] = [], guestView: number[] = [], hostView: number[] = [], inputLag: number[] = []
+  let impacts = 0
+  // Side by side, the drivers also lean on each other in regular pulses, so a
+  // contact run keeps colliding instead of drifting apart after the start.
+  const lean = (slot: 0 | 1, tick: number): number =>
+    opts.sideBySide && tick % 45 < 12 ? (slot === 0 ? 1 : -1) * (opts.leanSign ?? 1) * 0.12 : 0
   for (let tick = 1; tick <= ticks; tick++) {
     const h = drive[0]!(tick), g = drive[1]!(tick)
-    authority.receive(0, [host.frame(h.steer, h.throttle, 0, 2)])
-    guest.frame(g.steer, g.throttle, 0, 2)
+    authority.receive(0, [host.frame(h.steer * (opts.sideBySide ? 0.2 : 1) + lean(0, tick), h.throttle, 0, 2)])
+    guest.frame(g.steer * (opts.sideBySide ? 0.2 : 1) + lean(1, tick), g.throttle, 0, 2)
     const d = delayTicks()
     if (d !== null) up.push({ at: tick + d, batch: guest.batch() })
     for (let i = up.length - 1; i >= 0; i--) if (up[i]!.at <= tick) authority.receive(1, up.splice(i, 1)[0]!.batch)
@@ -102,6 +123,7 @@ export function runNetsim(track: Track, config: RoomConfig, opts: NetsimOptions)
       if (guest.reconcile(m.s) && tick > 120) snaps.push(guest.correction)
     }
     if (tick <= 120) continue
+    if (Array.from(authority.race.impacts).some((v) => v > 0)) impacts++
     // What each screen would show now, against where each car really is now:
     // the host car's truth is the authority (the host has no latency to it);
     // the guest car's truth is the guest's own prediction.
@@ -112,8 +134,10 @@ export function runNetsim(track: Track, config: RoomConfig, opts: NetsimOptions)
   }
   return {
     guestSnapP95: +p95(snaps).toFixed(3),
+    guestSnapMax: +Math.max(0, ...snaps).toFixed(3),
     guestViewErrorP95: +p95(guestView).toFixed(3),
     hostViewErrorP95: +p95(hostView).toFixed(3),
     guestInputDelayMs: Math.round(inputLag.reduce((a, b) => a + b, 0) / Math.max(1, inputLag.length)),
+    impacts,
   }
 }

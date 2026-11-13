@@ -2,7 +2,7 @@ import {describe,it,expect} from 'vitest'
 import {createHmac} from 'node:crypto'
 import {buildRoomService} from './multiplayerApp'
 import {PROTOCOL,type Ticket} from '../src/multiplayer/protocol'
-const config={protocol:PROTOCOL,trackId:'power_8',preset:'legacy',laps:3,contact:false,manual:false,abs:true}
+const config={protocol:PROTOCOL,trackId:'power_8',preset:'legacy',laps:3,contact:false,manual:false,easy:false}
 describe('private multiplayer room service',()=>{
   it('limits a room to two drivers and keeps signaling private to the recipient',async()=>{
     const app=await buildRoomService()

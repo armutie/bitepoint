@@ -6,14 +6,14 @@ import { PhysicsWorld } from './physics'
 import { Predictor } from './prediction'
 import { PROTOCOL,IDLE,validInput,type InputFrame,type RoomConfig,type Snapshot } from './protocol'
 
-const config:RoomConfig={protocol:PROTOCOL,trackId:'power_8',preset:'legacy',laps:3,manual:false,abs:true,contact:false}
+const config:RoomConfig={protocol:PROTOCOL,trackId:'power_8',preset:'legacy',laps:3,manual:false,easy:false,contact:false}
 const track=()=>new Track(data as TrackData)
 const input=(seq:number,extra:Partial<InputFrame>={}):InputFrame=>({...IDLE,seq,throttle:0.6,...extra})
 
 describe('multiplayer physics and input authority',()=>{
   it('uses the single-player forces and wall response without changing the handling',()=>{
-    for(const contact of [false,true]) {
-      const c={...config,contact},t=track(),a=new RaceAuthority(t,c),world=new PhysicsWorld(t,c)
+    for(const easy of [false,true])for(const contact of [false,true]) {
+      const c={...config,contact,easy},t=track(),a=new RaceAuthority(t,c),world=new PhysicsWorld(t,c)
       a.race.phase='racing'
       // Deliberately exercise grass and walls as well as the initial grid.
       const pose=t.poseAt(300)

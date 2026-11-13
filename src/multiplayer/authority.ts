@@ -1,7 +1,6 @@
 import { Race } from '../core/race'
-import { handlingPreset } from '../core/carParams'
 import type { Track } from '../core/track'
-import { IDLE, validInput, type InputFrame, type RoomConfig, type Slot, type Snapshot } from './protocol'
+import { IDLE, roomCarParams, validInput, type InputFrame, type RoomConfig, type Slot, type Snapshot } from './protocol'
 
 /** One input queue per driver. Missing packets never stop the shared race clock. */
 export class RaceAuthority {
@@ -13,8 +12,8 @@ export class RaceAuthority {
   private received = [-100,-100]
   private gapTicks = [0,0]
   constructor(track: Track,config: RoomConfig) {
-    this.race=new Race(track,[0,1].map(slot=>({slot,params:handlingPreset(config.preset),
-      sim:{manual:config.manual,abs:config.abs,tc:true,brakeAwareAuto:2}})),
+    this.race=new Race(track,[0,1].map(slot=>({slot,params:roomCarParams(config),easy:config.easy,
+      sim:{manual:config.manual,abs:false,tc:true,brakeAwareAuto:2}})),
       {laps:config.laps,contact:config.contact,postFinishControl:true,trackId:config.trackId,preset:config.preset})
   }
   receive(slot: Slot,batch: unknown): void {

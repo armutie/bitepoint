@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { canonicalConfig, PROTOCOL, type LobbyState, type RoomConfig, type Signal } from './protocol'
 import { RealtimeRoom } from './rooms'
 
-const config: RoomConfig = { protocol: PROTOCOL, trackId: 'power_8', preset: 'legacy', laps: 3, manual: false, abs: true, contact: false }
+const config: RoomConfig = { protocol: PROTOCOL, trackId: 'power_8', preset: 'legacy', laps: 3, manual: false, easy: false, contact: false }
 
 /** An in-memory stand-in for Supabase Realtime: presence and broadcast per channel name. */
 class FakeRealtime {
