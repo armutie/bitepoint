@@ -1,7 +1,7 @@
 import './style.css'
 import { loadSettings,saveSettings,fullLockFraction,cameraFeel } from '../ui/settings'
 import { Track,type TrackData,loadManifest } from '../core/track'
-import { handlingPreset,type CarParams } from '../core/carParams'
+import { type CarParams } from '../core/carParams'
 import { reverseSelected,speedOf,type CarState } from '../core/car'
 import { DT } from '../core/sim'
 import { wrapAngle } from '../core/math'
@@ -12,29 +12,30 @@ import { Sound } from '../audio/sound'
 import { PeerLink,RECOVERY_MS } from './connection'
 import { createRoom,joinRoom,type Room } from './rooms'
 import { hostLeadTicks, Predictor } from './prediction'
-import { PROTOCOL,TRACKS,canonicalConfig,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
+import { PROTOCOL,TRACKS,canonicalConfig,roomCarParams,roomTcLevel,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
 
 const root=document.querySelector<HTMLDivElement>('#app')!
 root.innerHTML=`<div class="mp-stage"><canvas id="picture" aria-label="Race view"></canvas></div>
-<section class="mp-panel" id="home"><a class="mp-brand" href="./">Bitepoint</a><a class="mp-back" href="./">Back</a>
-<h1>Multiplayer</h1><div class="mp-form">
+<section class="mp-panel" id="home"><a class="mp-brand" href="./">Bite Point</a><a class="mp-back" href="./">← Back</a>
+<p class="mp-kicker">Multiplayer · Private rooms for two</p><h1>Race a friend</h1><div class="mp-form">
 <label class="mp-wide">Driver name<input id="name" maxlength="24" autocomplete="nickname" value="Driver"></label>
 <label>Circuit<select id="track"></select></label><label>Handling<select id="preset"><option value="legacy">Low drag</option><option value="classic">High downforce</option></select></label>
 <label>Laps<select id="laps"><option>1</option><option selected>3</option><option>5</option></select></label>
 <label>Gearbox<select id="gearbox"><option value="auto">Automatic</option><option value="manual">Manual</option></select></label>
 <label>Contact<select id="contact"><option value="off">Ghost racing</option><option value="on">Car contact · experimental</option></select></label>
-<label>Braking aid<select id="abs"><option value="off">ABS off</option><option value="on">ABS on</option></select></label>
+<label>Easy mode<select id="easy"><option value="off">Off</option><option value="on">On</option></select></label>
 <button id="host" class="mp-primary mp-wide">Host a room</button></div>
+<p class="mp-kicker mp-or">Or join with a code</p>
 <div class="mp-join"><input id="code" aria-label="Room code" maxlength="6" placeholder="Room code" autocomplete="off"><button id="join" class="mp-secondary">Join room</button></div>
-<p class="mp-small">Private races for two drivers. Your single-player settings carry over.</p><div id="home-status" role="status" class="mp-status"></div></section>
-<section class="mp-panel" id="lobby" hidden><span class="mp-brand">Bitepoint</span><h1 id="room-title">Room</h1>
+<p class="mp-small">Your steering, camera and sound settings carry over from single player.</p><div id="home-status" role="status" class="mp-status"></div></section>
+<section class="mp-panel" id="lobby" hidden><span class="mp-brand">Bite Point</span><p class="mp-kicker">Lobby</p><h1 id="room-title">Room</h1>
 <div id="room-details" class="mp-room-details"></div><ul class="mp-drivers" id="drivers"></ul>
 <div class="mp-invite"><input readonly id="invite" aria-label="Invite link"><button id="copy" class="mp-secondary">Copy invite</button></div>
 <div id="lobby-status" class="mp-status" role="status">Connecting…</div>
 <div class="mp-pause-actions"><button id="start" class="mp-primary" disabled>Start race</button><button id="leave" class="mp-secondary">Leave room</button></div></section>
 <div class="mp-hud" id="hud" hidden><div class="mp-racebar"><span id="position">P1 / 2</span><span id="lap">Lap 1 / 3</span><span id="time">0:00.000</span></div>
 <div id="countdown" class="mp-countdown"></div><div class="mp-speed"><strong id="speed">0</strong><span>km/h</span><b id="gear">1</b></div><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
-<section class="mp-panel" id="pause" hidden><span class="mp-brand">Bitepoint</span><h1 id="pause-title">Menu</h1><p id="pause-status" class="mp-small">The race continues. Your car will slow down.</p>
+<section class="mp-panel" id="pause" hidden><span class="mp-brand">Bite Point</span><p class="mp-kicker">Multiplayer</p><h1 id="pause-title">Menu</h1><p id="pause-status" class="mp-small">The race continues. Your car will slow down.</p>
 <div class="mp-settings"><label>Steering<select id="input"><option value="mouse">Mouse</option><option value="keyboard">Keyboard</option></select></label><label>Mouse sensitivity<input id="sensitivity" type="range" min="0" max="1" step="0.05"></label><label>Sound<input id="volume" type="range" min="0" max="1" step="0.05"></label></div>
 <div class="mp-pause-actions"><button id="resume" class="mp-primary">Resume</button><button id="quit" class="mp-secondary">Leave room</button></div></section>`
 const element=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T
@@ -42,7 +43,9 @@ const field=(id:string)=>element<HTMLInputElement>(id)
 let settings=loadSettings()
 const trackLabels=new Map<string,string>()
 field('name').value=localStorage.getItem('bitepoint:multiplayer-name')??'Driver'
-field('gearbox').value=settings.gearbox;field('abs').value=settings.abs?'on':'off'
+field('gearbox').value=settings.gearbox
+// Start from the easy mode last used in single player.
+try{field('easy').value=(JSON.parse(localStorage.getItem('car-racing:selection')??'{}') as {easy?:unknown}).easy===true?'on':'off'}catch{/* no saved selection */}
 field('input').value=settings.inputMode;field('volume').value=String(settings.volume);field('sensitivity').value=String(settings.mouseSensitivity)
 field('code').value=new URLSearchParams(location.search).get('room')?.toUpperCase().replace(/[^A-F0-9]/g,'').slice(0,6)??''
 // Opened from an invite link: only the name and Join. The host already chose
@@ -50,9 +53,9 @@ field('code').value=new URLSearchParams(location.search).get('room')?.toUpperCas
 if(field('code').value.length===6){
   element('home').classList.add('is-invite')
   element('home').querySelector('h1')!.textContent='Join the race'
+  element('home').querySelector('.mp-kicker')!.textContent='Multiplayer · You have been invited'
   field('code').readOnly=true
   element('join').classList.replace('mp-secondary','mp-primary')
-  element('home-status').textContent=`You have been invited to room ${field('code').value}.`
   queueMicrotask(()=>element('join').focus())
 }
 field('name').addEventListener('keydown',e=>{if(e.key==='Enter'&&element('home').classList.contains('is-invite'))element('join').click()})
@@ -111,9 +114,9 @@ async function prepare(t:Ticket):Promise<void>{
   if(!validConfig(t.config))throw new Error('This room uses a different game version. Reload both games.')
   const response=await fetch(`./tracks/${t.config.trackId}.json`);if(!response.ok)throw new Error('Could not load the circuit.')
   const data=await response.json() as TrackData;track=new Track(data)
-  const bytes=new TextEncoder().encode(JSON.stringify({protocol:PROTOCOL,data,params:handlingPreset(t.config.preset),config:canonicalConfig(t.config)}))
+  const bytes=new TextEncoder().encode(JSON.stringify({protocol:PROTOCOL,data,params:roomCarParams(t.config),config:canonicalConfig(t.config)}))
   fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('')
-  predictor=new Predictor(track,t.config,t.slot);previous=cloneStates();carParams=handlingPreset(t.config.preset)
+  predictor=new Predictor(track,t.config,t.slot);previous=cloneStates();carParams=roomCarParams(t.config)
   renderer=new Renderer(canvas);renderer.applySettings({effects:settings.effects,performanceMode:settings.performanceMode,...cameraFeel(settings.effects)})
   renderer.setCameraMode(settings.camera)
   await renderer.setTrack(track);renderer.setCars(carParams,false);renderer.setOpponents(carParams,1,[t.slot===0?1:0])
@@ -132,9 +135,15 @@ async function connect(room:Room):Promise<void>{
   element('start').hidden=t.slot!==0
   const invite=new URL('multiplayer.html',location.href);invite.searchParams.set('room',t.code);field('invite').value=invite.href
   const label=trackLabels.get(t.config.trackId)??t.config.trackId
-  element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'} · ${t.config.contact?'Car contact':'Ghost racing'}`
+  element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'}${t.config.easy?' · Easy mode':''} · ${t.config.contact?'Car contact':'Ghost racing'}`
   link=new PeerLink(room)
-  link.onLobby=s=>{names=s.names;element('drivers').replaceChildren(...names.map((n,i)=>{const li=document.createElement('li');li.textContent=n?`${n}${i===t.slot?' · You':''}`:'Waiting for a driver…';return li}))
+  link.onLobby=s=>{names=s.names;element('drivers').replaceChildren(...names.map((n,i)=>{
+    // Numbered rows, as on the main menu: the empty seat reads as waiting, not missing.
+    const li=document.createElement('li');li.classList.toggle('is-empty',!n)
+    const num=document.createElement('span');num.className='mp-driver-num';num.textContent=`0${i+1}`
+    const who=document.createElement('span');who.className='mp-driver-name';who.textContent=n??'Waiting for a driver…'
+    const tag=document.createElement('span');tag.className='mp-driver-tag';tag.textContent=!n?'':i===t.slot?'You':i===0?'Host':'Guest'
+    li.append(num,who,tag);return li}))
     if(!verified)notice('lobby-status',!names[1]?'Share the invite with the other driver.':prepared?'Connecting drivers…':'Loading circuit…')}
   link.onOpen=()=>{notice('lobby-status',prepared?'Checking both games…':'Loading circuit…');sendHello()}
   link.onError=fail
@@ -168,7 +177,7 @@ async function begin(host:boolean):Promise<void>{
   localStorage.setItem('bitepoint:multiplayer-name',name)
   try{
     const c:RoomConfig={protocol:PROTOCOL,trackId:field('track').value,preset:field('preset').value==='classic'?'classic':'legacy',
-      laps:Number(field('laps').value),manual:field('gearbox').value==='manual',abs:field('abs').value==='on',contact:field('contact').value==='on'}
+      laps:Number(field('laps').value),manual:field('gearbox').value==='manual',easy:field('easy').value==='on',contact:field('contact').value==='on'}
     const room=host?await createRoom(name,c):await joinRoom(name,field('code').value)
     await connect(room)
   }catch(e){const message=e instanceof Error?e.message:'Could not connect.'
@@ -204,7 +213,7 @@ function frame(now:number):void{
     while(accumulator>=DT){accumulator-=DT
       if(verified){previous=displayStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5)
         const cruise=labDriveStarted>0&&now-labDriveStarted<6000
-        const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),settings.tcLevel)
+        const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),roomTcLevel(ticket.config))
         if(ticket.slot===0)worker?.postMessage({type:'input',slot:0,frames:[f]})
         else link?.fastSend({type:'input',frames:predictor.batch()})}
     }
