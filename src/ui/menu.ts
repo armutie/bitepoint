@@ -19,6 +19,7 @@ import {
   DIFFICULTIES, difficultyByName, MAX_OPPONENTS, MAX_RACE_LAPS,
 } from '../core/raceSession'
 import { isClean, type Assists, type LeaderboardClient, type LeaderboardEntry } from '../storage/leaderboard'
+import { HomeBoard, type BoardPage } from './homeBoard'
 import { ASSISTS_ADJUSTABLE, LEGACY_TYRE_MODE, SHOW_REFERENCE_DRIVER } from '../features'
 import { formatTime, keyOf, type LapRecord } from '../storage/records'
 import { carBars, carTags, powerToWeight } from './carStats'
@@ -130,6 +131,8 @@ export class Menu {
   private controlsOpen = false
   private settingsOpen = false
   private recordsOpen = false
+  /** Each circuit's board for the home screen, fetched once a minute at most. */
+  private readonly homeBoards = new Map<string, { at: number; page: Promise<BoardPage> }>()
   private readonly loading: HTMLDivElement
   /** Undefined outside a paused drive; null is a pause without timing status. */
   private pausedStatus: PauseStatus | null | undefined = undefined
@@ -353,7 +356,7 @@ export class Menu {
     const footer = el('footer', 'flow-footer')
     const utilities = el('div', 'flow-utilities')
     const records = el('button', 'flow-link')
-    records.textContent = 'Records'
+    records.textContent = 'Leaderboard'
     records.addEventListener('click', () => this.openLeaderboard())
     const controls = el('button', 'flow-link')
     controls.textContent = 'Controls'
@@ -372,7 +375,7 @@ export class Menu {
       const title = el('h1', 'flow-title flow-title-home')
       title.setAttribute('aria-label', 'Bite Point')
       title.innerHTML = 'Bite<br>Point<span class="flow-period">.</span>'
-      intro.append(kicker, title)
+      intro.append(kicker, title, this.homeBoard().root)
       body.classList.add('flow-home')
       body.append(intro, this.renderModePicker())
       const hint = el('span', 'flow-footnote')
@@ -629,6 +632,45 @@ export class Menu {
     else this.onStart(this.selection)
   }
 
+  /** The rotating board on the home screen, opening on the circuit last driven. */
+  private homeBoard(): HomeBoard {
+    const tracks = RELEASED_TRACKS
+      .map((id) => this.deps.tracks.find((t) => t.id === id))
+      .filter((t): t is TrackManifestEntry => t !== undefined)
+    const profile = this.deps.profiles?.current
+    return new HomeBoard({
+      tracks,
+      start: this.selection.trackId,
+      playerName: profile?.locked ? profile.username : null,
+      load: (trackId) => {
+        const cached = this.homeBoards.get(trackId)
+        if (cached && performance.now() - cached.at < 60_000) return cached.page
+        const page = this.deps.leaderboard.list({ trackId }, 50)
+          .then((p) => ({ entries: p.entries, scope: p.scope }))
+        // A failed fetch is not kept, so the next turn round tries again.
+        page.catch(() => this.homeBoards.delete(trackId))
+        this.homeBoards.set(trackId, { at: performance.now(), page })
+        return page
+      },
+      local: (trackId, page) => this.localLeaderboardLap({ trackId }, page.scope),
+      outline: (trackId) => {
+        const track = tracks.find((t) => t.id === trackId)
+        return track ? buildTrackMap(track) : null
+      },
+      open: (trackId) => {
+        this.leaderboardTrackId = trackId
+        void this.showLeaderboard()
+      },
+      drive: (trackId) => {
+        this.timeSelection = { ...this.timeSelection, trackId }
+        if (this.selection.mode === 'time') this.selection = { ...this.selection, trackId, ghostEntryId: null }
+        this.chooseMode('time')
+        this.flowStep = 'handling'
+        this.renderFlow()
+      },
+    })
+  }
+
   private openLeaderboard(): void {
     this.leaderboardTrackId = this.selection.trackId
     void this.showLeaderboard()
@@ -737,7 +779,7 @@ export class Menu {
       }
       const failed = el('div', 'leaderboard-empty is-error')
       console.warn('[records]', error)
-      failed.textContent = 'Records are unavailable right now.'
+      failed.textContent = 'The leaderboard is unavailable right now.'
       const retry = el('button', 'btn')
       retry.textContent = 'Retry'
       retry.addEventListener('click', () => void this.showLeaderboard())

@@ -2263,6 +2263,67 @@ kbd {
 .flow-title { margin: 0; font-size: clamp(38px, 5.8vw, 68px); font-weight: 600; line-height: 1.03; letter-spacing: -0.065em; }
 .flow-title-home { font-size: clamp(78px, 10vw, 136px); font-weight: 700; line-height: 0.86; letter-spacing: -0.085em; text-transform: uppercase; }
 .flow-period { color: var(--accent); }
+/* The home screen's leaderboard, under the wordmark: every circuit in turn,
+   and where you stand on it. */
+/* Scaled by height as well as width, so the board below it is on screen
+   without scrolling on a laptop. */
+.flow-home .flow-title-home { font-size: clamp(52px, min(7.6vw, 12vh), 104px); }
+.home-board { margin-top: 28px; border-top: 1px solid var(--edge); padding-top: 14px; max-width: 420px; }
+.home-board-head, .home-board-title { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.home-board-label { color: var(--accent); font: 10px var(--mono); text-transform: uppercase; letter-spacing: 0.16em; }
+.home-board-nav { display: flex; align-items: center; gap: 6px; }
+.home-board-step { width: 24px; height: 24px; border: 0; background: none; color: var(--dim); font-size: 18px; line-height: 1; cursor: pointer; }
+.home-board-step:hover { color: var(--ink); }
+.home-board-dots { display: flex; gap: 6px; }
+.home-board-dot { width: 6px; height: 6px; padding: 0; border: 0; border-radius: 50%; background: var(--edge); cursor: pointer; }
+.home-board-dot.is-on { background: var(--accent); }
+.home-board-title { margin: 10px 0 6px; }
+.home-board-track { font-size: 20px; font-weight: 600; letter-spacing: -0.03em; }
+.home-board-links { display: flex; gap: 16px; }
+.home-board-open, .home-board-drive { border: 0; background: none; padding: 0; color: var(--muted); font: 11px var(--sans); cursor: pointer; white-space: nowrap; }
+.home-board-open:hover, .home-board-drive:hover { color: var(--accent); }
+/* A fixed height: three rows, the divider, and your row. Turning to a circuit
+   with fewer laps must not move the wordmark above it. */
+.home-board-body { height: calc(3 * 33px + 9px + 46px); overflow: hidden; cursor: pointer; }
+/* Turning to the next circuit, 1.5 s in all: the outline draws with its
+   name, holds a beat and fades, then the times come up in its place. */
+.home-board-stage { position: relative; }
+.home-board-intro {
+  position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; gap: 22px;
+  pointer-events: none; animation: home-board-intro 1500ms ease both;
+}
+.home-board-intro-map { width: 140px; height: 120px; flex-shrink: 0; }
+.home-board-intro .trackmap-casing { stroke: transparent; }
+.home-board-intro .trackmap-ribbon { stroke: var(--accent); stroke-width: 0.03; stroke-linecap: round;
+  stroke-dasharray: 1; stroke-dashoffset: 1; animation: home-board-draw 900ms cubic-bezier(.45, 0, .25, 1) forwards; }
+.home-board-intro .trackmap-start { stroke: var(--ink); opacity: 0; animation: home-board-fade-in 160ms ease 860ms forwards; }
+.home-board-intro-name { font-size: 22px; font-weight: 600; letter-spacing: -0.03em; opacity: 0; animation: home-board-fade-in 300ms ease 150ms forwards; }
+.is-turning .home-board-body { animation: home-board-rows 320ms ease 1180ms both; }
+.is-turning .home-board-track { animation: home-board-fade-in 200ms ease both; }
+@keyframes home-board-intro { 0%, 70% { opacity: 1; } 80%, 100% { opacity: 0; } }
+@keyframes home-board-draw { to { stroke-dashoffset: 0; } }
+@keyframes home-board-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes home-board-rows { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.home-board-rows { margin: 0; padding: 0; list-style: none; }
+.home-board-row { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: center; height: 33px; padding: 0 8px 0 6px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-size: 13px; }
+.home-board-row:first-child:not(.is-you) .home-board-time { color: var(--accent); }
+.home-board-gap { height: 1px; margin: 4px 0; border-top: 1px dashed var(--edge); list-style: none; }
+.home-board-row.is-you { height: 46px; border-bottom: 0; background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+.home-board-row.is-you .home-board-rank { color: var(--accent); font-size: 14px; font-weight: 600; }
+.home-board-row.is-you .home-board-name { font-weight: 600; }
+.home-board-row.is-you .home-board-time { font-size: 14px; }
+.home-board-row.is-empty .home-board-time { color: var(--dim); }
+.home-board-rank { color: var(--dim); font: 11px var(--mono); }
+.home-board-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-board-tag { color: var(--accent); font: 600 9px var(--mono); text-transform: uppercase; letter-spacing: 0.12em; }
+.home-board-detail { display: block; margin-top: 2px; color: var(--muted); font: 400 10px var(--mono); }
+.home-board-time { font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+.home-board-body:hover .home-board-row:not(.is-you) { background: rgba(255, 255, 255, 0.025); }
+.home-board-note { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
+@media (prefers-reduced-motion: reduce) {
+  .is-turning .home-board-body { animation: home-board-fade-in 200ms ease both; }
+  .is-turning .home-board-track { animation: none; }
+}
 .flow-heading { margin-bottom: 36px; }
 .flow-context { margin: 12px 0 0; color: var(--muted); font: 12px var(--mono); }
 .flow-mode { display: flex; align-items: center; gap: 24px; width: 100%; text-align: left;
@@ -2330,7 +2391,11 @@ kbd {
 @media (max-width: 760px) {
   .menu-flow .menu-panel { gap: 24px; }
   .flow-home { grid-template-columns: 1fr; gap: 32px; align-content: center; }
-  .flow-title-home { font-size: 76px; }
+  .flow-title-home, .flow-home .flow-title-home { font-size: 64px; }
+  .flow-home { align-content: start; }
+  .flow-home .flow-intro { display: contents; }
+  .flow-home .flow-modes { order: 1; }
+  .home-board { order: 2; max-width: none; margin-top: 0; }
   .flow-title-home br { display: none; }
   .flow-home .flow-kicker { margin-bottom: 16px; }
   .flow-mode { padding: 25px 14px; }
@@ -2353,6 +2418,10 @@ kbd {
   .menu-flow *, .menu-flow { transition: none; }
 }
 @media (min-width: 761px) and (max-height: 700px) {
+  .flow-home .flow-kicker { display: none; }
+  .flow-home .flow-mode { padding-top: 24px; padding-bottom: 24px; }
+  .home-board { margin-top: 18px; padding-top: 10px; }
+  .home-board-title { margin: 6px 0 4px; }
   .menu-flow .menu-panel { gap: 22px; }
 .flow-title:not(.flow-title-home) { font-size: clamp(36px, 5vw, 52px); }
   .flow-heading { margin-bottom: 24px; }
