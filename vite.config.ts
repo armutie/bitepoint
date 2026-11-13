@@ -26,6 +26,9 @@ export default defineConfig({
       input: {
         main: fileURLToPath(new URL('./index.html', import.meta.url)),
         legacy: fileURLToPath(new URL('./legacy/index.html', import.meta.url)),
+        // Linked from the main menu, so it has to ship: without this entry the
+        // live site had no multiplayer page at all.
+        multiplayer: fileURLToPath(new URL('./multiplayer.html', import.meta.url)),
       },
     },
   },
