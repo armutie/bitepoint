@@ -11,6 +11,9 @@ export async function service<T>(path:string,method='GET',body?:unknown,ticket?:
 export const createRoom=(name:string,config:RoomConfig)=>service<Ticket>('/rooms','POST',{name,config})
 export const joinRoom=(name:string,code:string)=>service<Ticket>(`/rooms/${encodeURIComponent(code)}/join`,'POST',{name})
 
+/** How long a dropped link may take to come back before the race is ended. */
+export const RECOVERY_MS=6000
+
 /** Signaling goes through HTTP; race traffic goes only through the peer link. */
 export class PeerLink {
   private pc:RTCPeerConnection|null=null
@@ -29,6 +32,9 @@ export class PeerLink {
   onError:(message:string)=>void=()=>{}
   connected=false
   relayAvailable=false
+  /** True while the link has dropped and is being given time to recover. */
+  reconnecting=false
+  private recoverTimer:ReturnType<typeof setTimeout>|null=null
   constructor(readonly ticket:Ticket) {}
   async open():Promise<void> {
     const ice=await service<{iceServers:RTCIceServer[];relay:boolean}>(`/rooms/${this.ticket.code}/ice`,'GET',undefined,this.ticket)
@@ -37,8 +43,15 @@ export class PeerLink {
     const pc=new RTCPeerConnection({iceServers:ice.iceServers});this.pc=pc
     pc.onicecandidate=e=>{if(e.candidate)this.signal({kind:'candidate',data:e.candidate.toJSON()})}
     pc.onconnectionstatechange=()=>{
-      if(pc.connectionState==='failed')this.fail('Could not connect the two drivers. A relay may be needed on these networks.')
-      if(pc.connectionState==='disconnected')this.fail('Connection interrupted. The race has stopped.')
+      const state=pc.connectionState
+      if(state==='failed'){this.fail(this.connected
+        ?'Connection lost. The race has stopped.'
+        :'Could not connect the two drivers. A relay may be needed on these networks.');return}
+      // A momentary drop (Wi-Fi roaming, a busy router) usually recovers by
+      // itself within a second or two. It used to end the race on the spot.
+      if(state==='disconnected'&&!this.recoverTimer){this.reconnecting=true
+        this.recoverTimer=setTimeout(()=>this.fail('Connection lost. The race has stopped.'),RECOVERY_MS)}
+      if(state==='connected'&&this.recoverTimer){clearTimeout(this.recoverTimer);this.recoverTimer=null;this.reconnecting=false}
     }
     if(this.ticket.slot===0){this.bind(pc.createDataChannel('control'));this.bind(pc.createDataChannel('state',{ordered:false,maxRetransmits:0}))}
     else pc.ondatachannel=e=>this.bind(e.channel)
@@ -88,5 +101,5 @@ export class PeerLink {
     if(!this.closed)this.timer=setTimeout(()=>void this.poll(),this.connected?10_000:650)
   }
   private fail(message:string):void {if(!this.closed){this.connected=false;this.onError(message);this.close()}}
-  close():void {this.closed=true;this.connected=false;if(this.timer)clearTimeout(this.timer);this.pc?.close();this.pc=null}
+  close():void {this.closed=true;this.connected=false;if(this.timer)clearTimeout(this.timer);if(this.recoverTimer)clearTimeout(this.recoverTimer);this.pc?.close();this.pc=null}
 }

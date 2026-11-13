@@ -19,5 +19,7 @@ setInterval(()=>{
   accumulator+=elapsed
   let state
   while(accumulator>=DT){state=authority.step();accumulator-=DT}
-  if(state&&authority.tick%2===0)port.postMessage({type:'snapshot',snapshot:state})
-},8)
+  // Every tick, not every other: half the staleness on the guest, and
+  // corrections land in smaller pieces. Measured in netsim.test.ts.
+  if(state)port.postMessage({type:'snapshot',snapshot:state})
+},4)

@@ -9,8 +9,8 @@ import { Renderer } from '../render/renderer'
 import { CAMERA_ORDER } from '../render/cameras'
 import { InputState } from '../game/input'
 import { Sound } from '../audio/sound'
-import { Predictor } from './prediction'
-import { PeerLink,createRoom,joinRoom,service } from './connection'
+import { PeerLink,RECOVERY_MS,createRoom,joinRoom,service } from './connection'
+import { hostLeadTicks, Predictor } from './prediction'
 import { PROTOCOL,TRACKS,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
 
 const root=document.querySelector<HTMLDivElement>('#app')!
@@ -58,6 +58,9 @@ input.attach(canvas);input.mode=settings.inputMode;input.fullLockFraction=fullLo
 sound.setLevel(0,true)
 const fmt=(seconds:number)=>`${Math.floor(seconds/60)}:${(seconds%60).toFixed(3).padStart(6,'0')}`
 const cloneStates=()=>predictor!.states.map(s=>({...s}))
+/** Ticks to carry the other car forward: the host draws the guest where the guest is. */
+const lead=()=>ticket?.slot===0?hostLeadTicks(ping):0
+const displayStates=()=>predictor!.display(lead())
 function notice(id:string,message:string,error=false):void{element(id).textContent=message;element(id).classList.toggle('is-error',error)}
 function fail(message:string):void{
   if(ended)return;ended=true;playing=false;input.release();worker?.terminate();worker=null;link?.close();sound.setLevel(0,true)
@@ -131,7 +134,9 @@ async function connect(t:Ticket):Promise<void>{
       const first=!verified;verified=true;if(first)sendHello();updateReady();if(t.slot===0&&latest)link?.fastSend({type:'snapshot',snapshot:latest})
     }
     if(m.type==='ping'&&typeof m.sent==='number')link?.controlSend({type:'pong',sent:m.sent})
-    if(m.type==='pong'&&typeof m.sent==='number')ping=Math.max(0,performance.now()-m.sent)
+    if(m.type==='pong'&&typeof m.sent==='number'){const rtt=Math.max(0,performance.now()-m.sent)
+      // Smoothed, so one slow packet does not make the other car lurch.
+      ping=ping?ping+(rtt-ping)*0.2:rtt}
     if(m.type==='closed')fail(typeof m.reason==='string'?m.reason.slice(0,160):'The other driver left the room.')
   }
   link.onFast=value=>{
@@ -184,13 +189,13 @@ function frame(now:number):void{
   if(predictor&&renderer&&track&&ticket&&!ended){
     accumulator+=wall
     while(accumulator>=DT){accumulator-=DT
-      if(verified){previous=cloneStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5)
+      if(verified){previous=displayStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5)
         const cruise=labDriveStarted>0&&now-labDriveStarted<6000
         const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),settings.tcLevel)
         if(ticket.slot===0)worker?.postMessage({type:'input',slot:0,frames:[f]})
         else link?.fastSend({type:'input',frames:predictor.batch()})}
     }
-    const alpha=accumulator/DT,states=predictor.states.map((s,i)=>{
+    const alpha=accumulator/DT,states=displayStates().map((s,i)=>{
       const p=previous?.[i]??s,o=offsets[i]!,decay=Math.exp(-wall/0.10);o.x*=decay;o.y*=decay;o.yaw*=decay
       return {...s,x:p.x+(s.x-p.x)*alpha+o.x,y:p.y+(s.y-p.y)*alpha+o.y,yaw:p.yaw+wrapAngle(s.yaw-p.yaw)*alpha+o.yaw}
     })
@@ -200,14 +205,15 @@ function frame(now:number):void{
     if(playing){sound.update({speed:speedOf(local),vx:local.vx,wheelVr:local.wheelVr,slipF:local.slipF,slipR:local.slipR,
       onKerb:Math.abs(proj.lateral)>proj.half-0.5,onGrass:Math.abs(proj.lateral)>proj.half+1.2,
       rpm:local.engineRpm,redlineRpm:p.redlineRpm,idleRpm:p.idleRpm,gear:local.gear,throttle:inMenu?0:input.pedals.throttle-input.pedals.brake,shiftTimer:local.shiftTimer})}
-    if(verified&&latest&&now-lastSnapshot>1800)fail('Race updates stopped. The room has ended.')
+    // Matches the link's recovery window: a blip shows as Reconnecting, not an ended race.
+    if(verified&&latest&&now-lastSnapshot>RECOVERY_MS)fail('Race updates stopped. The room has ended.')
     if(verified&&now-lastPing>1000){lastPing=now;link?.controlSend({type:'ping',sent:now})}
     if(latest&&now-lastHud>80){lastHud=now;const score=latest.scores[ticket.slot]!
       element('position').textContent=`P${score.position} / 2`;element('lap').textContent=`Lap ${Math.min(score.laps+1,ticket.config.laps)} / ${ticket.config.laps}`
       element('time').textContent=score.finish!==null?`Finished · ${fmt(score.finish)}`:`${fmt(score.lapTime)}${score.armed&&!score.valid?' · Invalid lap':''}`
       element('speed').textContent=String(Math.round(speedOf(local)*3.6));element('gear').textContent=reverseSelected(local)?'R':String(local.gear+1)
       element('countdown').textContent=latest.phase==='countdown'?String(Math.max(1,Math.ceil(latest.countdown/60))):latest.phase==='finished'?'Race finished':''
-      element('network').textContent=`${Math.round(ping)} ms · Private race`
+      element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · Private race`
       if(lab)element('diagnostics').textContent=`${ticket.slot===0?'Host':'Guest'} · Tick ${latest.tick} · Input ${predictor.sequence} / ack ${latest.ack[ticket.slot]} · Queue ${predictor.queueSize} · Pedal ${latest.actions[ticket.slot]!.throttle.toFixed(2)} · Correction ${predictor.correction.toFixed(3)} m`
     }
   }
