@@ -9,7 +9,8 @@ import { Renderer } from '../render/renderer'
 import { CAMERA_ORDER } from '../render/cameras'
 import { InputState } from '../game/input'
 import { Sound } from '../audio/sound'
-import { PeerLink,RECOVERY_MS,createRoom,joinRoom,service } from './connection'
+import { PeerLink,RECOVERY_MS } from './connection'
+import { createRoom,joinRoom,type Room } from './rooms'
 import { hostLeadTicks, Predictor } from './prediction'
 import { PROTOCOL,TRACKS,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
 
@@ -69,8 +70,8 @@ function fail(message:string):void{
   element('resume').hidden=true
 }
 async function leave():Promise<void>{
-  worker?.terminate();link?.close();input.release();sound.setLevel(0,true)
-  if(ticket)await service(`/rooms/${ticket.code}`,'DELETE',undefined,ticket).catch(()=>{})
+  worker?.terminate();input.release();sound.setLevel(0,true)
+  await link?.leave().catch(()=>{})
   location.href='./'
 }
 function sendHello():void{if(prepared&&link?.connected)link.controlSend({type:'hello',protocol:PROTOCOL,fingerprint})}
@@ -114,13 +115,14 @@ async function prepare(t:Ticket):Promise<void>{
   prepared=true;input.refreshBounds();sendHello();updateReady()
   element('controls').textContent=`W / S pedals · ${settings.inputMode==='mouse'?'Mouse':'A / D'} steering${t.config.manual?' · E / Q gears':''} · Esc menu`
 }
-async function connect(t:Ticket):Promise<void>{
+async function connect(room:Room):Promise<void>{
+  const t=room.ticket
   ticket=t;element('home').hidden=true;element('lobby').hidden=false;element('room-title').textContent=`Room ${t.code}`
   element('start').hidden=t.slot!==0
   const invite=new URL('multiplayer.html',location.href);invite.searchParams.set('room',t.code);field('invite').value=invite.href
   const label=trackLabels.get(t.config.trackId)??t.config.trackId
   element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'} · ${t.config.contact?'Car contact':'Ghost racing'}`
-  link=new PeerLink(t)
+  link=new PeerLink(room)
   link.onLobby=s=>{names=s.names;element('drivers').replaceChildren(...names.map((n,i)=>{const li=document.createElement('li');li.textContent=n?`${n}${i===t.slot?' · You':''}`:'Waiting for a driver…';return li}))
     if(!verified)notice('lobby-status',!names[1]?'Share the invite with the other driver.':prepared?'Connecting drivers…':'Loading circuit…')}
   link.onOpen=()=>{notice('lobby-status',prepared?'Checking both games…':'Loading circuit…');sendHello()}
@@ -156,8 +158,8 @@ async function begin(host:boolean):Promise<void>{
   try{
     const c:RoomConfig={protocol:PROTOCOL,trackId:field('track').value,preset:field('preset').value==='classic'?'classic':'legacy',
       laps:Number(field('laps').value),manual:field('gearbox').value==='manual',abs:field('abs').value==='on',contact:field('contact').value==='on'}
-    const t=host?await createRoom(name,c):await joinRoom(name,field('code').value.toUpperCase().trim())
-    await connect(t)
+    const room=host?await createRoom(name,c):await joinRoom(name,field('code').value)
+    await connect(room)
   }catch(e){const message=e instanceof Error?e.message:'Could not connect.'
     if(ticket)fail(message);else{notice('home-status',message.includes('JSON')||message.includes('fetch')?'Room service unavailable. Please try again.':message,true)
       element<HTMLButtonElement>('host').disabled=false;element<HTMLButtonElement>('join').disabled=false}}

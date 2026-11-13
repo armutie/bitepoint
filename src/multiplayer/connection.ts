@@ -1,30 +1,21 @@
-import { type Ticket, type Signal, type RoomConfig, type LobbyState } from './protocol'
-
-const BASE=(import.meta.env['VITE_MULTIPLAYER_SERVER'] as string|undefined)?.replace(/\/$/,'')??'./multiplayer-api'
-export async function service<T>(path:string,method='GET',body?:unknown,ticket?:Ticket):Promise<T> {
-  const response=await fetch(BASE+path,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),
-    ...(ticket?{Authorization:`Bearer ${ticket.token}`}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(8000)})
-  const data=await response.json().catch(()=>({error:'Room service unavailable'}))
-  if(!response.ok)throw new Error(data.error??'Room service unavailable')
-  return data as T
-}
-export const createRoom=(name:string,config:RoomConfig)=>service<Ticket>('/rooms','POST',{name,config})
-export const joinRoom=(name:string,code:string)=>service<Ticket>(`/rooms/${encodeURIComponent(code)}/join`,'POST',{name})
+import type { LobbyState, Signal } from './protocol'
+import type { Room } from './rooms'
 
 /** How long a dropped link may take to come back before the race is ended. */
 export const RECOVERY_MS=6000
 
-/** Signaling goes through HTTP; race traffic goes only through the peer link. */
+/** The room only carries the handshake; race traffic goes only through the peer link. */
 export class PeerLink {
   private pc:RTCPeerConnection|null=null
   private control:RTCDataChannel|null=null
   private fast:RTCDataChannel|null=null
-  private timer:ReturnType<typeof setTimeout>|null=null
-  private cursor=0
   private offered=false
   private closed=false
   private candidates:RTCIceCandidateInit[]=[]
-  private signalChain:Promise<unknown>=Promise.resolve()
+  /** Connection messages are handled strictly in order: an answer before its offer is a broken link. */
+  private inbound:Promise<unknown>=Promise.resolve()
+  private outbound:Promise<unknown>=Promise.resolve()
+  private recoverTimer:ReturnType<typeof setTimeout>|null=null
   onLobby:(s:LobbyState)=>void=()=>{}
   onOpen:()=>void=()=>{}
   onControl:(v:unknown)=>void=()=>{}
@@ -34,10 +25,10 @@ export class PeerLink {
   relayAvailable=false
   /** True while the link has dropped and is being given time to recover. */
   reconnecting=false
-  private recoverTimer:ReturnType<typeof setTimeout>|null=null
-  constructor(readonly ticket:Ticket) {}
+  constructor(readonly room:Room) {}
+  get ticket(){return this.room.ticket}
   async open():Promise<void> {
-    const ice=await service<{iceServers:RTCIceServer[];relay:boolean}>(`/rooms/${this.ticket.code}/ice`,'GET',undefined,this.ticket)
+    const ice=await this.room.iceServers()
     this.relayAvailable=ice.relay
     if(this.closed)return
     const pc=new RTCPeerConnection({iceServers:ice.iceServers});this.pc=pc
@@ -55,7 +46,18 @@ export class PeerLink {
     }
     if(this.ticket.slot===0){this.bind(pc.createDataChannel('control'));this.bind(pc.createDataChannel('state',{ordered:false,maxRetransmits:0}))}
     else pc.ondatachannel=e=>this.bind(e.channel)
-    void this.poll()
+    this.room.start({
+      lobby:s=>{this.onLobby(s);this.inbound=this.inbound.then(()=>this.maybeOffer(s)).catch(()=>this.fail('The connection could not be set up.'))},
+      signal:s=>{this.inbound=this.inbound.then(()=>this.accept(s)).catch(()=>this.fail('The connection could not be set up.'))},
+      error:m=>this.fail(m),
+    })
+  }
+  /** The host offers once the guest is in the room. */
+  private async maybeOffer(s:LobbyState):Promise<void> {
+    const pc=this.pc
+    if(this.ticket.slot!==0||!s.names[1]||this.offered||!pc||this.closed)return
+    this.offered=true
+    const offer=await pc.createOffer();await pc.setLocalDescription(offer);this.signal({kind:'offer',data:offer})
   }
   private bind(channel:RTCDataChannel):void {
     if(channel.label==='control')this.control=channel
@@ -65,18 +67,18 @@ export class PeerLink {
       if(typeof e.data!=='string'||e.data.length>100_000)return
       try{const value:unknown=JSON.parse(e.data);channel.label==='control'?this.onControl(value):this.onFast(value)}catch{/* malformed peer packet */}
     }
-    channel.onopen=()=>{if(!this.connected&&this.control?.readyState==='open'&&this.fast?.readyState==='open'){this.connected=true;this.onOpen()}}
+    channel.onopen=()=>{if(!this.connected&&this.control?.readyState==='open'&&this.fast?.readyState==='open'){this.connected=true;this.room.connected();this.onOpen()}}
     channel.onclose=()=>{if(!this.closed)this.fail('The other driver left the room.')}
     channel.onerror=()=>this.fail('Connection interrupted. Please create a new room.')
   }
   controlSend(value:unknown):void {if(this.control?.readyState==='open')this.control.send(JSON.stringify(value))}
   fastSend(value:unknown):void {if(this.fast?.readyState==='open'&&this.fast.bufferedAmount<64_000)this.fast.send(JSON.stringify(value))}
   private signal(signal:Signal):void {
-    this.signalChain=this.signalChain.then(()=>this.closed?undefined:service(`/rooms/${this.ticket.code}/signals`,'POST',{signal},this.ticket))
+    this.outbound=this.outbound.then(()=>this.closed?undefined:this.room.send(signal))
       .catch(()=>this.fail('The room service could not complete the connection.'))
   }
   private async accept(s:Signal):Promise<void> {
-    const pc=this.pc;if(!pc)return
+    const pc=this.pc;if(!pc||this.closed)return
     if(s.kind==='candidate') {
       if(pc.remoteDescription)await pc.addIceCandidate(s.data as RTCIceCandidateInit)
       else this.candidates.push(s.data as RTCIceCandidateInit)
@@ -87,19 +89,12 @@ export class PeerLink {
     this.candidates=[]
     if(s.kind==='offer'){const a=await pc.createAnswer();await pc.setLocalDescription(a);this.signal({kind:'answer',data:a})}
   }
-  private async poll():Promise<void> {
-    if(this.closed)return
-    try {
-      const state=await service<LobbyState&{signals:{id:number;signal:Signal}[];cursor:number}>(`/rooms/${this.ticket.code}?after=${this.cursor}`,'GET',undefined,this.ticket)
-      if(this.closed)return
-      this.onLobby(state)
-      for(const entry of state.signals)await this.accept(entry.signal)
-      this.cursor=state.cursor
-      if(this.ticket.slot===0&&state.names[1]&&!this.offered&&this.pc){this.offered=true
-        const offer=await this.pc.createOffer();await this.pc.setLocalDescription(offer);this.signal({kind:'offer',data:offer})}
-    } catch(e){this.fail(e instanceof Error?e.message:'Room connection lost');return}
-    if(!this.closed)this.timer=setTimeout(()=>void this.poll(),this.connected?10_000:650)
-  }
   private fail(message:string):void {if(!this.closed){this.connected=false;this.onError(message);this.close()}}
-  close():void {this.closed=true;this.connected=false;if(this.timer)clearTimeout(this.timer);if(this.recoverTimer)clearTimeout(this.recoverTimer);this.pc?.close();this.pc=null}
+  /** Leave the room for good. */
+  async leave():Promise<void> {this.close();await this.room.leave()}
+  close():void {
+    this.closed=true;this.connected=false
+    if(this.recoverTimer)clearTimeout(this.recoverTimer)
+    this.room.close();this.pc?.close();this.pc=null
+  }
 }
