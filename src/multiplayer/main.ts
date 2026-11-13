@@ -45,6 +45,17 @@ field('name').value=localStorage.getItem('bitepoint:multiplayer-name')??'Driver'
 field('gearbox').value=settings.gearbox;field('abs').value=settings.abs?'on':'off'
 field('input').value=settings.inputMode;field('volume').value=String(settings.volume);field('sensitivity').value=String(settings.mouseSensitivity)
 field('code').value=new URLSearchParams(location.search).get('room')?.toUpperCase().replace(/[^A-F0-9]/g,'').slice(0,6)??''
+// Opened from an invite link: only the name and Join. The host already chose
+// the circuit and settings, so the rest of the form is noise.
+if(field('code').value.length===6){
+  element('home').classList.add('is-invite')
+  element('home').querySelector('h1')!.textContent='Join the race'
+  field('code').readOnly=true
+  element('join').classList.replace('mp-secondary','mp-primary')
+  element('home-status').textContent=`You have been invited to room ${field('code').value}.`
+  queueMicrotask(()=>element('join').focus())
+}
+field('name').addEventListener('keydown',e=>{if(e.key==='Enter'&&element('home').classList.contains('is-invite'))element('join').click()})
 let renderer:Renderer|null=null,worker:Worker|null=null,link:PeerLink|null=null,ticket:Ticket|null=null,carParams:CarParams|null=null
 let track:Track|null=null,predictor:Predictor|null=null,latest:Snapshot|null=null,prepared=false,verified=false,playing=false,inMenu=false,ended=false
 let fingerprint='',names:[string,string|null]=['Host',null],lastSnapshot=0,ping=0,lastPing=0,lastHud=0

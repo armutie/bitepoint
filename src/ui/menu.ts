@@ -40,6 +40,7 @@ import {
 import { usernameHint } from '../shared/playerIdentity'
 import { RELEASED_PRESETS, RELEASED_TRACKS } from '../shared/released'
 import type { PlayerProfile, PlayerProfileClient } from '../storage/player'
+import { roomTransport } from '../multiplayer/rooms'
 import { drivingLibraryUrl } from '../telemetry/urls'
 
 /**
@@ -1746,8 +1747,9 @@ export class Menu {
       choice.addEventListener('click', () => this.chooseMode(mode.id))
       wrap.append(choice)
     }
-    if (import.meta.env.DEV && !LEGACY_TYRE_MODE) {
-      // Same row as the two above, so the dev entry does not read as broken.
+    // Wherever two players can actually meet: the dev server's room service,
+    // a configured one, or the live site's Supabase.
+    if (roomTransport() !== null && !LEGACY_TYRE_MODE) {
       const multiplayer = el('button', 'flow-mode flow-mode-dev')
       const number = el('span', 'flow-mode-number')
       number.textContent = '03'
@@ -1755,7 +1757,7 @@ export class Menu {
       const title = el('span', 'flow-mode-title')
       title.textContent = 'Multiplayer'
       const description = el('span', 'flow-mode-description')
-      description.textContent = 'Development build. Host or join a room.'
+      description.textContent = 'Race a friend online. Private rooms for two.'
       words.append(title, description)
       multiplayer.append(number, words, modeArrow())
       multiplayer.addEventListener('click', () => {
