@@ -5,11 +5,12 @@ import type { Room } from './rooms'
 export const RECOVERY_MS=6000
 /**
  * How long to wait for the direct link once both drivers are in the room,
- * before relaying through the room instead. A direct link between reachable
- * networks opens in well under two seconds; one that has not opened by now
- * almost never will (same Wi-Fi with client isolation, carrier NAT).
+ * before relaying through the room instead. Not a final decision: the direct
+ * attempt carries on, and the race moves onto it the moment it opens.
  */
-export const RELAY_AFTER_MS=7000
+export const RELAY_AFTER_MS=5000
+/** Why the race is on the relay: still trying direct, no direct route, or a dropped direct link. */
+export type RelayReason='slow'|'failed'|'lost'
 const RELAY_HELLO='{"type":"relay"}'
 
 /** The room only carries the handshake; race traffic goes only through the peer link. */
@@ -35,6 +36,7 @@ export class PeerLink {
   reconnecting=false
   /** Race traffic is going through the room rather than directly. */
   relayed=false
+  relayReason:RelayReason|null=null
   private relayTimer:ReturnType<typeof setTimeout>|null=null
   /** `forceRelay` skips the direct link: for trying the relay on one network. */
   constructor(readonly room:Room,private readonly opts:{forceRelay?:boolean}={}) {}
@@ -51,15 +53,21 @@ export class PeerLink {
       const state=pc.connectionState
       if(state==='failed'){
         // No direct path between these two networks: relay instead, if the room can.
-        if(!this.connected&&this.room.canRelay){this.useRelay(true);return}
+        if(this.room.canRelay){this.useRelay(true,'failed');this.retire();return}
         this.fail(this.connected
         ?'Connection lost. The race has stopped.'
         :'Could not connect the two drivers. A relay may be needed on these networks.');return}
+      if(state==='disconnected'&&this.connected&&!this.relayed&&this.room.canRelay){
+        // Carry on through the room while the direct link tries to come back.
+        this.useRelay(true,'lost');return}
       // A momentary drop (Wi-Fi roaming, a busy router) usually recovers by
       // itself within a second or two. It used to end the race on the spot.
-      if(state==='disconnected'&&!this.recoverTimer){this.reconnecting=true
+      if(state==='disconnected'&&!this.relayed&&!this.recoverTimer){this.reconnecting=true
         this.recoverTimer=setTimeout(()=>this.fail('Connection lost. The race has stopped.'),RECOVERY_MS)}
-      if(state==='connected'&&this.recoverTimer){clearTimeout(this.recoverTimer);this.recoverTimer=null;this.reconnecting=false}
+      if(state==='connected'){
+        if(this.recoverTimer){clearTimeout(this.recoverTimer);this.recoverTimer=null;this.reconnecting=false}
+        this.goDirect()
+      }
     }
     if(this.ticket.slot===0){this.bind(pc.createDataChannel('control'));this.bind(pc.createDataChannel('state',{ordered:false,maxRetransmits:0}))}
     else pc.ondatachannel=e=>this.bind(e.channel)
@@ -77,8 +85,10 @@ export class PeerLink {
       },
       signal:s=>{if(this.pc)this.inbound=this.inbound.then(()=>this.accept(s)).catch(()=>this.fail('The connection could not be set up.'))},
       relay:(channel,data)=>{
-        // Either driver may give up on the direct link first; the other follows.
-        if(!this.relayed)this.useRelay(false)
+        // Either driver may give up waiting for the direct link first; the
+        // other follows. Once linked, each side picks its own path: a packet
+        // arriving by either is handled the same.
+        if(!this.connected)this.useRelay(false,'slow')
         if(data===RELAY_HELLO)return
         try{const value:unknown=JSON.parse(data);channel===0?this.onControl(value):this.onFast(value)}catch{/* malformed */}
       },
@@ -89,20 +99,34 @@ export class PeerLink {
   private armRelay():void {
     if(!this.room.canRelay||this.connected||this.relayTimer||this.closed)return
     const wait=this.opts.forceRelay?0:RELAY_AFTER_MS
-    this.relayTimer=setTimeout(()=>{if(!this.connected)this.useRelay(true)},wait)
+    this.relayTimer=setTimeout(()=>{if(!this.connected)this.useRelay(true,'slow')},wait)
   }
-  /** Give up on the direct link and carry the race through the room. */
-  private useRelay(announce:boolean):void {
-    if(this.relayed||this.closed)return
-    this.relayed=true
+  /**
+   * Carry the race through the room. The direct attempt keeps going unless it
+   * has failed outright, and takes over the moment it opens.
+   */
+  private useRelay(announce:boolean,reason:RelayReason):void {
+    if(this.closed)return
+    if(this.relayed){if(reason==='failed')this.relayReason=reason;return}
+    this.relayed=true;this.relayReason=reason
     if(this.relayTimer){clearTimeout(this.relayTimer);this.relayTimer=null}
     if(this.recoverTimer){clearTimeout(this.recoverTimer);this.recoverTimer=null}
-    // Quietly retire the direct attempt; its channels closing is not a departure.
-    const pc=this.pc;this.pc=null
-    if(pc){pc.onconnectionstatechange=null;pc.onicecandidate=null;pc.close()}
+    this.reconnecting=false
     if(announce)this.room.relay(0,RELAY_HELLO)
-    this.connected=true;this.reconnecting=false
-    this.room.connected();this.onOpen()
+    if(!this.connected){this.connected=true;this.room.connected();this.onOpen()}
+  }
+  /** Quietly drop a direct attempt that has failed; its channels closing is not a departure. */
+  private retire():void {
+    const pc=this.pc;this.pc=null;this.control=null;this.fast=null
+    if(pc){pc.onconnectionstatechange=null;pc.onicecandidate=null;pc.close()}
+  }
+  private get directOpen():boolean {return this.control?.readyState==='open'&&this.fast?.readyState==='open'}
+  /** The direct link is open: race on it, relayed or not until now. */
+  private goDirect():void {
+    if(this.closed||!this.directOpen)return
+    if(this.relayTimer){clearTimeout(this.relayTimer);this.relayTimer=null}
+    this.relayed=false;this.relayReason=null;this.reconnecting=false
+    if(!this.connected){this.connected=true;this.room.connected();this.onOpen()}
   }
   /** The host offers once the guest is in the room. */
   private async maybeOffer(s:LobbyState):Promise<void> {
@@ -119,11 +143,15 @@ export class PeerLink {
       if(typeof e.data!=='string'||e.data.length>100_000)return
       try{const value:unknown=JSON.parse(e.data);channel.label==='control'?this.onControl(value):this.onFast(value)}catch{/* malformed peer packet */}
     }
-    channel.onopen=()=>{if(!this.connected&&!this.relayed&&this.control?.readyState==='open'&&this.fast?.readyState==='open'){
-      if(this.relayTimer){clearTimeout(this.relayTimer);this.relayTimer=null}
-      this.connected=true;this.room.connected();this.onOpen()}}
-    channel.onclose=()=>{if(!this.closed&&!this.relayed)this.fail('The other driver left the room.')}
-    channel.onerror=()=>{if(!this.relayed)this.fail('Connection interrupted. Please create a new room.')}
+    channel.onopen=()=>this.goDirect()
+    // With a relay to fall back on, a closed direct link moves the race onto
+    // it; a driver who has really gone is seen leaving the room instead.
+    channel.onclose=()=>{if(this.closed||this.relayed)return
+      if(this.room.canRelay&&this.connected){this.useRelay(true,'lost');return}
+      this.fail('The other driver left the room.')}
+    channel.onerror=()=>{if(this.closed||this.relayed)return
+      if(this.room.canRelay&&this.connected){this.useRelay(true,'lost');return}
+      this.fail('Connection interrupted. Please create a new room.')}
   }
   controlSend(value:unknown):void {
     if(this.relayed){this.room.relay(0,JSON.stringify(value));return}

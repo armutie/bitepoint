@@ -4,7 +4,7 @@ import type { RaceAction, RacePhase } from '../core/race'
 import { CURRENT_PHYSICS_RULESET } from '../shared/ruleset'
 
 // 5: easy mode replaced the ABS choice.
-export const PROTOCOL = `bitepoint-mp-5:${CURRENT_PHYSICS_RULESET}`
+export const PROTOCOL = `bitepoint-mp-6:${CURRENT_PHYSICS_RULESET}`
 export const TRACKS = ['power_8', 'silverstone-gp', 'power_4', 'balanced_8', 'power_3'] as const
 export type Slot = 0 | 1
 export interface RoomConfig {
@@ -21,6 +21,8 @@ export interface DriverScore {
 }
 export interface Snapshot {
   tick: number; phase: RacePhase; countdown: number; time: number
+  /** Counts races in this room: a rematch starts the next round. */
+  round: number
   cars: CarState[]; ack: number[]; actions: InputFrame[]; scores: DriverScore[]
 }
 export interface Ticket {
@@ -62,6 +64,7 @@ export function validSnapshot(v: unknown): v is Snapshot {
   if (!v || typeof v !== 'object') return false
   const s = v as Snapshot
   return Number.isSafeInteger(s.tick) && s.tick >= 0 && Number.isFinite(s.time)
+    && Number.isSafeInteger(s.round) && s.round >= 0
     && ['waiting','countdown','racing','finished'].includes(s.phase)
     && Number.isInteger(s.countdown) && s.countdown >= 0
     && Array.isArray(s.cars) && s.cars.length === 2

@@ -11,6 +11,20 @@ const track=()=>new Track(data as TrackData)
 const input=(seq:number,extra:Partial<InputFrame>={}):InputFrame=>({...IDLE,seq,throttle:0.6,...extra})
 
 describe('multiplayer physics and input authority',()=>{
+  it('a rematch puts both cars back on the grid with the lights on, without resetting the clock',()=>{
+    const a=new RaceAuthority(track(),config),grid=a.snapshot().cars
+    a.start()
+    for(let n=1;n<=400;n++){a.receive(0,[input(n,{throttle:1})]);a.receive(1,[input(n,{throttle:1})]);a.step()}
+    const before=a.snapshot()
+    expect(before.cars[0]!.x).not.toBeCloseTo(grid[0]!.x)
+    a.restart()
+    const after=a.step()
+    expect(after.round).toBe(before.round+1)
+    expect(after.tick).toBe(before.tick+1)
+    expect(after.phase).toBe('countdown')
+    expect(after.scores.every(s=>s.laps===0&&s.finish===null)).toBe(true)
+    for(let i=0;i<2;i++)expect(Math.hypot(after.cars[i]!.x-grid[i]!.x,after.cars[i]!.y-grid[i]!.y)).toBeLessThan(0.5)
+  })
   it('uses the single-player forces and wall response without changing the handling',()=>{
     for(const easy of [false,true])for(const contact of [false,true]) {
       const c={...config,contact,easy},t=track(),a=new RaceAuthority(t,c),world=new PhysicsWorld(t,c)

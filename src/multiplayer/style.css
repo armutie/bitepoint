@@ -136,7 +136,15 @@ a { color: inherit; text-decoration: none; touch-action: manipulation; }
    these are the few lines only multiplayer has. ------------------------- */
 
 .mp-hud { position: fixed; inset: 0; z-index: 1; pointer-events: none; font-variant-numeric: tabular-nums; }
-.mp-countdown { position: absolute; inset: 30% 10% auto; text-align: center; font: 600 clamp(36px, 6vw, 72px) var(--sans); letter-spacing: -0.06em; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6); }
+.mp-finish {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: min(440px, calc(100% - 32px)); padding: 26px 28px 24px;
+  background: var(--card); border: 1px solid var(--edge); border-top: 3px solid var(--accent); border-radius: 3px;
+  pointer-events: auto;
+}
+.mp-finish h2 { margin: 6px 0 8px; font: 600 clamp(28px, 4vw, 38px) var(--sans); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.mp-finish .mp-small { margin: 0; color: var(--muted); }
+.mp-finish .mp-pause-actions { margin-top: 22px; }
 .mp-controls { position: absolute; bottom: 18px; left: 24px; max-width: 32vw; color: var(--muted); font: 11px var(--mono); line-height: 1.6; text-shadow: 0 1px 3px #000; }
 .mp-net { position: absolute; bottom: 18px; right: 24px; color: var(--muted); font: 11px var(--mono); letter-spacing: 0.06em; text-shadow: 0 1px 3px #000; }
 .mp-test { position: absolute; top: 90px; right: 24px; padding: 10px; background: var(--card); border: 1px solid var(--edge); font: 11px var(--mono); pointer-events: auto; }

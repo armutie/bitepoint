@@ -4,17 +4,32 @@ import { IDLE, roomCarParams, validInput, type InputFrame, type RoomConfig, type
 
 /** One input queue per driver. Missing packets never stop the shared race clock. */
 export class RaceAuthority {
-  readonly race: Race
+  race: Race
   tick = 0
+  /** Races run in this room; a rematch starts the next. */
+  round = 0
   private queues = [new Map<number,InputFrame>(),new Map<number,InputFrame>()]
   private ack = [0,0]
   private applied: InputFrame[] = [{...IDLE},{...IDLE}]
   private received = [-100,-100]
   private gapTicks = [0,0]
-  constructor(track: Track,config: RoomConfig) {
-    this.race=new Race(track,[0,1].map(slot=>({slot,params:roomCarParams(config),easy:config.easy,
+  constructor(private readonly track: Track,private readonly config: RoomConfig) {
+    this.race=this.build()
+  }
+  private build(): Race {
+    const {track,config}=this
+    return new Race(track,[0,1].map(slot=>({slot,params:roomCarParams(config),easy:config.easy,
       sim:{manual:config.manual,abs:false,tc:true,brakeAwareAuto:2}})),
       {laps:config.laps,contact:config.contact,postFinishControl:true,trackId:config.trackId,preset:config.preset})
+  }
+  /**
+   * A rematch: both cars back on the grid and the lights straight on. The
+   * clock and input sequences carry on, so nothing either driver has queued
+   * is lost or replayed.
+   */
+  restart(): void {
+    this.race=this.build();this.round++
+    this.race.beginCountdown()
   }
   receive(slot: Slot,batch: unknown): void {
     if(!Array.isArray(batch)||batch.length>30)return
@@ -48,7 +63,7 @@ export class RaceAuthority {
   }
   snapshot(): Snapshot {
     const positions=this.race.positions()
-    return {tick:this.tick,phase:this.race.phase,countdown:this.race.countdownTicks,time:this.race.raceTime,
+    return {tick:this.tick,round:this.round,phase:this.race.phase,countdown:this.race.countdownTicks,time:this.race.raceTime,
       cars:this.race.sims.map(s=>({...s.car.s})),ack:[...this.ack],actions:this.applied.map(a=>({...a})),
       scores:this.race.sims.map((s,i)=>({laps:s.lapsCompleted,lapTime:s.currentLapTime,last:s.lastLapTime,
         best:s.bestLapTime,valid:s.lapValid,armed:s.timingArmed,position:positions[i]!,finish:this.race.finishedAt(i)}))}

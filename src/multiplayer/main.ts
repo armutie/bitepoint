@@ -40,10 +40,12 @@ root.innerHTML=`<div class="mp-stage"><canvas id="picture" aria-label="Race view
 <div class="mp-invite"><input readonly id="invite" aria-label="Invite link"><button id="copy" class="mp-secondary">Copy invite</button></div>
 <div id="lobby-status" class="mp-status" role="status">Connecting…</div>
 <div class="mp-pause-actions"><button id="start" class="mp-primary" disabled>Start race</button><button id="leave" class="mp-secondary">Leave room</button></div></section>
-<div class="mp-hud" id="hud" hidden><div id="countdown" class="mp-countdown"></div><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
+<div class="mp-hud" id="hud" hidden>
+<section class="mp-finish" id="finish" hidden><p class="mp-kicker">Race finished</p><h2 id="finish-title">P1</h2><p id="finish-detail" class="mp-small"></p>
+<div class="mp-pause-actions"><button id="again" class="mp-primary">Race again</button><button id="finish-leave" class="mp-secondary">Leave room</button></div></section><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
 <section class="mp-panel" id="pause" hidden><span class="mp-brand">Bite Point</span><p class="mp-kicker">Multiplayer</p><h1 id="pause-title">Menu</h1><p id="pause-status" class="mp-small">The race continues. Your car will slow down.</p>
 <div class="mp-settings"><label>Steering<select id="input"><option value="mouse">Mouse</option><option value="keyboard">Keyboard</option></select></label><label>Mouse sensitivity<input id="sensitivity" type="range" min="0" max="1" step="0.05"></label><label>Sound<input id="volume" type="range" min="0" max="1" step="0.05"></label></div>
-<div class="mp-pause-actions"><button id="resume" class="mp-primary">Resume</button><button id="quit" class="mp-secondary">Leave room</button></div></section>`
+<div class="mp-pause-actions"><button id="resume" class="mp-primary">Resume</button><button id="restart" class="mp-secondary" hidden>Restart race</button><button id="quit" class="mp-secondary">Leave room</button></div></section>`
 const element=<T extends HTMLElement=HTMLElement>(id:string)=>document.getElementById(id) as T
 const field=(id:string)=>element<HTMLInputElement>(id)
 let settings=loadSettings()
@@ -78,8 +80,7 @@ const input=new InputState(),sound=new Sound(),canvas=element<HTMLCanvasElement>
 // The single-player HUD: timing card, sectors, track map, shift lights, pedals
 // and the proximity arrows, fed from the race snapshots.
 const hud=new Hud();hud.root.classList.add('is-hidden');document.querySelector('.mp-stage')!.append(hud.root)
-const clocks=[new SectorClock(),new SectorClock()]
-let lastSteer=0,shownFastest=0
+let clocks=[new SectorClock(),new SectorClock()],lastSteer=0,shownFastest=0,finishShown=false
 input.attach(canvas);input.mode=settings.inputMode;input.fullLockFraction=fullLockFraction(settings.mouseSensitivity)
 sound.setLevel(0,true)
 const fmt=(seconds:number)=>`${Math.floor(seconds/60)}:${(seconds%60).toFixed(3).padStart(6,'0')}`
@@ -118,12 +119,36 @@ function snapshot(s:Snapshot):void{
     if(Math.hypot(dx,dy)<3){offsets[i]!.x+=dx;offsets[i]!.y+=dy;offsets[i]!.yaw+=wrapAngle(before[i]!.yaw-after[i]!.yaw)}
     else offsets[i]={x:0,y:0,yaw:0}
   }
+  if(latest&&s.round!==latest.round)newRound()
   previous=cloneStates();latest=s;lastSnapshot=performance.now()
   if(track&&ticket)for(let i=0;i<2;i++){
     const car=s.cars[i]!,score=s.scores[i]!
     if(clocks[i]!.update(score,track.sectorAt(track.project(car.x,car.y).s))&&i===ticket.slot&&score.last!==null)flashLap(score.last,s)
   }
   if(s.phase!=='waiting')enterRace()
+}
+/** A rematch has started: clear the last race's timing and the finish card. */
+function newRound():void{
+  clocks=[new SectorClock(),new SectorClock()];shownFastest=0;offsets=[{x:0,y:0,yaw:0},{x:0,y:0,yaw:0}]
+  hud.resetLap();showFinish(false)
+}
+function showFinish(open:boolean):void{
+  if(open===finishShown)return;finishShown=open;element('finish').hidden=!open
+  if(open){input.release(true)}else if(!inMenu){input.resume()}
+}
+/** The finish card: where you finished, where the other driver is, and a rematch. */
+function updateFinish(s:Snapshot,t:Ticket):void{
+  const mine=s.scores[t.slot]!,theirs=s.scores[1-t.slot]!,other=names[1-t.slot]??'The other driver'
+  showFinish(mine.finish!==null&&!ended)
+  if(!finishShown)return
+  element('finish-title').textContent=`P${mine.position} · ${fmt(mine.finish!)}`
+  element('finish-detail').textContent=(theirs.finish!==null?`${other} finished P${theirs.position} · ${fmt(theirs.finish)}.`:`${other} is still racing.`)
+    +(t.slot===0?'':' The host can start another race.')
+  element('again').hidden=t.slot!==0
+}
+function restartRace():void{
+  if(ticket?.slot!==0||!worker||ended)return
+  worker.postMessage({type:'restart'});if(inMenu)menu(false)
 }
 /** The lap banner, announcing the race's fastest lap as a single-player race does. */
 function flashLap(time:number,s:Snapshot):void{
@@ -164,7 +189,8 @@ async function prepare(t:Ticket):Promise<void>{
   renderer=new Renderer(canvas);renderer.applySettings({effects:settings.effects,performanceMode:settings.performanceMode,...cameraFeel(settings.effects)})
   renderer.setCameraMode(settings.camera)
   hud.setTrack(track)
-  await renderer.setTrack(track);renderer.setCars(carParams,false);renderer.setOpponents(carParams,1,[t.slot===0?1:0])
+  // Full speed: the lobby covers the picture, so there is no frame rate to protect.
+  await renderer.setTrack(track,undefined,undefined,()=>false);renderer.setCars(carParams,false);renderer.setOpponents(carParams,1,[t.slot===0?1:0])
   if(ended)return
   if(t.slot===0){worker=new Worker(new URL('./host.worker.ts',import.meta.url),{type:'module'})
     worker.onmessage=e=>{
@@ -180,7 +206,7 @@ async function prepare(t:Ticket):Promise<void>{
 async function connect(room:Room):Promise<void>{
   const t=room.ticket
   ticket=t;element('home').hidden=true;element('lobby').hidden=false;element('room-title').textContent=`Room ${t.code}`
-  element('start').hidden=t.slot!==0
+  element('start').hidden=t.slot!==0;element('restart').hidden=t.slot!==0
   const invite=new URL('multiplayer.html',location.href);invite.searchParams.set('room',t.code);field('invite').value=invite.href
   const label=trackLabels.get(t.config.trackId)??t.config.trackId
   element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'}${t.config.easy?' · Easy mode':''} · ${t.config.contact?'Car contact':'Ghost racing'}`
@@ -235,11 +261,12 @@ async function begin(host:boolean):Promise<void>{
 }
 element('host').onclick=()=>void begin(true);element('join').onclick=()=>void begin(false)
 element('copy').onclick=()=>{void navigator.clipboard.writeText(field('invite').value).then(()=>notice('lobby-status','Invite copied.')).catch(()=>{field('invite').focus();field('invite').select();notice('lobby-status','Copy the selected invite link.')})}
-element('leave').onclick=()=>void leave();element('quit').onclick=()=>void leave()
+element('leave').onclick=()=>void leave();element('quit').onclick=()=>void leave();element('finish-leave').onclick=()=>void leave()
+element('again').onclick=restartRace;element('restart').onclick=restartRace
 element('start').onclick=()=>{if(verified&&prepared&&ticket?.slot===0){worker?.postMessage({type:'start'});element<HTMLButtonElement>('start').disabled=true}}
 function menu(open:boolean):void{
   if(!playing||ended)return;inMenu=open;element('pause').hidden=!open
-  if(open)input.release(true);else{input.resume();sound.start()}
+  if(open)input.release(true);else{if(!finishShown)input.resume();sound.start()}
 }
 element('resume').onclick=()=>menu(false)
 input.onAction=a=>{
@@ -296,9 +323,9 @@ function frame(now:number):void{
     // Matches the link's recovery window: a blip shows as Reconnecting, not an ended race.
     if(verified&&latest&&now-lastSnapshot>RECOVERY_MS)fail('Race updates stopped. The room has ended.')
     if(verified&&now-lastPing>1000){lastPing=now;link?.controlSend({type:'ping',sent:now})}
-    if(latest&&now-lastHud>80){lastHud=now;const score=latest.scores[ticket.slot]!
-      element('countdown').textContent=score.finish!==null?`Finished P${score.position} · ${fmt(score.finish)}`:latest.phase==='finished'?'Race finished':''
-      element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · ${link?.relayed?'Relay':'Direct'}`
+    if(latest&&now-lastHud>80){lastHud=now
+      updateFinish(latest,ticket)
+      element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · ${!link?.relayed?'Direct':link.relayReason==='failed'?'Relay · no direct route':'Relay'}`
       if(lab)element('diagnostics').textContent=`${ticket.slot===0?'Host':'Guest'} · Tick ${latest.tick} · Input ${predictor.sequence} / ack ${latest.ack[ticket.slot]} · Queue ${predictor.queueSize} · Pedal ${latest.actions[ticket.slot]!.throttle.toFixed(2)} · Correction ${predictor.correction.toFixed(3)} m`
     }
   }
