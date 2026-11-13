@@ -1,3 +1,5 @@
+// The main game's sheet first, for its HUD; this page's own sheet then wins.
+import '../styles.css'
 import './style.css'
 import { loadSettings,saveSettings,fullLockFraction,cameraFeel } from '../ui/settings'
 import { Track,type TrackData,loadManifest } from '../core/track'
@@ -6,7 +8,12 @@ import { reverseSelected,speedOf,type CarState } from '../core/car'
 import { DT } from '../core/sim'
 import { wrapAngle } from '../core/math'
 import { Renderer } from '../render/renderer'
-import { CAMERA_ORDER } from '../render/cameras'
+import { CAMERA_LABEL,CAMERA_ORDER } from '../render/cameras'
+import { fieldLivery,liveryCss,PLAYER_LIVERY } from '../render/liveries'
+import { COUNTDOWN_TICKS } from '../core/race'
+import { Hud,type HudRaceState } from '../ui/hud'
+import { proximityMarkers } from '../ui/proximity'
+import { SectorClock,fastestSector } from './sectorClock'
 import { InputState } from '../game/input'
 import { Sound } from '../audio/sound'
 import { PeerLink,RECOVERY_MS } from './connection'
@@ -33,8 +40,7 @@ root.innerHTML=`<div class="mp-stage"><canvas id="picture" aria-label="Race view
 <div class="mp-invite"><input readonly id="invite" aria-label="Invite link"><button id="copy" class="mp-secondary">Copy invite</button></div>
 <div id="lobby-status" class="mp-status" role="status">Connecting…</div>
 <div class="mp-pause-actions"><button id="start" class="mp-primary" disabled>Start race</button><button id="leave" class="mp-secondary">Leave room</button></div></section>
-<div class="mp-hud" id="hud" hidden><div class="mp-racebar"><span id="position">P1 / 2</span><span id="lap">Lap 1 / 3</span><span id="time">0:00.000</span></div>
-<div id="countdown" class="mp-countdown"></div><div class="mp-speed"><strong id="speed">0</strong><span>km/h</span><b id="gear">1</b></div><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
+<div class="mp-hud" id="hud" hidden><div id="countdown" class="mp-countdown"></div><div class="mp-controls" id="controls"></div><div class="mp-net" id="network"></div></div>
 <section class="mp-panel" id="pause" hidden><span class="mp-brand">Bite Point</span><p class="mp-kicker">Multiplayer</p><h1 id="pause-title">Menu</h1><p id="pause-status" class="mp-small">The race continues. Your car will slow down.</p>
 <div class="mp-settings"><label>Steering<select id="input"><option value="mouse">Mouse</option><option value="keyboard">Keyboard</option></select></label><label>Mouse sensitivity<input id="sensitivity" type="range" min="0" max="1" step="0.05"></label><label>Sound<input id="volume" type="range" min="0" max="1" step="0.05"></label></div>
 <div class="mp-pause-actions"><button id="resume" class="mp-primary">Resume</button><button id="quit" class="mp-secondary">Leave room</button></div></section>`
@@ -69,6 +75,11 @@ if(lab){const box=document.createElement('div');box.className='mp-test';box.inne
   element('lab-drive').onclick=()=>{labDriveStarted=performance.now()}}
 let offsets=[{x:0,y:0,yaw:0},{x:0,y:0,yaw:0}]
 const input=new InputState(),sound=new Sound(),canvas=element<HTMLCanvasElement>('picture')
+// The single-player HUD: timing card, sectors, track map, shift lights, pedals
+// and the proximity arrows, fed from the race snapshots.
+const hud=new Hud();hud.root.classList.add('is-hidden');document.querySelector('.mp-stage')!.append(hud.root)
+const clocks=[new SectorClock(),new SectorClock()]
+let lastSteer=0,shownFastest=0
 input.attach(canvas);input.mode=settings.inputMode;input.fullLockFraction=fullLockFraction(settings.mouseSensitivity)
 sound.setLevel(0,true)
 const fmt=(seconds:number)=>`${Math.floor(seconds/60)}:${(seconds%60).toFixed(3).padStart(6,'0')}`
@@ -79,7 +90,7 @@ const displayStates=()=>predictor!.display(lead())
 function notice(id:string,message:string,error=false):void{element(id).textContent=message;element(id).classList.toggle('is-error',error)}
 function fail(message:string):void{
   if(ended)return;ended=true;playing=false;input.release();worker?.terminate();worker=null;link?.close();sound.setLevel(0,true)
-  element('home').hidden=true;element('lobby').hidden=true;element('hud').hidden=true;element('pause').hidden=false
+  element('home').hidden=true;element('lobby').hidden=true;element('hud').hidden=true;hud.root.classList.add('is-hidden');element('pause').hidden=false
   element('pause-title').textContent='Race stopped';element('pause-status').textContent=message;element('pause-status').classList.add('mp-disconnect')
   element('resume').hidden=true
 }
@@ -94,7 +105,7 @@ function updateReady():void{
   if(verified&&prepared)notice('lobby-status',ticket?.slot===0?'Both drivers ready.':'Ready. Waiting for the host to start.')
 }
 function enterRace():void{
-  if(playing||ended)return;playing=true;input.release();element('lobby').hidden=true;element('hud').hidden=false
+  if(playing||ended)return;playing=true;input.release();element('lobby').hidden=true;element('hud').hidden=false;hud.root.classList.remove('is-hidden')
   sound.setLevel(settings.volume,settings.volume<=0);lastFrame=performance.now();accumulator=0
 }
 function snapshot(s:Snapshot):void{
@@ -108,7 +119,40 @@ function snapshot(s:Snapshot):void{
     else offsets[i]={x:0,y:0,yaw:0}
   }
   previous=cloneStates();latest=s;lastSnapshot=performance.now()
+  if(track&&ticket)for(let i=0;i<2;i++){
+    const car=s.cars[i]!,score=s.scores[i]!
+    if(clocks[i]!.update(score,track.sectorAt(track.project(car.x,car.y).s))&&i===ticket.slot&&score.last!==null)flashLap(score.last,s)
+  }
   if(s.phase!=='waiting')enterRace()
+}
+/** The lap banner, announcing the race's fastest lap as a single-player race does. */
+function flashLap(time:number,s:Snapshot):void{
+  const fastest=s.scores.every(c=>c.best===null||time<=c.best)
+  if(fastest&&time!==shownFastest){shownFastest=time;hud.flashLap(time,true,true,'fastest')}
+  else hud.flashLap(time,true,false)
+}
+/** Metres covered in the race, from the host's snapshot so laps and position agree. */
+function progress(s:Snapshot,i:number):number{
+  const car=s.cars[i]!,score=s.scores[i]!,road=track!.project(car.x,car.y).s
+  // On the grid, behind the line, a car is at the end of the lap it has not started.
+  return score.laps*track!.length+(!score.armed&&score.laps===0&&road>track!.length/2?road-track!.length:road)
+}
+function raceHud(s:Snapshot,t:Ticket,other:{x:number;y:number}):HudRaceState{
+  const me=t.slot,them=1-me,score=s.scores[me]!,mine=clocks[me]!
+  const order=[0,1].sort((a,b)=>s.scores[a]!.position-s.scores[b]!.position)
+  const covered=[progress(s,0),progress(s,1)]
+  return {
+    position:score.position,size:2,lap:score.laps+1,laps:t.config.laps,gapAhead:null,gapBehind:null,
+    countdown:s.countdown/60,lights:s.phase==='countdown'?Math.min(5,Math.floor((COUNTDOWN_TICKS-s.countdown)/(COUNTDOWN_TICKS/5))):0,
+    starting:s.phase==='waiting'||s.phase==='countdown',launchHint:'',finished:score.finish!==null,
+    lastVsBest:score.last!==null&&score.best!==null&&score.last>score.best?score.last-score.best:null,
+    purpleSectors:mine.splits.map((x,i)=>fastestSector(clocks,i,x)),
+    purpleLastSectors:mine.lastSplits.map((x,i)=>fastestSector(clocks,i,x)),
+    standings:order.map((slot,i)=>({position:i+1,isPlayer:slot===me,name:slot===me?'You':names[slot]??'Driver',interval:null,
+      intervalMetres:i===0?0:Math.max(0,covered[order[0]!]!-covered[slot]!),laps:s.scores[slot]!.laps,finished:s.scores[slot]!.finish!==null,
+      colour:liveryCss(slot===me?PLAYER_LIVERY:fieldLivery(them))})),
+    mapDots:[{x:other.x,y:other.y,leader:order[0]===them}],
+  }
 }
 async function prepare(t:Ticket):Promise<void>{
   if(!validConfig(t.config))throw new Error('This room uses a different game version. Reload both games.')
@@ -119,6 +163,7 @@ async function prepare(t:Ticket):Promise<void>{
   predictor=new Predictor(track,t.config,t.slot);previous=cloneStates();carParams=roomCarParams(t.config)
   renderer=new Renderer(canvas);renderer.applySettings({effects:settings.effects,performanceMode:settings.performanceMode,...cameraFeel(settings.effects)})
   renderer.setCameraMode(settings.camera)
+  hud.setTrack(track)
   await renderer.setTrack(track);renderer.setCars(carParams,false);renderer.setOpponents(carParams,1,[t.slot===0?1:0])
   if(ended)return
   if(t.slot===0){worker=new Worker(new URL('./host.worker.ts',import.meta.url),{type:'module'})
@@ -215,7 +260,7 @@ function frame(now:number):void{
   if(predictor&&renderer&&track&&ticket&&!ended){
     accumulator+=wall
     while(accumulator>=DT){accumulator-=DT
-      if(verified){previous=displayStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5)
+      if(verified){previous=displayStates();const vx=predictor.states[ticket.slot]!.vx,c=input.sample(vx<=0.5);lastSteer=inMenu?0:c.steer
         const cruise=labDriveStarted>0&&now-labDriveStarted<6000
         const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),roomTcLevel(ticket.config))
         if(ticket.slot===0)worker?.postMessage({type:'input',slot:0,frames:[f]})
@@ -232,14 +277,27 @@ function frame(now:number):void{
     if(playing){sound.update({speed:speedOf(local),vx:local.vx,wheelVr:local.wheelVr,slipF:local.slipF,slipR:local.slipR,
       onKerb:Math.abs(proj.lateral)>proj.half-0.5,onGrass:Math.abs(proj.lateral)>proj.half+1.2,
       rpm:local.engineRpm,redlineRpm:p.redlineRpm,idleRpm:p.idleRpm,gear:local.gear,throttle:inMenu?0:input.pedals.throttle-input.pedals.brake,shiftTimer:local.shiftTimer})}
+    if(playing&&latest){
+      const other=states[1-ticket.slot]!,score=latest.scores[ticket.slot]!,clock=clocks[ticket.slot]!
+      const lookBack=input.lookBack&&(renderer.rig.mode==='halo'||renderer.rig.mode==='hood')
+      hud.update({
+        race:raceHud(latest,ticket,other),
+        proximity:renderer.rig.mode==='topDown'?[]:proximityMarkers(local,p,[{slot:1-ticket.slot,state:other,params:p}],lookBack,track),
+        speedKmh:speedOf(local)*3.6,gear:local.gear,reverse:reverseSelected(local),rpm:local.engineRpm,redlineRpm:p.redlineRpm,
+        currentLap:score.armed?score.lapTime:0,lastLap:score.last,bestLap:score.best,lapValid:true,timingArmed:score.armed,ghostDelta:null,
+        sectors:clock.splits,sectorDeltas:clock.deltas,sectorBestFlags:[false,false,false],
+        lastSectors:clock.lastSplits,lastSectorDeltas:clock.lastDeltas,lastSectorBestFlags:[false,false,false],lastLapValid:true,bestSectors:clock.best,
+        throttle:inMenu?0:input.pedals.throttle,brake:inMenu?0:input.pedals.brake,steer:lastSteer,
+        cameraLabel:CAMERA_LABEL[renderer.rig.mode],inputLabel:`${input.mode==='mouse'?'Mouse':'Keys'} · ${ticket.config.manual?'Manual':'Auto'}`,
+        viewportLabel:'Full screen',easy:ticket.config.easy,ghost:false,lapCount:score.laps,validLaps:score.laps,lapFraction:0,
+        carX:local.x,carY:local.y,sector:track.sectorAt(proj.s),ghostX:null,ghostY:null,tcLevel:roomTcLevel(ticket.config),abs:false,absBite:0,tcBite:0,
+      })
+    }
     // Matches the link's recovery window: a blip shows as Reconnecting, not an ended race.
     if(verified&&latest&&now-lastSnapshot>RECOVERY_MS)fail('Race updates stopped. The room has ended.')
     if(verified&&now-lastPing>1000){lastPing=now;link?.controlSend({type:'ping',sent:now})}
     if(latest&&now-lastHud>80){lastHud=now;const score=latest.scores[ticket.slot]!
-      element('position').textContent=`P${score.position} / 2`;element('lap').textContent=`Lap ${Math.min(score.laps+1,ticket.config.laps)} / ${ticket.config.laps}`
-      element('time').textContent=score.finish!==null?`Finished · ${fmt(score.finish)}`:`${fmt(score.lapTime)}${score.armed&&!score.valid?' · Invalid lap':''}`
-      element('speed').textContent=String(Math.round(speedOf(local)*3.6));element('gear').textContent=reverseSelected(local)?'R':String(local.gear+1)
-      element('countdown').textContent=latest.phase==='countdown'?String(Math.max(1,Math.ceil(latest.countdown/60))):latest.phase==='finished'?'Race finished':''
+      element('countdown').textContent=score.finish!==null?`Finished P${score.position} · ${fmt(score.finish)}`:latest.phase==='finished'?'Race finished':''
       element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · ${link?.relayed?'Relay':'Direct'}`
       if(lab)element('diagnostics').textContent=`${ticket.slot===0?'Host':'Guest'} · Tick ${latest.tick} · Input ${predictor.sequence} / ack ${latest.ack[ticket.slot]} · Queue ${predictor.queueSize} · Pedal ${latest.actions[ticket.slot]!.throttle.toFixed(2)} · Correction ${predictor.correction.toFixed(3)} m`
     }

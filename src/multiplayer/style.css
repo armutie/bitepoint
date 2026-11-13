@@ -26,6 +26,8 @@ button:disabled { cursor: default; opacity: 0.38; }
 a { color: inherit; text-decoration: none; touch-action: manipulation; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
 [hidden] { display: none !important; }
+/* The main sheet, loaded for its HUD, centres #app as a grid for its letterboxed stage. */
+#app { display: block; }
 
 .mp-stage { position: fixed; inset: 0; }
 .mp-stage canvas { display: block; width: 100%; height: 100%; }
@@ -130,27 +132,11 @@ a { color: inherit; text-decoration: none; touch-action: manipulation; }
 .mp-settings input[type="range"] { width: 100%; margin: 6px 0 2px; accent-color: var(--accent); }
 #pause-status { margin: -18px 0 18px; font-size: 14px; }
 
-/* --- race HUD: the main game's instrument cards ------------------------- */
+/* --- race HUD: the main game's own HUD (src/ui/hud.ts) sits in the stage;
+   these are the few lines only multiplayer has. ------------------------- */
 
-.mp-hud { position: fixed; inset: 0; pointer-events: none; font-variant-numeric: tabular-nums; }
-.mp-racebar {
-  position: absolute; top: 24px; left: 24px;
-  display: flex; align-items: baseline; gap: 26px; padding: 13px 18px 14px;
-  background: var(--card); border: 1px solid var(--edge); border-radius: 3px;
-  font: 15px var(--mono);
-}
-#position { color: var(--accent); font-size: 26px; font-weight: 600; letter-spacing: -0.03em; }
-#lap { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.14em; }
-#time { font-size: 17px; }
-.mp-speed {
-  position: absolute; bottom: 26px; left: 50%; transform: translateX(-50%);
-  display: flex; align-items: baseline; gap: 12px; padding: 12px 24px;
-  background: var(--card); border: 1px solid var(--edge); border-radius: 3px;
-}
-.mp-speed strong { font: 500 42px var(--mono); letter-spacing: -0.05em; }
-.mp-speed span { color: var(--muted); font: 11px var(--mono); text-transform: uppercase; letter-spacing: 0.12em; }
-.mp-speed b { padding-left: 16px; border-left: 1px solid var(--edge); font: 500 30px var(--mono); }
-.mp-countdown { position: absolute; inset: 34% 10% auto; text-align: center; font: 600 clamp(56px, 9vw, 96px) var(--sans); letter-spacing: -0.06em; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6); }
+.mp-hud { position: fixed; inset: 0; z-index: 1; pointer-events: none; font-variant-numeric: tabular-nums; }
+.mp-countdown { position: absolute; inset: 30% 10% auto; text-align: center; font: 600 clamp(36px, 6vw, 72px) var(--sans); letter-spacing: -0.06em; text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6); }
 .mp-controls { position: absolute; bottom: 18px; left: 24px; max-width: 32vw; color: var(--muted); font: 11px var(--mono); line-height: 1.6; text-shadow: 0 1px 3px #000; }
 .mp-net { position: absolute; bottom: 18px; right: 24px; color: var(--muted); font: 11px var(--mono); letter-spacing: 0.06em; text-shadow: 0 1px 3px #000; }
 .mp-test { position: absolute; top: 90px; right: 24px; padding: 10px; background: var(--card); border: 1px solid var(--edge); font: 11px var(--mono); pointer-events: auto; }
@@ -159,9 +145,7 @@ a { color: inherit; text-decoration: none; touch-action: manipulation; }
   .mp-panel { justify-content: flex-start; padding-top: 88px; }
   .mp-form { grid-template-columns: 1fr; }
   .mp-panel h1 { margin-bottom: 24px; }
-  .mp-racebar { left: 10px; right: 10px; gap: 14px; padding: 10px 12px; }
   .mp-controls { max-width: 44vw; font-size: 10px; }
-  .mp-speed { bottom: 44px; }
   .mp-invite { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
