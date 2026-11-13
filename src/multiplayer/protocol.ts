@@ -29,6 +29,16 @@ export interface LobbyState {
 export interface Signal {
   kind: 'offer' | 'answer' | 'candidate'; data: unknown
 }
+/**
+ * The settings in one fixed key order, for hashing. Supabase Realtime does not
+ * preserve key order, so the guest's copy of the host's settings can come back
+ * reordered; hashed as received, two identical rooms would fingerprint
+ * differently and refuse each other.
+ */
+export function canonicalConfig(c: RoomConfig): RoomConfig {
+  return { protocol: c.protocol, trackId: c.trackId, preset: c.preset, laps: c.laps,
+    contact: c.contact, manual: c.manual, abs: c.abs }
+}
 export function validConfig(v: unknown): v is RoomConfig {
   if (!v || typeof v !== 'object') return false
   const c = v as RoomConfig

@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { describe, expect, it } from 'vitest'
 
-import { PROTOCOL, type LobbyState, type RoomConfig, type Signal } from './protocol'
+import { canonicalConfig, PROTOCOL, type LobbyState, type RoomConfig, type Signal } from './protocol'
 import { RealtimeRoom } from './rooms'
 
 const config: RoomConfig = { protocol: PROTOCOL, trackId: 'power_8', preset: 'legacy', laps: 3, manual: false, abs: true, contact: false }
@@ -25,13 +25,16 @@ class FakeChannel {
   presence: Record<string, unknown> | null = null
   private readonly listeners: { type: string; event: string; cb: (p: { payload?: unknown }) => void }[] = []
   constructor(private readonly hub: FakeRealtime, readonly name: string, private readonly key: string) {}
+  private subscribed = false
   on(type: string, filter: { event: string }, cb: (p: { payload?: unknown }) => void): this {
+    // As supabase-js does: listeners after subscribe() are refused.
+    if (this.subscribed) throw new Error(`cannot add \`${type}\` callbacks after \`subscribe()\`.`)
     this.listeners.push({ type, event: filter.event, cb }); return this
   }
   emit(type: string, event: string, p: { payload?: unknown }): void {
     for (const l of this.listeners) if (l.type === type && l.event === event) l.cb(p)
   }
-  subscribe(cb: (status: string) => void): this { this.hub.join(this); queueMicrotask(() => cb('SUBSCRIBED')); return this }
+  subscribe(cb: (status: string) => void): this { this.subscribed = true; this.hub.join(this); queueMicrotask(() => cb('SUBSCRIBED')); return this }
   async track(payload: Record<string, unknown>): Promise<string> { this.presence = payload; this.hub.sync(this.name); return 'ok' }
   async untrack(): Promise<string> { this.presence = null; this.hub.sync(this.name); return 'ok' }
   presenceState(): Record<string, unknown[]> {
@@ -88,5 +91,13 @@ describe('meeting through Supabase Realtime', () => {
     host.close()
     await new Promise((r) => setTimeout(r, 0))
     expect(g.errors).toContain('The host left the room.')
+  })
+})
+
+describe('room settings fingerprint', () => {
+  it('is the same whatever order the keys arrive in', () => {
+    const shuffled = Object.fromEntries(Object.entries(config).reverse()) as unknown as RoomConfig
+    expect(JSON.stringify(shuffled)).not.toBe(JSON.stringify(config))
+    expect(JSON.stringify(canonicalConfig(shuffled))).toBe(JSON.stringify(canonicalConfig(config)))
   })
 })

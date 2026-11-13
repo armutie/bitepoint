@@ -103,6 +103,12 @@ interface Presence { slot: Slot; name: string; config?: RoomConfig; protocol: st
 const channelName = (code: string): string => `bitepoint-mp-${code}`
 const newCode = (): string => Array.from(crypto.getRandomValues(new Uint8Array(3)), (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase()
 
+/**
+ * Supabase only accepts listeners registered before `subscribe()`, so they
+ * are wired here, up front, to callbacks the room fills in once it exists.
+ */
+interface ChannelEvents { sync: () => void; signal: (payload: unknown) => void }
+
 export class RealtimeRoom implements Room {
   private closed = false
   private handlers: Parameters<Room['start']>[0] | null = null
@@ -111,14 +117,15 @@ export class RealtimeRoom implements Room {
     readonly ticket: Ticket,
     private readonly client: SupabaseClient,
     private readonly channel: RealtimeChannel,
+    events: ChannelEvents,
     host: string,
   ) {
     this.names = [host, null]
-    channel.on('broadcast', { event: 'signal' }, ({ payload }) => {
+    events.signal = (payload) => {
       const m = payload as { to?: number; signal?: Signal }
       if (m?.to === ticket.slot && m.signal) this.handlers?.signal(m.signal)
-    })
-    channel.on('presence', { event: 'sync' }, () => this.sync())
+    }
+    events.sync = () => this.sync()
   }
 
   /** Everyone currently in the room, by slot. */
@@ -137,16 +144,16 @@ export class RealtimeRoom implements Room {
 
   static async create(client: SupabaseClient, name: string, config: RoomConfig): Promise<RealtimeRoom> {
     const code = newCode()
-    const channel = await subscribe(client, code)
-    const room = new RealtimeRoom({ code, token: '', slot: 0, config }, client, channel, name)
+    const { channel, events } = await subscribe(client, code)
+    const room = new RealtimeRoom({ code, token: '', slot: 0, config }, client, channel, events, name)
     await channel.track({ slot: 0, name, config, protocol: PROTOCOL } satisfies Presence)
     return room
   }
 
   static async join(client: SupabaseClient, name: string, code: string): Promise<RealtimeRoom> {
-    const channel = await subscribe(client, code)
+    const { channel, events } = await subscribe(client, code)
     // Presence arrives just after subscribing; give it a moment to settle.
-    const members = await waitForPresence(channel, 4000)
+    const members = await waitForPresence(channel, events, 4000)
     const host = members.find((p) => p.slot === 0)
     if (!host) { await client.removeChannel(channel); throw new Error('Room not found or expired') }
     if (members.some((p) => p.slot === 1)) { await client.removeChannel(channel); throw new Error('This room already has two drivers') }
@@ -154,7 +161,7 @@ export class RealtimeRoom implements Room {
       await client.removeChannel(channel)
       throw new Error('This room uses a different game version. Reload both games.')
     }
-    const room = new RealtimeRoom({ code, token: '', slot: 1, config: host.config }, client, channel, host.name)
+    const room = new RealtimeRoom({ code, token: '', slot: 1, config: host.config }, client, channel, events, host.name)
     await channel.track({ slot: 1, name, protocol: PROTOCOL } satisfies Presence)
     return room
   }
@@ -175,23 +182,27 @@ export class RealtimeRoom implements Room {
   }
 }
 
-function subscribe(client: SupabaseClient, code: string): Promise<RealtimeChannel> {
+function subscribe(client: SupabaseClient, code: string): Promise<{ channel: RealtimeChannel; events: ChannelEvents }> {
   const channel = client.channel(channelName(code), { config: { broadcast: { self: false, ack: true }, presence: { key: crypto.randomUUID() } } })
+  const events: ChannelEvents = { sync: () => {}, signal: () => {} }
+  channel.on('presence', { event: 'sync' }, () => events.sync())
+  channel.on('broadcast', { event: 'signal' }, ({ payload }) => events.signal(payload))
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Could not reach the room service. Try again.')), 8000)
     channel.subscribe((status) => {
-      if (status === 'SUBSCRIBED') { clearTimeout(timeout); resolve(channel) }
+      if (status === 'SUBSCRIBED') { clearTimeout(timeout); resolve({ channel, events }) }
       if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') { clearTimeout(timeout); reject(new Error('Could not reach the room service. Try again.')) }
     })
   })
 }
 
-function waitForPresence(channel: RealtimeChannel, ms: number): Promise<Presence[]> {
+function waitForPresence(channel: RealtimeChannel, events: ChannelEvents, ms: number): Promise<Presence[]> {
   const read = (): Presence[] => Object.values(channel.presenceState<Presence>()).flat()
   return new Promise((resolve) => {
-    const done = (): void => { clearTimeout(timer); resolve(read()) }
+    let settled = false
+    const done = (): void => { if (settled) return; settled = true; clearTimeout(timer); resolve(read()) }
     const timer = setTimeout(done, ms)
-    channel.on('presence', { event: 'sync' }, () => { if (read().some((p) => p.slot === 0)) done() })
+    events.sync = () => { if (read().some((p) => p.slot === 0)) done() }
     if (read().some((p) => p.slot === 0)) done()
   })
 }

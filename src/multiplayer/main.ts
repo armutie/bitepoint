@@ -12,7 +12,7 @@ import { Sound } from '../audio/sound'
 import { PeerLink,RECOVERY_MS } from './connection'
 import { createRoom,joinRoom,type Room } from './rooms'
 import { hostLeadTicks, Predictor } from './prediction'
-import { PROTOCOL,TRACKS,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
+import { PROTOCOL,TRACKS,canonicalConfig,validConfig,validSnapshot,type RoomConfig,type Ticket,type Snapshot } from './protocol'
 
 const root=document.querySelector<HTMLDivElement>('#app')!
 root.innerHTML=`<div class="mp-stage"><canvas id="picture" aria-label="Race view"></canvas></div>
@@ -111,7 +111,7 @@ async function prepare(t:Ticket):Promise<void>{
   if(!validConfig(t.config))throw new Error('This room uses a different game version. Reload both games.')
   const response=await fetch(`./tracks/${t.config.trackId}.json`);if(!response.ok)throw new Error('Could not load the circuit.')
   const data=await response.json() as TrackData;track=new Track(data)
-  const bytes=new TextEncoder().encode(JSON.stringify({protocol:PROTOCOL,data,params:handlingPreset(t.config.preset),config:t.config}))
+  const bytes=new TextEncoder().encode(JSON.stringify({protocol:PROTOCOL,data,params:handlingPreset(t.config.preset),config:canonicalConfig(t.config)}))
   fingerprint=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(b=>b.toString(16).padStart(2,'0')).join('')
   predictor=new Predictor(track,t.config,t.slot);previous=cloneStates();carParams=handlingPreset(t.config.preset)
   renderer=new Renderer(canvas);renderer.applySettings({effects:settings.effects,performanceMode:settings.performanceMode,...cameraFeel(settings.effects)})
