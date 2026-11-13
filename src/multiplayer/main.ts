@@ -124,7 +124,10 @@ async function prepare(t:Ticket):Promise<void>{
   if(t.slot===0){worker=new Worker(new URL('./host.worker.ts',import.meta.url),{type:'module'})
     worker.onmessage=e=>{
       if(e.data.type==='stalled'){link?.controlSend({type:'closed',reason:'The host could not keep the race running.'});fail('The host was suspended or could not keep the race running. Create a new room.');return}
-      if(e.data.type==='snapshot'){snapshot(e.data.snapshot as Snapshot);if(verified)link?.fastSend({type:'snapshot',snapshot:e.data.snapshot})}
+      if(e.data.type==='snapshot'){snapshot(e.data.snapshot as Snapshot);// Relayed, every other snapshot (30 Hz) keeps within the room's message
+        // limits; prediction carries the guest between them.
+        const tick=(e.data.snapshot as Snapshot).tick
+        if(verified&&(!link?.relayed||tick%2===0))link?.fastSend({type:'snapshot',snapshot:e.data.snapshot})}
     };worker.onerror=()=>fail('The race host stopped unexpectedly.');worker.postMessage({type:'init',track:data,config:t.config})}
   prepared=true;input.refreshBounds();sendHello();updateReady()
   element('controls').textContent=`W / S pedals · ${settings.inputMode==='mouse'?'Mouse':'A / D'} steering${t.config.manual?' · E / Q gears':''} · Esc menu`
@@ -136,7 +139,8 @@ async function connect(room:Room):Promise<void>{
   const invite=new URL('multiplayer.html',location.href);invite.searchParams.set('room',t.code);field('invite').value=invite.href
   const label=trackLabels.get(t.config.trackId)??t.config.trackId
   element('room-details').textContent=`${label} · ${t.config.laps} laps · ${t.config.preset==='legacy'?'Low drag':'High downforce'} · ${t.config.manual?'Manual':'Automatic'}${t.config.easy?' · Easy mode':''} · ${t.config.contact?'Car contact':'Ghost racing'}`
-  link=new PeerLink(room)
+  // `?relay` skips the direct link, to try the relay on one network.
+  link=new PeerLink(room,{forceRelay:new URLSearchParams(location.search).has('relay')})
   link.onLobby=s=>{names=s.names;element('drivers').replaceChildren(...names.map((n,i)=>{
     // Numbered rows, as on the main menu: the empty seat reads as waiting, not missing.
     const li=document.createElement('li');li.classList.toggle('is-empty',!n)
@@ -215,7 +219,8 @@ function frame(now:number):void{
         const cruise=labDriveStarted>0&&now-labDriveStarted<6000
         const f=predictor.frame(inMenu?0:labDriveStarted?0:c.steer,inMenu?(vx>0.5?-0.25:0):cruise?Math.min(.7,(now-labDriveStarted)/1200):labDriveStarted?0:c.throttle,inMenu?0:input.takeShift(),roomTcLevel(ticket.config))
         if(ticket.slot===0)worker?.postMessage({type:'input',slot:0,frames:[f]})
-        else link?.fastSend({type:'input',frames:predictor.batch()})}
+        // Each batch repeats the unacknowledged inputs, so relayed at 30 Hz nothing is lost.
+        else if(!link?.relayed||f.seq%2===0)link?.fastSend({type:'input',frames:predictor.batch()})}
     }
     const alpha=accumulator/DT,states=displayStates().map((s,i)=>{
       const p=previous?.[i]??s,o=offsets[i]!,decay=Math.exp(-wall/0.10);o.x*=decay;o.y*=decay;o.yaw*=decay
@@ -235,7 +240,7 @@ function frame(now:number):void{
       element('time').textContent=score.finish!==null?`Finished · ${fmt(score.finish)}`:`${fmt(score.lapTime)}${score.armed&&!score.valid?' · Invalid lap':''}`
       element('speed').textContent=String(Math.round(speedOf(local)*3.6));element('gear').textContent=reverseSelected(local)?'R':String(local.gear+1)
       element('countdown').textContent=latest.phase==='countdown'?String(Math.max(1,Math.ceil(latest.countdown/60))):latest.phase==='finished'?'Race finished':''
-      element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · Private race`
+      element('network').textContent=link?.reconnecting||now-lastSnapshot>500?'Reconnecting…':`${Math.round(ping)} ms · ${link?.relayed?'Relay':'Direct'}`
       if(lab)element('diagnostics').textContent=`${ticket.slot===0?'Host':'Guest'} · Tick ${latest.tick} · Input ${predictor.sequence} / ack ${latest.ack[ticket.slot]} · Queue ${predictor.queueSize} · Pedal ${latest.actions[ticket.slot]!.throttle.toFixed(2)} · Correction ${predictor.correction.toFixed(3)} m`
     }
   }

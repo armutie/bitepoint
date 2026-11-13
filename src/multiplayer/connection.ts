@@ -3,6 +3,14 @@ import type { Room } from './rooms'
 
 /** How long a dropped link may take to come back before the race is ended. */
 export const RECOVERY_MS=6000
+/**
+ * How long to wait for the direct link once both drivers are in the room,
+ * before relaying through the room instead. A direct link between reachable
+ * networks opens in well under two seconds; one that has not opened by now
+ * almost never will (same Wi-Fi with client isolation, carrier NAT).
+ */
+export const RELAY_AFTER_MS=7000
+const RELAY_HELLO='{"type":"relay"}'
 
 /** The room only carries the handshake; race traffic goes only through the peer link. */
 export class PeerLink {
@@ -25,9 +33,15 @@ export class PeerLink {
   relayAvailable=false
   /** True while the link has dropped and is being given time to recover. */
   reconnecting=false
-  constructor(readonly room:Room) {}
+  /** Race traffic is going through the room rather than directly. */
+  relayed=false
+  private relayTimer:ReturnType<typeof setTimeout>|null=null
+  /** `forceRelay` skips the direct link: for trying the relay on one network. */
+  constructor(readonly room:Room,private readonly opts:{forceRelay?:boolean}={}) {}
   get ticket(){return this.room.ticket}
   async open():Promise<void> {
+    const forced=this.opts.forceRelay&&this.room.canRelay
+    if(forced){this.startRoom();return}
     const ice=await this.room.iceServers()
     this.relayAvailable=ice.relay
     if(this.closed)return
@@ -35,7 +49,10 @@ export class PeerLink {
     pc.onicecandidate=e=>{if(e.candidate)this.signal({kind:'candidate',data:e.candidate.toJSON()})}
     pc.onconnectionstatechange=()=>{
       const state=pc.connectionState
-      if(state==='failed'){this.fail(this.connected
+      if(state==='failed'){
+        // No direct path between these two networks: relay instead, if the room can.
+        if(!this.connected&&this.room.canRelay){this.useRelay(true);return}
+        this.fail(this.connected
         ?'Connection lost. The race has stopped.'
         :'Could not connect the two drivers. A relay may be needed on these networks.');return}
       // A momentary drop (Wi-Fi roaming, a busy router) usually recovers by
@@ -46,11 +63,46 @@ export class PeerLink {
     }
     if(this.ticket.slot===0){this.bind(pc.createDataChannel('control'));this.bind(pc.createDataChannel('state',{ordered:false,maxRetransmits:0}))}
     else pc.ondatachannel=e=>this.bind(e.channel)
+    this.startRoom()
+  }
+  private startRoom():void {
     this.room.start({
-      lobby:s=>{this.onLobby(s);this.inbound=this.inbound.then(()=>this.maybeOffer(s)).catch(()=>this.fail('The connection could not be set up.'))},
-      signal:s=>{this.inbound=this.inbound.then(()=>this.accept(s)).catch(()=>this.fail('The connection could not be set up.'))},
+      lobby:s=>{
+        this.onLobby(s)
+        const other=s.names[1-this.ticket.slot]
+        // Relaying, the room is the link: the other driver leaving it ends the race.
+        if(this.relayed&&!other){this.fail('The other driver left the room.');return}
+        if(other)this.armRelay()
+        if(this.pc)this.inbound=this.inbound.then(()=>this.maybeOffer(s)).catch(()=>this.fail('The connection could not be set up.'))
+      },
+      signal:s=>{if(this.pc)this.inbound=this.inbound.then(()=>this.accept(s)).catch(()=>this.fail('The connection could not be set up.'))},
+      relay:(channel,data)=>{
+        // Either driver may give up on the direct link first; the other follows.
+        if(!this.relayed)this.useRelay(false)
+        if(data===RELAY_HELLO)return
+        try{const value:unknown=JSON.parse(data);channel===0?this.onControl(value):this.onFast(value)}catch{/* malformed */}
+      },
       error:m=>this.fail(m),
     })
+  }
+  /** Both drivers are in the room: start the clock on the direct link. */
+  private armRelay():void {
+    if(!this.room.canRelay||this.connected||this.relayTimer||this.closed)return
+    const wait=this.opts.forceRelay?0:RELAY_AFTER_MS
+    this.relayTimer=setTimeout(()=>{if(!this.connected)this.useRelay(true)},wait)
+  }
+  /** Give up on the direct link and carry the race through the room. */
+  private useRelay(announce:boolean):void {
+    if(this.relayed||this.closed)return
+    this.relayed=true
+    if(this.relayTimer){clearTimeout(this.relayTimer);this.relayTimer=null}
+    if(this.recoverTimer){clearTimeout(this.recoverTimer);this.recoverTimer=null}
+    // Quietly retire the direct attempt; its channels closing is not a departure.
+    const pc=this.pc;this.pc=null
+    if(pc){pc.onconnectionstatechange=null;pc.onicecandidate=null;pc.close()}
+    if(announce)this.room.relay(0,RELAY_HELLO)
+    this.connected=true;this.reconnecting=false
+    this.room.connected();this.onOpen()
   }
   /** The host offers once the guest is in the room. */
   private async maybeOffer(s:LobbyState):Promise<void> {
@@ -67,12 +119,20 @@ export class PeerLink {
       if(typeof e.data!=='string'||e.data.length>100_000)return
       try{const value:unknown=JSON.parse(e.data);channel.label==='control'?this.onControl(value):this.onFast(value)}catch{/* malformed peer packet */}
     }
-    channel.onopen=()=>{if(!this.connected&&this.control?.readyState==='open'&&this.fast?.readyState==='open'){this.connected=true;this.room.connected();this.onOpen()}}
-    channel.onclose=()=>{if(!this.closed)this.fail('The other driver left the room.')}
-    channel.onerror=()=>this.fail('Connection interrupted. Please create a new room.')
+    channel.onopen=()=>{if(!this.connected&&!this.relayed&&this.control?.readyState==='open'&&this.fast?.readyState==='open'){
+      if(this.relayTimer){clearTimeout(this.relayTimer);this.relayTimer=null}
+      this.connected=true;this.room.connected();this.onOpen()}}
+    channel.onclose=()=>{if(!this.closed&&!this.relayed)this.fail('The other driver left the room.')}
+    channel.onerror=()=>{if(!this.relayed)this.fail('Connection interrupted. Please create a new room.')}
   }
-  controlSend(value:unknown):void {if(this.control?.readyState==='open')this.control.send(JSON.stringify(value))}
-  fastSend(value:unknown):void {if(this.fast?.readyState==='open'&&this.fast.bufferedAmount<64_000)this.fast.send(JSON.stringify(value))}
+  controlSend(value:unknown):void {
+    if(this.relayed){this.room.relay(0,JSON.stringify(value));return}
+    if(this.control?.readyState==='open')this.control.send(JSON.stringify(value))
+  }
+  fastSend(value:unknown):void {
+    if(this.relayed){this.room.relay(1,JSON.stringify(value));return}
+    if(this.fast?.readyState==='open'&&this.fast.bufferedAmount<64_000)this.fast.send(JSON.stringify(value))
+  }
   private signal(signal:Signal):void {
     this.outbound=this.outbound.then(()=>this.closed?undefined:this.room.send(signal))
       .catch(()=>this.fail('The room service could not complete the connection.'))
@@ -95,6 +155,7 @@ export class PeerLink {
   close():void {
     this.closed=true;this.connected=false
     if(this.recoverTimer)clearTimeout(this.recoverTimer)
+    if(this.relayTimer)clearTimeout(this.relayTimer)
     this.room.close();this.pc?.close();this.pc=null
   }
 }

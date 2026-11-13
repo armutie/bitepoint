@@ -20,6 +20,9 @@ import { PROTOCOL, validConfig, type LobbyState, type RoomConfig, type Signal, t
 
 export interface IceConfig { iceServers: RTCIceServer[]; relay: boolean }
 
+/** 0 is the reliable control channel's traffic, 1 the fast state channel's. */
+export type RelayChannel = 0 | 1
+
 export interface Room {
   readonly ticket: Ticket
   iceServers(): Promise<IceConfig>
@@ -28,8 +31,18 @@ export interface Room {
     lobby: (state: LobbyState) => void
     signal: (signal: Signal) => void
     error: (message: string) => void
+    /** Race traffic relayed through the room, when the direct link could not open. */
+    relay?: (channel: RelayChannel, data: string) => void
   }): void
   send(signal: Signal): Promise<void>
+  /**
+   * Whether race traffic can go through the room itself when two drivers
+   * cannot reach each other directly (same Wi-Fi with client isolation, mobile
+   * carriers, strict networks). Supabase rooms can; the HTTP service cannot.
+   */
+  readonly canRelay: boolean
+  /** Send race traffic through the room. Only when `canRelay`. */
+  relay(channel: RelayChannel, data: string): void
   /** The peer link is up: background traffic can slow down. */
   connected(): void
   /** Leave for good, telling the room service where there is one. */
@@ -64,7 +77,9 @@ class HttpRoom implements Room {
   private cursor = 0
   private closed = false
   private linked = false
+  readonly canRelay = false
   constructor(readonly ticket: Ticket) {}
+  relay(): void {}
   iceServers(): Promise<IceConfig> {
     return service<IceConfig>(`/rooms/${this.ticket.code}/ice`, 'GET', undefined, this.ticket)
   }
@@ -107,7 +122,7 @@ const newCode = (): string => Array.from(crypto.getRandomValues(new Uint8Array(3
  * Supabase only accepts listeners registered before `subscribe()`, so they
  * are wired here, up front, to callbacks the room fills in once it exists.
  */
-interface ChannelEvents { sync: () => void; signal: (payload: unknown) => void }
+interface ChannelEvents { sync: () => void; signal: (payload: unknown) => void; relay: (payload: unknown) => void }
 
 export class RealtimeRoom implements Room {
   private closed = false
@@ -126,6 +141,23 @@ export class RealtimeRoom implements Room {
       if (m?.to === ticket.slot && m.signal) this.handlers?.signal(m.signal)
     }
     events.sync = () => this.sync()
+    events.relay = (payload) => {
+      const m = payload as { to?: number; c?: number; d?: unknown }
+      if (m?.to === ticket.slot && (m.c === 0 || m.c === 1) && typeof m.d === 'string' && m.d.length < 100_000) {
+        this.handlers?.relay?.(m.c, m.d)
+      }
+    }
+  }
+
+  readonly canRelay = true
+  /**
+   * Race traffic through the room's channel. Not acknowledged: a late state
+   * packet is worthless, and the control traffic it carries (hello, ping) is
+   * resent by its senders anyway.
+   */
+  relay(channel: RelayChannel, data: string): void {
+    if (this.closed) return
+    void this.channel.send({ type: 'broadcast', event: 'relay', payload: { to: 1 - this.ticket.slot, c: channel, d: data } })
   }
 
   /** Everyone currently in the room, by slot. */
@@ -184,9 +216,10 @@ export class RealtimeRoom implements Room {
 
 function subscribe(client: SupabaseClient, code: string): Promise<{ channel: RealtimeChannel; events: ChannelEvents }> {
   const channel = client.channel(channelName(code), { config: { broadcast: { self: false, ack: true }, presence: { key: crypto.randomUUID() } } })
-  const events: ChannelEvents = { sync: () => {}, signal: () => {} }
+  const events: ChannelEvents = { sync: () => {}, signal: () => {}, relay: () => {} }
   channel.on('presence', { event: 'sync' }, () => events.sync())
   channel.on('broadcast', { event: 'signal' }, ({ payload }) => events.signal(payload))
+  channel.on('broadcast', { event: 'relay' }, ({ payload }) => events.relay(payload))
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Could not reach the room service. Try again.')), 8000)
     channel.subscribe((status) => {
@@ -216,7 +249,7 @@ function realtimeClient(): Promise<SupabaseClient> | null {
   if (!url || !key) return null
   // Loaded only when multiplayer is used, so it never weighs on the main game.
   supabase ??= import('@supabase/supabase-js').then(({ createClient }) =>
-    createClient(url, key, { auth: { persistSession: false }, realtime: { params: { eventsPerSecond: 20 } } }))
+    createClient(url, key, { auth: { persistSession: false }, realtime: { params: { eventsPerSecond: 45 } } }))
   return supabase
 }
 

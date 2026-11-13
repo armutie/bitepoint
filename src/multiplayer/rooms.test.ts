@@ -94,6 +94,26 @@ describe('meeting through Supabase Realtime', () => {
   })
 })
 
+describe('relaying race traffic through the room', () => {
+  it('delivers each channel to the other driver only, labelled', async () => {
+    const hub = new FakeRealtime()
+    const host = await RealtimeRoom.create(hub.client(), 'Ana', config)
+    const guest = await RealtimeRoom.join(hub.client(), 'Ben', host.ticket.code)
+    const got: { who: string; channel: number; data: string }[] = []
+    for (const [who, room] of [['host', host], ['guest', guest]] as const) {
+      room.start({ lobby: () => {}, signal: () => {}, error: () => {}, relay: (channel, data) => got.push({ who, channel, data }) })
+    }
+    expect(host.canRelay && guest.canRelay).toBe(true)
+    host.relay(1, '{"type":"snapshot"}')
+    guest.relay(0, '{"type":"hello"}')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(got).toEqual([
+      { who: 'guest', channel: 1, data: '{"type":"snapshot"}' },
+      { who: 'host', channel: 0, data: '{"type":"hello"}' },
+    ])
+  })
+})
+
 describe('room settings fingerprint', () => {
   it('is the same whatever order the keys arrive in', () => {
     const shuffled = Object.fromEntries(Object.entries(config).reverse()) as unknown as RoomConfig
