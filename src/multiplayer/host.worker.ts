@@ -14,8 +14,15 @@ port.onmessage=e=>{
 setInterval(()=>{
   if(!authority)return
   const now=performance.now(),elapsed=(now-last)/1000;last=now
-  // Don't silently skip race time after a stalled/suspended host.
-  if(elapsed>0.35){port.postMessage({type:'stalled'});authority=null;return}
+  if(elapsed>0.35) {
+    // In the lobby nothing is racing, so a stalled clock costs nothing: the
+    // host may be in another window sending the invite link, where browsers
+    // throttle timers. That used to end the room before anyone had joined.
+    // Drop the gap and carry on; snapshots keep the guest's lobby alive.
+    if(authority.race.phase==='waiting'){accumulator=0;return}
+    // Once racing, don't silently skip race time after a stalled/suspended host.
+    port.postMessage({type:'stalled'});authority=null;return
+  }
   accumulator+=elapsed
   let state
   while(accumulator>=DT){state=authority.step();accumulator-=DT}
