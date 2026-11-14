@@ -89,6 +89,11 @@ export class OpeningShot {
     this.pitch = aim.pitch
   }
 
+  /** Where the camera is pointing (radians, in the x/z plane): the soundtrack pans by it. */
+  get heading(): number {
+    return this.yaw
+  }
+
   get done(): boolean {
     return this.t >= OPENING_END
   }

@@ -404,10 +404,15 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   const helmet = add(new THREE.SphereGeometry(0.18,40,28),helmetMat,-0.13,0.72)
   helmet.scale.set(1.08,1.05,0.96)
   const visorMat = mat(0x192b38,{roughness:0.16,metalness:0.65})
-  const visor=add(new THREE.SphereGeometry(0.183,32,12,0.10,Math.PI-0.20,1.13,0.44),visorMat,-0.13,0.72)
-  visor.rotation.y=Math.PI/2; visor.scale.copy(helmet.scale)
+  // A real visor's width across the front. Turned a quarter round to face the
+  // nose, so its scale is the helmet's with x and z swapped: copied straight,
+  // it came out thinner than the helmet at the front (buried) and fatter at
+  // the sides (showing), and the driver seemed to look out sideways.
+  const turned = new THREE.Vector3(helmet.scale.z, helmet.scale.y, helmet.scale.x)
+  const visor=add(new THREE.SphereGeometry(0.183,32,12,Math.PI/2-0.95,1.9,1.13,0.44),visorMat,-0.13,0.72)
+  visor.rotation.y=Math.PI/2; visor.scale.copy(turned)
   const helmetStripe=add(new THREE.SphereGeometry(0.1815,32,24,0,0.20),accentMat,-0.13,0.72)
-  helmetStripe.rotation.y=Math.PI/2-0.10; helmetStripe.scale.copy(helmet.scale)
+  helmetStripe.rotation.y=Math.PI/2-0.10; helmetStripe.scale.copy(turned)
   // Wheel and gloves turn together, independently of the merged body shell.
   const cockpitWheel = new THREE.Group(); cockpitWheel.name = 'cockpit-steering'; cockpitWheel.position.set(0.29,0.79,0); root.add(cockpitWheel)
   // Rounded butterfly plate and separate grips, with readable controls on the rear face.

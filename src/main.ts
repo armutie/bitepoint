@@ -151,9 +151,15 @@ async function boot(): Promise<void> {
      * about how long a frame took to draw can show in the video.
      */
     ;(window as unknown as Record<string, unknown>)['recordOpening'] = async (
-      { codec = 'vp9', width = 1920, height = 1080, bitrate = 6_000_000, fps = 30, samples = 8, shutter = 0.5 }: {
+      { codec = 'vp9', width = 1920, height = 1080, bitrate = 6_000_000, fps = 30, samples = 8, shutter = 0.5, audio = false, commentary, seconds }: {
         codec?: 'vp9' | 'avc'; width?: number; height?: number
         bitrate?: number; fps?: number; samples?: number; shutter?: number
+        /** With the soundtrack (src/render/openingSound.ts): the promo cut, MP4 only. */
+        audio?: boolean
+        /** A commentary recording for the soundtrack's loudspeakers. */
+        commentary?: string
+        /** Run past the shot's end, to this many seconds (the cars carry on down the straight). */
+        seconds?: number
       } = {},
     ): Promise<{ video: Blob; poster: Blob | null } | null> => {
       if (track?.id !== OPENING_TRACK) return null
@@ -165,7 +171,12 @@ async function boot(): Promise<void> {
         acc.height = height
         const g = acc.getContext('2d')!
         let add: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void
+        let addAudio: ((chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => void) | null = null
         let finish: () => ArrayBuffer
+        if (audio && codec !== 'avc') throw new Error('The soundtrack goes in the MP4 cut: codec avc.')
+        const sound = audio
+          ? await (await import('./render/openingSound')).renderOpeningSound(track, { commentary, seconds })
+          : null
         if (codec === 'vp9') {
           const { Muxer, ArrayBufferTarget } = await import('webm-muxer')
           const target = new ArrayBufferTarget()
@@ -175,8 +186,12 @@ async function boot(): Promise<void> {
         } else {
           const { Muxer, ArrayBufferTarget } = await import('mp4-muxer')
           const target = new ArrayBufferTarget()
-          const muxer = new Muxer({ target, video: { codec: 'avc', width, height, frameRate: fps }, fastStart: 'in-memory' })
+          const muxer = new Muxer({
+            target, video: { codec: 'avc', width, height, frameRate: fps }, fastStart: 'in-memory',
+            ...(sound ? { audio: { codec: 'aac' as const, numberOfChannels: 2, sampleRate: sound.sampleRate } } : {}),
+          })
           add = (chunk, meta) => muxer.addVideoChunk(chunk, meta)
+          addAudio = (chunk, meta) => muxer.addAudioChunk(chunk, meta)
           finish = () => { muxer.finalize(); return target.buffer }
         }
         let failure: unknown = null
@@ -210,11 +225,33 @@ async function boot(): Promise<void> {
           frame.close()
           if (failure) throw failure
           while (encoder.encodeQueueSize > 3) await new Promise((resolve) => setTimeout(resolve, 5))
-          if (shot.done) break
+          if (seconds !== undefined ? shot.t >= seconds : shot.done) break
         }
         await encoder.flush()
         encoder.close()
         if (failure) throw failure
+        if (sound && addAudio) {
+          const write = addAudio
+          const audioEncoder = new AudioEncoder({ output: (chunk, meta) => write(chunk, meta), error: (e) => { failure = e } })
+          audioEncoder.configure({ codec: 'mp4a.40.2', sampleRate: sound.sampleRate, numberOfChannels: 2, bitrate: 192_000 })
+          const left = sound.getChannelData(0), right = sound.getChannelData(1)
+          const block = 4800
+          for (let at = 0; at < sound.length; at += block) {
+            const frames = Math.min(block, sound.length - at)
+            const planar = new Float32Array(frames * 2)
+            planar.set(left.subarray(at, at + frames), 0)
+            planar.set(right.subarray(at, at + frames), frames)
+            const data = new AudioData({
+              format: 'f32-planar', sampleRate: sound.sampleRate, numberOfFrames: frames, numberOfChannels: 2,
+              timestamp: Math.round(at / sound.sampleRate * 1e6), data: planar,
+            })
+            audioEncoder.encode(data)
+            data.close()
+          }
+          await audioEncoder.flush()
+          audioEncoder.close()
+          if (failure) throw failure
+        }
         return { video: new Blob([finish()], { type: codec === 'vp9' ? 'video/webm' : 'video/mp4' }), poster }
       } finally {
         recordingOpening = false
