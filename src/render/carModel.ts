@@ -7,7 +7,8 @@ import { PLAYER_LIVERY } from './liveries'
 import * as THREE from 'three'
 import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js'
 
-import { shell, surfaceTexture, teamDecal, haloSurface, cockpitPaintAtlas, paintPanelUV } from './carSurface'
+import { carBody, liveryPaint } from './carBody'
+import { shell, surfaceTexture, teamDecal, haloSurface, cockpitPaintAtlas, paintPanelUV, bladeGeometry, pillarFairing } from './carSurface'
 
 import type { CarParams } from '../core/carParams'
 
@@ -122,6 +123,18 @@ function tyreProfile(r: number, halfW: number, shoulder: number): THREE.Vector2[
  * Groups (the wheel pivots under the root, the spin group under each pivot)
  * are left alone â€” they are exactly the transforms that DO move.
  */
+/** A rectangle with rounded corners, centred on the origin, in its XY plane. */
+function roundedRect(w: number, h: number, r: number): THREE.Shape {
+  const x = w / 2, y = h / 2
+  const s = new THREE.Shape()
+  s.moveTo(-x + r, -y)
+  s.lineTo(x - r, -y); s.quadraticCurveTo(x, -y, x, -y + r)
+  s.lineTo(x, y - r); s.quadraticCurveTo(x, y, x - r, y)
+  s.lineTo(-x + r, y); s.quadraticCurveTo(-x, y, -x, y - r)
+  s.lineTo(-x, -y + r); s.quadraticCurveTo(-x, -y, -x + r, -y)
+  return s
+}
+
 function mergeStatic(
   parent: THREE.Object3D,
   disposables: { dispose(): void }[],
@@ -154,12 +167,41 @@ function mergeStatic(
   if (merged.length > 0) parent.add(...merged)
 }
 
+/**
+ * How much of the sky's reflected light the cars take, against the rest of
+ * the scene. Under a photographed sky (Renderer.setLook) the environment
+ * lights every face of the car from every side at once, the undersides and
+ * the faces turned from the sun too, so the car glows as if lit from within;
+ * the cars take less of it than the world does.
+ */
+let carEnvironment = 1
+export function setCarEnvironment(k: number): void {
+  carEnvironment = k
+}
+
+function dimEnvironment(model: CarModel): CarModel {
+  if (carEnvironment === 1) return model
+  model.root.traverse((o) => {
+    if (!(o instanceof THREE.Mesh)) return
+    for (const m of Array.isArray(o.material) ? o.material : [o.material]) {
+      // Mirror glass keeps the sky's full reflection: that is what it is for.
+      if (m instanceof THREE.MeshStandardMaterial && m.name !== 'mirror-glass') m.envMapIntensity = carEnvironment
+    }
+  })
+  return model
+}
+
 export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; detail?: 'near' | 'field' } = {}): CarModel {
+  return dimEnvironment(buildCarModel(p, skin, opts))
+}
+
+function buildCarModel(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; detail?: 'near' | 'field' }): CarModel {
   if(opts.detail==='field')return buildFieldCar(p,skin,opts.ghost??false)
   const root = new THREE.Group()
   const disposables: { dispose(): void }[] = []
   const ghost = opts.ghost ?? false
   const detailed = true
+  const body = carBody()
   const bodyShell = (sections: Parameters<typeof shell>[0], rings = 40) => shell(sections, detailed ? rings : Math.min(rings, 16))
 
   const materials: THREE.MeshStandardMaterial[] = []
@@ -237,11 +279,26 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     sampleTo: (out: THREE.Vector3) => THREE.Vector3
   }[] = []
 
+  const rodChord = new THREE.Vector3()
+  const rodSide = new THREE.Vector3()
+  const rodBasis = new THREE.Matrix4()
+  const forward = new THREE.Vector3(1, 0, 0)
+  /**
+   * Stretch a unit link between two points. The links are aerofoil blades, so
+   * besides pointing along the link each is rolled to keep its chord as close
+   * to the direction of travel as the link allows, as real wishbones are set.
+   */
   const placeRod = (mesh: THREE.Mesh, from: THREE.Vector3, to: THREE.Vector3): void => {
     rodDelta.subVectors(to, from)
     mesh.position.copy(from).addScaledVector(rodDelta, 0.5)
     mesh.scale.set(1, rodDelta.length(), 1)
-    mesh.quaternion.setFromUnitVectors(rodUp, rodDelta.normalize())
+    const along = rodDelta.normalize()
+    rodChord.copy(forward).addScaledVector(along, -forward.dot(along))
+    if (rodChord.lengthSq() < 1e-6) rodChord.set(0, 0, 1).addScaledVector(along, -along.z)
+    rodChord.normalize()
+    rodSide.crossVectors(rodChord, along)
+    rodBasis.makeBasis(rodChord, along, rodSide)
+    mesh.quaternion.setFromRotationMatrix(rodBasis)
   }
 
   const addLiveRod = (
@@ -249,7 +306,9 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     sampleTo: (out: THREE.Vector3) => THREE.Vector3,
     radius: number,
   ): THREE.Mesh => {
-    const geom = new THREE.CylinderGeometry(radius, radius, 1, 8)
+    // A carbon wishbone is an aerofoil, a few times wider than it is thick,
+    // and slim: wider and the two legs of each wishbone merge into a panel.
+    const geom = bladeGeometry(radius * 4.5, radius * 1.4)
     disposables.push(geom)
     const mesh = new THREE.Mesh(geom, carbonMat)
     mesh.castShadow = !ghost
@@ -278,141 +337,6 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     updateWheelDisplay(speed, elapsed)
   }
 
-  // --- floor and tub -------------------------------------------------------
-  // Cut the front corners back around the tyres' steering sweep. The old
-  // rectangular floor stopped only a few centimetres inboard of a straight
-  // tyre, so the rear shoulder of the tyre passed through it at large lock.
-  // Keep a narrow tongue under the nose rather than shortening the whole floor.
-  const floorRearX = -1.65
-  const floorFrontX = 1.75
-  const floorOuterZ = halfW * 0.75
-  const floorNeckZ = halfW * 0.42
-  const floorCutX = Math.min(floorFrontX - 0.18, p.lf - wheelR - 0.08)
-  const floorShoulderX = Math.min(floorFrontX - 0.02, floorCutX + 0.22)
-  const floorShape = new THREE.Shape([
-    new THREE.Vector2(floorRearX, -floorOuterZ),
-    new THREE.Vector2(floorCutX, -floorOuterZ),
-    new THREE.Vector2(floorShoulderX, -floorNeckZ),
-    new THREE.Vector2(floorFrontX, -floorNeckZ),
-    new THREE.Vector2(floorFrontX, floorNeckZ),
-    new THREE.Vector2(floorShoulderX, floorNeckZ),
-    new THREE.Vector2(floorCutX, floorOuterZ),
-    new THREE.Vector2(floorRearX, floorOuterZ),
-  ])
-  const rawFloorGeom = new THREE.ExtrudeGeometry(floorShape, {
-    depth: 0.06,
-    bevelEnabled: false,
-    steps: 1,
-  })
-  // Extrusion is along local Z; rotate it into a horizontal 6 cm floor whose
-  // top and bottom retain the same heights as the previous box.
-  rawFloorGeom.rotateX(Math.PI / 2)
-  // ExtrudeGeometry is non-indexed while the boxes sharing this material are
-  // indexed; mergeVertices makes their layouts compatible for the body bake.
-  const floorGeom = mergeVertices(rawFloorGeom)
-  rawFloorGeom.dispose()
-  add(floorGeom, carbonMat, 0, 0.12)
-  // Continuous skins replace stacked boxes. The cockpit stays open between the shoulders.
-  add(bodyShell([[-0.85,0.30,0.15,0.25],[-0.25,0.32,0.17,0.29],[0.45,0.36,0.17,0.25],[0.85,0.40,0.14,0.18]]), bodyMat, 0,0)
-  for (const side of [-1, 1]) {
-    const shoulder = bodyShell([[-0.70,0.50,0.13,0.12],[-0.38,0.58,0.10,0.12],[0.12,0.57,0.10,0.105],[0.53,0.50,0.12,0.10]])
-    add(paintPanelUV(shoulder,'shoulder',side<0), cockpitMat,0,0,side*0.29)
-    add(paintPanelUV(bodyShell([[-1.62,0.23,0.06,0.075],[-1.12,0.33,0.12,0.16],[-0.55,0.38,0.19,0.205],[0.05,0.41,0.16,0.19],[0.37,0.40,0.075,0.14]]),'sidepod',side<0),cockpitMat,0,0,side*0.50)
-    const inlet = add(new THREE.SphereGeometry(1,24,12),darkMat,0.33,0.42,side*0.50)
-    inlet.scale.set(0.018,0.059,0.128)
-    // A narrow painted shoulder stripe follows the body without a floating decal plane.
-    add(bodyShell([[-1.25,0.452,0.008,0.025],[-0.55,0.578,0.008,0.028],[0.05,0.568,0.008,0.024],[0.28,0.512,0.006,0.018]],24),bodyMat,0,0,side*0.52)
-  }
-  add(paintPanelUV(bodyShell([[-2.20,0.35,0.09,0.055],[-1.5,0.42,0.14,0.12],[-0.88,0.57,0.24,0.22],[-0.65,0.67,0.25,0.20]]),'engine'),cockpitMat,0,0)
-  add(bodyShell([[-0.85,0.91,0.13,0.085],[-0.72,0.98,0.12,0.11],[-0.52,0.98,0.11,0.095]],20),accentMat,0,0)
-  const mouth = add(new THREE.CircleGeometry(0.08,24),darkMat,-0.485,0.995)
-  mouth.rotation.y=Math.PI/2
-  const nose = bodyShell([[0.35,0.49,0.17,0.30],[0.72,0.48,0.17,0.28],[1.20,0.44,0.13,0.23],[1.75,0.37,0.09,0.15],[2.30,0.27,0.06,0.105],[2.65,0.235,0.04,0.10]])
-  add(paintPanelUV(nose,'nose'),cockpitMat,0,0)
-  // The nose stripe is baked into its paint, avoiding a raised strip over the finish.
-
-  // --- front wing -----------------------------------------------------------
-  const wingX = p.lf + 0.75
-  add(new THREE.BoxGeometry(0.44, 0.045, p.width * 0.92), carbonMat, wingX, 0.16)
-  add(new THREE.BoxGeometry(0.3, 0.04, p.width * 0.8), carbonMat, wingX - 0.1, 0.25)
-  for (const z of [-1, 1]) {
-    add(new THREE.BoxGeometry(0.5, 0.26, 0.03), bodyMat, wingX, 0.26, z * p.width * 0.46)
-  }
-
-  // --- rear wing ------------------------------------------------------------
-  const rearX = -p.lr - 0.55
-  // A single central swan-neck pylon from the tail cover up to the main plane,
-  // replacing the old full-width support slab â€” from behind, daylight between
-  // the main plane and the beam wing is most of what makes it read as a wing
-  // assembly rather than a solid block.
-  add(new THREE.BoxGeometry(0.06, 0.44, 0.05), carbonMat, rearX + 0.05, 0.72)
-  // The whole assembly ends INBOARD of the rear tyres, as the real one does.
-  // The endplates used to stand at Â±0.70 m â€” over the middle of the tyres â€”
-  // with planes 0.36 m short of them, so from behind the wing read as a narrow
-  // slab floating between two unrelated fences, and once the planes were
-  // widened to meet them the wing became a full-width shelf over the wheels.
-  // Both wrong for the same reason: the fences were in the wrong place.
-  add(new THREE.BoxGeometry(0.46, 0.05, halfW * 1.16), carbonMat, rearX, 0.95)
-  add(new THREE.BoxGeometry(0.4, 0.04, halfW * 1.16), carbonMat, rearX + 0.06, 0.83)
-  // DRS actuator pod, the little hump on the main plane's centreline.
-  add(new THREE.BoxGeometry(0.14, 0.05, 0.08), darkMat, rearX, 0.99)
-  // Beam wing: two low elements between the endplates' lower edges.
-  add(new THREE.BoxGeometry(0.16, 0.03, halfW * 1.16), carbonMat, rearX + 0.04, 0.6)
-  add(new THREE.BoxGeometry(0.16, 0.028, halfW * 1.16), carbonMat, rearX - 0.06, 0.54)
-  // Endplates, deep enough to gather main plane and beam wing alike.
-  for (const z of [-1, 1]) {
-    add(new THREE.BoxGeometry(0.52, 0.5, 0.03), darkMat, rearX, 0.78, z * halfW * 0.58)
-  }
-
-  // --- tail: exhaust, rain light, diffuser -----------------------------------
-  // Exhaust: a dark pipe poking out of the very end of the tail cover.
-  const exhaust = add(new THREE.CylinderGeometry(0.042, 0.042, 0.16, 10), darkMat, -2.28, 0.47)
-  exhaust.rotation.z = Math.PI / 2
-  // Rain light on the tail's aft face. Emissive enough to catch the bloom â€”
-  // from the chase cam and the mirror-check it is the car's tail light, the
-  // single most recognisable thing about an F1 car from behind.
-  const rainMat = mat(0xff2020, {
-    emissive: 0xff1616,
-    emissiveIntensity: ghost ? 0.5 : 3.0,
-    roughness: 0.4,
-    metalness: 0,
-  })
-  add(new THREE.BoxGeometry(0.04, 0.16, 0.09), rainMat, -2.27, 0.38)
-  // Diffuser: the floor kicking up behind the rear axle, with three strakes.
-  const diffuser = add(new THREE.BoxGeometry(0.6, 0.035, halfW), carbonMat, -1.8, 0.2)
-  diffuser.rotation.z = -0.3
-  for (const z of [-1, 0, 1]) {
-    const strake = add(new THREE.BoxGeometry(0.55, 0.1, 0.016), carbonMat, -1.82, 0.26, z * halfW * 0.42)
-    strake.rotation.z = -0.3
-  }
-
-  // Recessed seat, padded cockpit edge and a carbon halo with a clear central opening.
-  const seat = add(new THREE.SphereGeometry(1,32,16),darkMat,-0.06,0.505)
-  seat.scale.set(0.52,0.07,0.25)
-  const tube = (points: number[][], radius: number, material: THREE.Material, parent = root): THREE.Mesh =>
-    add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points.map(v => new THREE.Vector3(v[0]!,v[1]!,v[2]!))),64,radius,12,false),material,0,0,0,parent)
-  tube([[-0.55,0.66,-0.245],[-0.12,0.64,-0.265],[0.38,0.59,-0.21],[0.46,0.59,0],[0.38,0.59,0.21],[-0.12,0.64,0.265],[-0.55,0.66,0.245]],0.024,darkMat)
-  const haloPoints = [[-0.61,0.70,-0.42],[-0.30,0.78,-0.46],[0.06,0.84,-0.46],[0.36,0.865,-0.37],[0.49,0.875,-0.18],[0.51,0.875,0],[0.49,0.875,0.18],[0.36,0.865,0.37],[0.06,0.84,0.46],[-0.30,0.78,0.46],[-0.61,0.70,0.42]]
-  add(haloSurface(haloPoints),carbonMat,0,0)
-  add(haloSurface(haloPoints,0.445,0.555,true),accentMat,0,0)
-  tube([[0.51,0.875,0],[0.58,0.76,0],[0.68,0.65,0]],0.024,carbonMat)
-  for (const side of [-1,1]) {
-    const mount=add(new THREE.SphereGeometry(1,20,12),bodyMat,-0.59,0.70,side*0.39)
-    mount.scale.set(0.11,0.055,0.095)
-  }
-  const helmetMat = mat(0xe9ac28,{roughness:0.36,metalness:0,roughnessMap:paintTexture,bumpMap:paintTexture,bumpScale:0.00008})
-  const helmet = add(new THREE.SphereGeometry(0.18,40,28),helmetMat,-0.13,0.72)
-  helmet.scale.set(1.08,1.05,0.96)
-  const visorMat = mat(0x192b38,{roughness:0.16,metalness:0.65})
-  // A real visor's width across the front. Turned a quarter round to face the
-  // nose, so its scale is the helmet's with x and z swapped: copied straight,
-  // it came out thinner than the helmet at the front (buried) and fatter at
-  // the sides (showing), and the driver seemed to look out sideways.
-  const turned = new THREE.Vector3(helmet.scale.z, helmet.scale.y, helmet.scale.x)
-  const visor=add(new THREE.SphereGeometry(0.183,32,12,Math.PI/2-0.95,1.9,1.13,0.44),visorMat,-0.13,0.72)
-  visor.rotation.y=Math.PI/2; visor.scale.copy(turned)
-  const helmetStripe=add(new THREE.SphereGeometry(0.1815,32,24,0,0.20),accentMat,-0.13,0.72)
-  helmetStripe.rotation.y=Math.PI/2-0.10; helmetStripe.scale.copy(turned)
   // Wheel and gloves turn together, independently of the merged body shell.
   const cockpitWheel = new THREE.Group(); cockpitWheel.name = 'cockpit-steering'; cockpitWheel.position.set(0.29,0.79,0); root.add(cockpitWheel)
   // Rounded butterfly plate and separate grips, with readable controls on the rear face.
@@ -462,27 +386,219 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
     displayTexture.needsUpdate=true
   }
   updateWheelDisplay(0,1)
-  // Dark inner faces and padding make the shoulder shells read as a cockpit opening.
-  for(const side of [-1,1]) {
-    const inner=add(bodyShell([[-0.49,0.565,0.077,0.029],[-0.18,0.586,0.078,0.023],[0.18,0.56,0.064,0.023],[0.39,0.532,0.048,0.025]],24),carbonMat,0,0,side*0.211)
-    inner.name='cockpit-inner-wall'
-    tube([[-0.47,0.651,side*0.22],[-0.20,0.662,side*0.228],[0.14,0.635,side*0.216],[0.36,0.595,side*0.19]],0.017,darkMat)
-  }
-  for (const side of [-1,1]) {
-    const mirror=add(new THREE.SphereGeometry(1,28,16),bodyMat,0.30,0.71,side*0.66)
-    mirror.scale.set(0.075,0.046,0.135)
-    const glass=add(new THREE.SphereGeometry(1,20,12),visorMat,0.234,0.71,side*0.66)
-    glass.scale.set(0.007,0.033,0.102)
-    tube([[0.30,0.55,side*0.36],[0.31,0.58,side*0.52],[0.30,0.69,side*0.65]],0.012,carbonMat)
-  }
-  const labelTexture=teamDecal('Bitdefender','RICHARD MILLE')
-  if(labelTexture) {
-    disposables.push(labelTexture)
-    const labelMat=mat(0xffffff,{map:labelTexture,transparent:true,alphaTest:0.1,roughness:0.5,metalness:0,polygonOffset:true,polygonOffsetFactor:-2})
-    for (const [from,to,offset] of [[0.10,0.29,0.5],[0.71,0.90,0]] as const) {
-      const g=haloSurface(haloPoints,from,to,true),uv=g.getAttribute('uv')
-      for(let i=0;i<uv.count;i++)uv.setY(i,offset+uv.getY(i)*0.5)
-      add(g,labelMat,0,0)
+  // The new body sits lower in the cockpit than the old one did.
+  if (body) cockpitWheel.position.set(0.30, 0.565, 0)
+
+  if (body) {
+    // The Blender-modelled body (carBody.ts): one mesh per material, painted
+    // here so each car can wear its own livery over the same model.
+    const liveryMat = liveryPaint(skin.body, skin.accent, ghost)
+    materials.push(liveryMat); disposables.push(liveryMat)
+    const own = {
+      paint: liveryMat,
+      accent: accentMat,
+      carbon: carbonMat,
+      carbon_matt: carbonMat,
+      intake: darkMat,
+      suede: darkMat,
+      titanium: mat(0x8c7a6c, { roughness: 0.3, metalness: 0.9 }),
+      mirror: mat(0xc8ccd2, { roughness: 0.05, metalness: 1 }),
+      rain_light: mat(0xff2020, { emissive: 0xff1616, emissiveIntensity: ghost ? 0.5 : 3.0, roughness: 0.4, metalness: 0 }),
+      helmet: mat(0xeeeeea, { roughness: 0.3, metalness: 0 }),
+      visor: mat(0x10161c, { roughness: 0.08, metalness: 0.7 }),
+      plank: mat(0x6b5236, { roughness: 0.8, metalness: 0 }),
+    } as Record<string, THREE.Material>
+    for (const part of body) {
+      let material = own[part.material]
+      const decal = part.material.startsWith('decal_')
+      if (decal) {
+        // Sponsor decals: the model's own image over the paint's gloss.
+        const m = new THREE.MeshPhysicalMaterial({
+          map: part.source.map, transparent: true, opacity: ghost ? 0.4 : 1, depthWrite: false,
+          roughness: 0.24, metalness: 0, clearcoat: 1, clearcoatRoughness: 0.05,
+          polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+        })
+        materials.push(m); disposables.push(m)
+        material = m
+      }
+      const mesh = new THREE.Mesh(part.geometry, material ?? carbonMat)
+      mesh.castShadow = !ghost && !decal
+      root.add(mesh)
+    }
+  } else {
+    // --- floor and tub -------------------------------------------------------
+    // Cut the front corners back around the tyres' steering sweep. The old
+    // rectangular floor stopped only a few centimetres inboard of a straight
+    // tyre, so the rear shoulder of the tyre passed through it at large lock.
+    // Keep a narrow tongue under the nose rather than shortening the whole floor.
+    const floorRearX = -1.65
+    const floorFrontX = 1.75
+    const floorOuterZ = halfW * 0.75
+    const floorNeckZ = halfW * 0.42
+    const floorCutX = Math.min(floorFrontX - 0.18, p.lf - wheelR - 0.08)
+    const floorShoulderX = Math.min(floorFrontX - 0.02, floorCutX + 0.22)
+    const floorShape = new THREE.Shape([
+      new THREE.Vector2(floorRearX, -floorOuterZ),
+      new THREE.Vector2(floorCutX, -floorOuterZ),
+      new THREE.Vector2(floorShoulderX, -floorNeckZ),
+      new THREE.Vector2(floorFrontX, -floorNeckZ),
+      new THREE.Vector2(floorFrontX, floorNeckZ),
+      new THREE.Vector2(floorShoulderX, floorNeckZ),
+      new THREE.Vector2(floorCutX, floorOuterZ),
+      new THREE.Vector2(floorRearX, floorOuterZ),
+    ])
+    const rawFloorGeom = new THREE.ExtrudeGeometry(floorShape, {
+      depth: 0.06,
+      bevelEnabled: false,
+      steps: 1,
+    })
+    // Extrusion is along local Z; rotate it into a horizontal 6 cm floor whose
+    // top and bottom retain the same heights as the previous box.
+    rawFloorGeom.rotateX(Math.PI / 2)
+    // ExtrudeGeometry is non-indexed while the boxes sharing this material are
+    // indexed; mergeVertices makes their layouts compatible for the body bake.
+    const floorGeom = mergeVertices(rawFloorGeom)
+    rawFloorGeom.dispose()
+    add(floorGeom, carbonMat, 0, 0.12)
+    // Continuous skins replace stacked boxes. The cockpit stays open between the shoulders.
+    add(bodyShell([[-0.85,0.30,0.15,0.25],[-0.25,0.32,0.17,0.29],[0.45,0.36,0.17,0.25],[0.85,0.40,0.14,0.18]]), bodyMat, 0,0)
+    for (const side of [-1, 1]) {
+      const shoulder = bodyShell([[-0.70,0.50,0.13,0.12],[-0.38,0.58,0.10,0.12],[0.12,0.57,0.10,0.105],[0.53,0.50,0.12,0.10]])
+      add(paintPanelUV(shoulder,'shoulder',side<0), cockpitMat,0,0,side*0.29)
+      add(paintPanelUV(bodyShell([[-1.62,0.23,0.06,0.075],[-1.12,0.33,0.12,0.16],[-0.55,0.38,0.19,0.205],[0.05,0.41,0.16,0.19],[0.37,0.40,0.075,0.14]]),'sidepod',side<0),cockpitMat,0,0,side*0.50)
+      const inlet = add(new THREE.SphereGeometry(1,24,12),darkMat,0.33,0.42,side*0.50)
+      inlet.scale.set(0.018,0.059,0.128)
+      // A narrow painted shoulder stripe follows the body without a floating decal plane.
+      add(bodyShell([[-1.25,0.452,0.008,0.025],[-0.55,0.578,0.008,0.028],[0.05,0.568,0.008,0.024],[0.28,0.512,0.006,0.018]],24),bodyMat,0,0,side*0.52)
+    }
+    add(paintPanelUV(bodyShell([[-2.20,0.35,0.09,0.055],[-1.5,0.42,0.14,0.12],[-0.88,0.57,0.24,0.22],[-0.65,0.67,0.25,0.20]]),'engine'),cockpitMat,0,0)
+    add(bodyShell([[-0.85,0.91,0.13,0.085],[-0.72,0.98,0.12,0.11],[-0.52,0.98,0.11,0.095]],20),accentMat,0,0)
+    const mouth = add(new THREE.CircleGeometry(0.08,24),darkMat,-0.485,0.995)
+    mouth.rotation.y=Math.PI/2
+    const nose = bodyShell([[0.35,0.49,0.17,0.30],[0.72,0.48,0.17,0.28],[1.20,0.44,0.13,0.23],[1.75,0.37,0.09,0.15],[2.30,0.27,0.06,0.105],[2.65,0.235,0.04,0.10]])
+    add(paintPanelUV(nose,'nose'),cockpitMat,0,0)
+    // The nose stripe is baked into its paint, avoiding a raised strip over the finish.
+
+    // --- front wing -----------------------------------------------------------
+    const wingX = p.lf + 0.75
+    add(new THREE.BoxGeometry(0.44, 0.045, p.width * 0.92), carbonMat, wingX, 0.16)
+    add(new THREE.BoxGeometry(0.3, 0.04, p.width * 0.8), carbonMat, wingX - 0.1, 0.25)
+    for (const z of [-1, 1]) {
+      add(new THREE.BoxGeometry(0.5, 0.26, 0.03), bodyMat, wingX, 0.26, z * p.width * 0.46)
+    }
+
+    // --- rear wing ------------------------------------------------------------
+    const rearX = -p.lr - 0.55
+    // A single central swan-neck pylon from the tail cover up to the main plane,
+    // replacing the old full-width support slab â€” from behind, daylight between
+    // the main plane and the beam wing is most of what makes it read as a wing
+    // assembly rather than a solid block.
+    add(new THREE.BoxGeometry(0.06, 0.44, 0.05), carbonMat, rearX + 0.05, 0.72)
+    // The whole assembly ends INBOARD of the rear tyres, as the real one does.
+    // The endplates used to stand at Â±0.70 m â€” over the middle of the tyres â€”
+    // with planes 0.36 m short of them, so from behind the wing read as a narrow
+    // slab floating between two unrelated fences, and once the planes were
+    // widened to meet them the wing became a full-width shelf over the wheels.
+    // Both wrong for the same reason: the fences were in the wrong place.
+    add(new THREE.BoxGeometry(0.46, 0.05, halfW * 1.16), carbonMat, rearX, 0.95)
+    add(new THREE.BoxGeometry(0.4, 0.04, halfW * 1.16), carbonMat, rearX + 0.06, 0.83)
+    // DRS actuator pod, the little hump on the main plane's centreline.
+    add(new THREE.BoxGeometry(0.14, 0.05, 0.08), darkMat, rearX, 0.99)
+    // Beam wing: two low elements between the endplates' lower edges.
+    add(new THREE.BoxGeometry(0.16, 0.03, halfW * 1.16), carbonMat, rearX + 0.04, 0.6)
+    add(new THREE.BoxGeometry(0.16, 0.028, halfW * 1.16), carbonMat, rearX - 0.06, 0.54)
+    // Endplates, deep enough to gather main plane and beam wing alike.
+    for (const z of [-1, 1]) {
+      add(new THREE.BoxGeometry(0.52, 0.5, 0.03), darkMat, rearX, 0.78, z * halfW * 0.58)
+    }
+
+    // --- tail: exhaust, rain light, diffuser -----------------------------------
+    // Exhaust: a dark pipe poking out of the very end of the tail cover.
+    const exhaust = add(new THREE.CylinderGeometry(0.042, 0.042, 0.16, 10), darkMat, -2.28, 0.47)
+    exhaust.rotation.z = Math.PI / 2
+    // Rain light on the tail's aft face. Emissive enough to catch the bloom â€”
+    // from the chase cam and the mirror-check it is the car's tail light, the
+    // single most recognisable thing about an F1 car from behind.
+    const rainMat = mat(0xff2020, {
+      emissive: 0xff1616,
+      emissiveIntensity: ghost ? 0.5 : 3.0,
+      roughness: 0.4,
+      metalness: 0,
+    })
+    add(new THREE.BoxGeometry(0.04, 0.16, 0.09), rainMat, -2.27, 0.38)
+    // Diffuser: the floor kicking up behind the rear axle, with three strakes.
+    const diffuser = add(new THREE.BoxGeometry(0.6, 0.035, halfW), carbonMat, -1.8, 0.2)
+    diffuser.rotation.z = -0.3
+    for (const z of [-1, 0, 1]) {
+      const strake = add(new THREE.BoxGeometry(0.55, 0.1, 0.016), carbonMat, -1.82, 0.26, z * halfW * 0.42)
+      strake.rotation.z = -0.3
+    }
+
+    // Recessed seat, padded cockpit edge and a carbon halo with a clear central opening.
+    const seat = add(new THREE.SphereGeometry(1,32,16),darkMat,-0.06,0.505)
+    seat.scale.set(0.52,0.07,0.25)
+    const tube = (points: number[][], radius: number, material: THREE.Material, parent = root): THREE.Mesh =>
+      add(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points.map(v => new THREE.Vector3(v[0]!,v[1]!,v[2]!))),64,radius,12,false),material,0,0,0,parent)
+    tube([[-0.55,0.66,-0.245],[-0.12,0.64,-0.265],[0.38,0.59,-0.21],[0.46,0.59,0],[0.38,0.59,0.21],[-0.12,0.64,0.265],[-0.55,0.66,0.245]],0.024,darkMat)
+    const haloPoints = [[-0.61,0.70,-0.42],[-0.30,0.78,-0.46],[0.06,0.84,-0.46],[0.36,0.865,-0.37],[0.49,0.875,-0.18],[0.51,0.875,0],[0.49,0.875,0.18],[0.36,0.865,0.37],[0.06,0.84,0.46],[-0.30,0.78,0.46],[-0.61,0.70,0.42]]
+    add(haloSurface(haloPoints),carbonMat,0,0)
+    add(haloSurface(haloPoints,0.445,0.555,true),accentMat,0,0)
+    // The central pillar, faired: long fore-and-aft, slim side to side, as the
+    // driver sees it straight ahead, and broadening into the chassis.
+    add(pillarFairing([[0.505,0.86],[0.585,0.755],[0.685,0.64]],[0.11,0.2],[0.045,0.052]),carbonMat,0,0)
+    for (const side of [-1,1]) {
+      const mount=add(new THREE.SphereGeometry(1,20,12),bodyMat,-0.59,0.70,side*0.39)
+      mount.scale.set(0.11,0.055,0.095)
+    }
+    const helmetMat = mat(0xe9ac28,{roughness:0.36,metalness:0,roughnessMap:paintTexture,bumpMap:paintTexture,bumpScale:0.00008})
+    const helmet = add(new THREE.SphereGeometry(0.18,40,28),helmetMat,-0.13,0.72)
+    helmet.scale.set(1.08,1.05,0.96)
+    const visorMat = mat(0x192b38,{roughness:0.16,metalness:0.65})
+    const mirrorGlass = mat(0xdde3e8,{roughness:0.03,metalness:1})
+    mirrorGlass.name = 'mirror-glass'
+    // A real visor's width across the front. Turned a quarter round to face the
+    // nose, so its scale is the helmet's with x and z swapped: copied straight,
+    // it came out thinner than the helmet at the front (buried) and fatter at
+    // the sides (showing), and the driver seemed to look out sideways.
+    const turned = new THREE.Vector3(helmet.scale.z, helmet.scale.y, helmet.scale.x)
+    const visor=add(new THREE.SphereGeometry(0.183,32,12,Math.PI/2-0.95,1.9,1.13,0.44),visorMat,-0.13,0.72)
+    visor.rotation.y=Math.PI/2; visor.scale.copy(turned)
+    const helmetStripe=add(new THREE.SphereGeometry(0.1815,32,24,0,0.20),accentMat,-0.13,0.72)
+    helmetStripe.rotation.y=Math.PI/2-0.10; helmetStripe.scale.copy(turned)
+    // Dark inner faces and padding make the shoulder shells read as a cockpit opening.
+    for(const side of [-1,1]) {
+      const inner=add(bodyShell([[-0.49,0.565,0.077,0.029],[-0.18,0.586,0.078,0.023],[0.18,0.56,0.064,0.023],[0.39,0.532,0.048,0.025]],24),carbonMat,0,0,side*0.211)
+      inner.name='cockpit-inner-wall'
+      tube([[-0.47,0.651,side*0.22],[-0.20,0.662,side*0.228],[0.14,0.635,side*0.216],[0.36,0.595,side*0.19]],0.017,darkMat)
+    }
+    for (const side of [-1,1]) {
+      // A squared-off housing, wide and shallow with softened corners, as on
+      // the real car: a rounded-rectangle box, its back face framing the
+      // glass. The glass faces the driver and reflects the sky and track, so
+      // from the cockpit it reads as a mirror rather than as a dark blob.
+      const housingRaw=new THREE.ExtrudeGeometry(roundedRect(0.27,0.075,0.016),{depth:0.05,bevelEnabled:true,bevelSize:0.006,bevelThickness:0.008,bevelSegments:2,curveSegments:6})
+      housingRaw.rotateY(-Math.PI/2)
+      const housing=mergeVertices(housingRaw);housingRaw.dispose()
+      // Extruded toward -x from its front face at x = 0.545.
+      add(housing,bodyMat,0.545,0.675,side*0.65)
+      const glass=add(new THREE.ShapeGeometry(roundedRect(0.255,0.062,0.012),6),mirrorGlass,0.4865,0.675,side*0.65)
+      glass.rotation.y=-Math.PI/2
+      // The stalk is two thin carbon slabs, as on the car: a short blade up
+      // out of the white shoulder beside the cockpit, then a long flat arm
+      // straight out to the mirror, each broad fore-and-aft and only a
+      // centimetre thick.
+      add(new THREE.BoxGeometry(0.065,0.14,0.012),carbonMat,0.515,0.61,side*0.33)
+      add(new THREE.BoxGeometry(0.065,0.012,0.19),carbonMat,0.515,0.675,side*0.42)
+    }
+    const labelTexture=teamDecal('Bitdefender','RICHARD MILLE')
+    if(labelTexture) {
+      disposables.push(labelTexture)
+      const labelMat=mat(0xffffff,{map:labelTexture,transparent:true,alphaTest:0.1,roughness:0.5,metalness:0,polygonOffset:true,polygonOffsetFactor:-2})
+      for (const [from,to,offset] of [[0.10,0.29,0.5],[0.71,0.90,0]] as const) {
+        const g=haloSurface(haloPoints,from,to,true),uv=g.getAttribute('uv')
+        for(let i=0;i<uv.count;i++)uv.setY(i,offset+uv.getY(i)*0.5)
+        add(g,labelMat,0,0)
+      }
     }
   }
 
@@ -508,7 +624,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
   /** Shoulder radius. A tyre has no 90-degree corner anywhere on it. */
   const SHOULDER = 0.05
 
-  const armGeom = new THREE.CylinderGeometry(0.018, 0.018, 1, 6)
+  const armGeom = bladeGeometry(0.07, 0.02)
   /**
    * Three things on a wheel, doing three different jobs.
    *
@@ -755,8 +871,8 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
         }
 
         for (const plane of [
-          { outerY: 0.11, innerY: 0.445 },
-          { outerY: -0.11, innerY: 0.315 },
+          { outerY: 0.11, innerY: body ? 0.38 : 0.445 },
+          { outerY: -0.11, innerY: body ? 0.25 : 0.315 },
         ]) {
           const outer = new THREE.Vector3(0, plane.outerY, 0)
           for (const x of [-0.22, 0.22]) {
@@ -772,7 +888,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
         // the other. It follows suspension movement but not steering rotation.
         const pushrodOuter = new THREE.Vector3(-0.02, 0.09, 0)
         addLiveRod(
-          new THREE.Vector3(axleX - 0.18, 0.56, side * 0.05),
+          new THREE.Vector3(axleX - 0.18, body ? 0.40 : 0.56, side * 0.05),
           (out) => out.copy(pivot.position).add(steer.position).add(pushrodOuter),
           0.012,
         )
@@ -781,7 +897,7 @@ export function buildCar(p: CarParams, skin: CarSkin, opts: { ghost?: boolean; d
         // arm end sits off the kingpin and therefore arcs with steering lock.
         const trackRodOuter = new THREE.Vector3(-0.075, -0.035, side * 0.025)
         addLiveRod(
-          new THREE.Vector3(axleX - 0.16, 0.36, side * 0.09),
+          new THREE.Vector3(axleX - 0.16, body ? 0.30 : 0.36, side * 0.09),
           (out) => out.copy(trackRodOuter)
             .applyAxisAngle(rodUp, steer.rotation.y)
             .add(steer.position)

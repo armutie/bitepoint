@@ -14,7 +14,7 @@ export interface Livery {
 }
 
 /** The player, who is never one of the field. */
-export const PLAYER_LIVERY: Livery = { body: 0xb91e27, accent: 0xdedfd9 }
+export const PLAYER_LIVERY: Livery = { body: 0xc80a0c, accent: 0xe4e4df }
 
 /** One each, so no two cars on a grid look alike. */
 export const FIELD_LIVERIES: readonly Livery[] = [

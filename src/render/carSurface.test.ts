@@ -18,7 +18,8 @@ describe('car surface geometry', () => {
   it('faces both the halo upper surface and its graphics toward the camera above it', () => {
     const path = [[0, 0, 0], [1, 0, 0], [2, 0, 0]]
     const halo = haloSurface(path), decal = haloSurface(path, 0.3, 0.7, true)
-    expect(halo.getAttribute('normal').getY(48 * 17 + 4)).toBeGreaterThan(0.99)
+    // 32 sides round the section: the top of it is a quarter of the way round.
+    expect(halo.getAttribute('normal').getY(48 * 33 + 8)).toBeGreaterThan(0.99)
     expect(decal.getAttribute('normal').getY(48 * 2)).toBeGreaterThan(0.99)
     halo.dispose(); decal.dispose()
   })

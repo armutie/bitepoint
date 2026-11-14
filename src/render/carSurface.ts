@@ -1,17 +1,30 @@
 import * as THREE from 'three'
 
-/** Halo fairing: a wide carbon upper surface, not a circular pipe. */
+/**
+ * Halo fairing: the carbon-covered band over a ~50 mm titanium tube. A flat
+ * top, squarer sides and a deeper, rounded underside, widening from the rear
+ * mounts to the front, as the faired halo is; a uniform ellipse round the
+ * whole loop read as bent sticks.
+ */
 export function haloSurface(points: number[][], from = 0, to = 1, decal = false): THREE.BufferGeometry {
   const curve = new THREE.CatmullRomCurve3(points.map(v => new THREE.Vector3(v[0]!, v[1]!, v[2]!)))
   const positions: number[] = [], uvs: number[] = [], indices: number[] = []
-  const steps = 96, sides = decal ? 1 : 16
+  const steps = 96, sides = decal ? 1 : 32
   for (let i = 0; i <= steps; i++) {
     const t = from + (to - from) * i / steps, c = curve.getPoint(t), tangent = curve.getTangent(t)
     const across = new THREE.Vector3(tangent.z, 0, -tangent.x).normalize()
+    // 0 at the rear mounts, 1 at the front where the band meets the pillar.
+    const front = 1 - Math.abs(2 * t - 1)
+    const halfWidth = HALO.rearHalfWidth + (HALO.frontHalfWidth - HALO.rearHalfWidth) * front ** 0.7
     for (let j = 0; j <= sides; j++) {
       const angle = j / sides * Math.PI * 2
-      const lateral = decal ? (j - 0.5) * 0.085 : Math.cos(angle) * 0.056
-      const vertical = decal ? 0.026 : Math.sin(angle) * 0.025
+      const cs = Math.cos(angle), sn = Math.sin(angle)
+      const lateral = decal
+        ? (j - 0.5) * Math.min(0.085, halfWidth * 1.6)
+        : halfWidth * Math.sign(cs) * Math.abs(cs) ** 0.55
+      const vertical = decal
+        ? HALO.top + 0.0015
+        : sn >= 0 ? HALO.top * sn ** 0.22 : -HALO.under * (-sn) ** 0.85
       positions.push(c.x + across.x * lateral, c.y + vertical, c.z + across.z * lateral)
       uvs.push(i / steps, j / sides)
       if (i < steps && j < sides) {
@@ -25,6 +38,85 @@ export function haloSurface(points: number[][], from = 0, to = 1, decal = false)
   g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
   g.setIndex(indices); g.computeVertexNormals()
+  return g
+}
+
+/** The halo band's section, in metres: half-widths, and height above / below the path. */
+export const HALO = { rearHalfWidth: 0.044, frontHalfWidth: 0.058, top: 0.021, under: 0.031 }
+
+/**
+ * Half-thickness of a symmetric NACA 00xx aerofoil at chord fraction x, for a
+ * thickness ratio of 1 (scale by the real ratio). Blunt nose, sharp tail.
+ */
+function naca(x: number): number {
+  return 5 * (0.2969 * Math.sqrt(x) - 0.126 * x - 0.3516 * x * x + 0.2843 * x ** 3 - 0.1036 * x ** 4)
+}
+
+/** A closed aerofoil outline: chord along x (leading edge at +chord/2), thickness along z. */
+function aerofoilOutline(chord: number, thickness: number, points = 14): [number, number][] {
+  const out: [number, number][] = []
+  for (let k = 0; k < points * 2; k++) {
+    // Cosine spacing: more points round the nose, where the curvature is.
+    const upper = k < points
+    const s = upper ? k / points : (k - points) / points
+    const x = upper ? (1 - Math.cos(s * Math.PI)) / 2 : (1 + Math.cos(s * Math.PI)) / 2
+    // naca() is per unit chord: scale by the chord for metres.
+    const z = naca(x) * thickness * chord * (upper ? 1 : -1)
+    out.push([chord / 2 - x * chord, z])
+  }
+  return out
+}
+
+/**
+ * A suspension blade of unit length along +y (from -0.5 to 0.5), aerofoil in
+ * section: chord along x, thickness along z. Placed like a rod, then rolled
+ * so the chord faces into the air (see placeBlade in carModel).
+ */
+export function bladeGeometry(chord: number, thickness: number): THREE.BufferGeometry {
+  const outline = aerofoilOutline(chord, thickness / chord)
+  const n = outline.length, positions: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (const y of [-0.5, 0.5]) outline.forEach(([x, z], k) => { positions.push(x, y, z); uvs.push(k / n, y + 0.5) })
+  for (let k = 0; k < n; k++) {
+    const a = k, b = (k + 1) % n, c = k + n, d = (k + 1) % n + n
+    indices.push(a, c, b, b, c, d)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  g.setIndex(indices)
+  // Flat-ish shading would facet; the outline is fine enough for smooth normals.
+  g.computeVertexNormals()
+  return g
+}
+
+/**
+ * The halo's central pillar, faired: horizontal aerofoil slices stacked from
+ * the chassis up to the band, long fore-and-aft and slim side to side (a
+ * ~50 mm tube under a fairing), growing in chord towards its base. The slices
+ * follow `path` (x at each height), leading edge forward.
+ */
+export function pillarFairing(path: [x: number, y: number][], chords: [top: number, base: number], thickness: [top: number, base: number]): THREE.BufferGeometry {
+  const rings = 16
+  const curve = new THREE.CatmullRomCurve3(path.map(([x, y]) => new THREE.Vector3(x, y, 0)))
+  const first = aerofoilOutline(1, 1)
+  const n = first.length, positions: number[] = [], uvs: number[] = [], indices: number[] = []
+  for (let i = 0; i <= rings; i++) {
+    const t = i / rings, p = curve.getPoint(t)
+    const chord = chords[0] + (chords[1] - chords[0]) * t
+    const thick = thickness[0] + (thickness[1] - thickness[0]) * t
+    aerofoilOutline(chord, thick / chord).forEach(([x, z], k) => { positions.push(p.x + x, p.y, z); uvs.push(k / n, t) })
+    if (i < rings) {
+      for (let k = 0; k < n; k++) {
+        const a = i * n + k, b = i * n + (k + 1) % n, c = a + n, d = b + n
+        indices.push(a, b, c, b, d, c)
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  g.setIndex(indices)
+  g.computeVertexNormals()
   return g
 }
 
