@@ -1994,12 +1994,14 @@ export class Menu {
     // Wherever two players can actually meet: the dev server's room service,
     // a configured one, or the live site's Supabase.
     if (roomTransport() !== null && !LEGACY_TYRE_MODE) {
-      const multiplayer = el('button', 'flow-mode flow-mode-dev')
+      const multiplayer = el('button', 'flow-mode')
       const number = el('span', 'flow-mode-number')
       number.textContent = '03'
       const words = el('span', 'flow-mode-words')
       const title = el('span', 'flow-mode-title')
-      title.textContent = 'Multiplayer'
+      const beta = el('span', 'flow-mode-beta')
+      beta.textContent = '(beta)'
+      title.append('Multiplayer', beta)
       const description = el('span', 'flow-mode-description')
       description.textContent = 'Race a friend online. Private rooms for two.'
       words.append(title, description)

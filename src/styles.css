@@ -2365,7 +2365,8 @@ kbd {
 .flow-mode-title { font-size: clamp(30px, 3.8vw, 46px); line-height: 1; letter-spacing: -0.05em; font-weight: 500; }
 .flow-mode-description { color: var(--muted); font-size: 13px; }
 .flow-mode-arrow { flex-shrink: 0; color: var(--dim); font-size: 28px; line-height: 1; transition: transform 140ms ease, color 140ms ease; }
-.flow-mode-dev .flow-mode-title { font-size: clamp(22px, 2.6vw, 30px); }
+/* Multiplayer is a full mode, the same size as the others, marked as early. */
+.flow-mode-beta { margin-left: 12px; color: var(--muted); font: 400 12px var(--mono); letter-spacing: 0.06em; vertical-align: 0.6em; }
 .flow-mode:hover, .flow-mode:focus-visible { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
 .flow-mode:hover .flow-mode-arrow, .flow-mode:focus-visible .flow-mode-arrow { color: var(--accent); transform: translateX(6px); }
 .flow-mode:hover .flow-mode-number, .flow-mode:focus-visible .flow-mode-number { color: var(--accent); }
