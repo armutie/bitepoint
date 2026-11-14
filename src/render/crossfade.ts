@@ -17,7 +17,7 @@ export class Crossfade {
   private pending: ((held: boolean) => void) | null = null
   private holding = false
 
-  constructor(private readonly source: HTMLCanvasElement, fadeMs = 450) {
+  constructor(private readonly source: HTMLCanvasElement, private readonly fadeMs = 450) {
     this.overlay = document.createElement('canvas')
     this.overlay.className = 'viewport-crossfade'
     this.overlay.setAttribute('aria-hidden', 'true')
@@ -60,10 +60,14 @@ export class Crossfade {
     })
   }
 
-  /** Fade the held picture out, two frames from now so the new circuit is up. */
-  release(): void {
+  /**
+   * Fade the held picture out, two frames from now so the new circuit is up;
+   * over `ms` when given, for a slower dissolve.
+   */
+  release(ms?: number): void {
     if (!this.holding) return
     this.holding = false
+    this.overlay.style.setProperty('--crossfade-ms', `${ms ?? this.fadeMs}ms`)
     requestAnimationFrame(() => requestAnimationFrame(() => {
       this.overlay.classList.add('is-fading')
       this.overlay.classList.remove('is-held')

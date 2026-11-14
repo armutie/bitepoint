@@ -42,6 +42,7 @@ import { Renderer } from './render/renderer'
 import { fieldLivery, liveryCss, PLAYER_LIVERY } from './render/liveries'
 import { Curtain } from './ui/curtain'
 import { OPENING_MIN_T, OPENING_TRACK, OpeningShot } from './render/openingShot'
+import { NightRun } from './render/nightRun'
 import { Hud, type HudRaceState } from './ui/hud'
 import { RaceFinish } from './ui/raceFinish'
 import { proximityMarkers, type ProximityRival } from './ui/proximity'
@@ -95,6 +96,11 @@ async function boot(): Promise<void> {
   // drawing, is underneath it for the swoosh.
   const openingVideo = document.getElementById('opening-video') as HTMLVideoElement | null
   if (openingVideo) canvas.after(openingVideo)
+  // Or, when the video does not play, the loading streaks (index.html): over
+  // the canvas, where they carry on over the night run once it is drawing.
+  const loadingStreaks = document.getElementById('loading-streaks')
+  if (loadingStreaks) canvas.after(loadingStreaks)
+  const holdLoading = new URLSearchParams(window.location.search).has('loading')
 
   const manifest = await loadManifest()
   if (manifest.length === 0) throw new Error('no circuits in the manifest')
@@ -415,13 +421,44 @@ async function boot(): Promise<void> {
   let attractTime = 0
 
   /**
-   * While the opening video plays, the circuit under it (Silverstone, the
-   * video's own) is built without interruption, so the video never sits frozen
-   * waiting on a build that was restarted. A circuit chosen meanwhile is
-   * queued and loaded after the swoosh (see `preview`).
+   * Every page load builds Silverstone first, the opening video's circuit,
+   * whatever is saved: one known build, so the opening is the same every time
+   * and the video never sits frozen on a build that was restarted. The saved
+   * circuit, or one chosen meanwhile, is queued (see `preview`) and loaded once
+   * Silverstone is up: after the swoosh when the video plays, else straight
+   * after Silverstone first draws.
    */
-  let openingPlaying = false
+  let firstBuild = false
   let queuedPreview: string | null = null
+  function releaseQueued(): void {
+    firstBuild = false
+    const queued = queuedPreview
+    queuedPreview = null
+    // Not when a session is starting: that loads the circuit it needs itself.
+    if (queued && !running) preview(queued)
+  }
+  /** The loading run (see `NightRun`) while it plays, on a load without the video. */
+  let nightRun: NightRun | null = null
+  /** Shaders compiled, so its first frame does not stall. */
+  let nightReady = false
+  let nightFrames = 0
+  /** The run gives way: the circuit fades and settles in, or a session takes over. */
+  function endNightRun(settle: boolean): void {
+    if (!nightRun) return
+    renderer.endNightRun()
+    nightRun.dispose()
+    nightRun = null
+    canvas.classList.remove('is-dipped')
+    delete (window as unknown as { __streaksVP?: unknown }).__streaksVP
+    document.documentElement.classList.remove('shows-loading')
+    // Left to finish fading with the dissolve, then gone.
+    const streaks = loadingStreaks
+    if (streaks) setTimeout(() => streaks.remove(), NIGHT_DISSOLVE_MS + 200)
+    if (settle) {
+      stage.classList.add('is-settling')
+      setTimeout(() => stage.classList.remove('is-settling'), 2400)
+    }
+  }
   /** True while the dev recorder owns the canvas (recordOpening). */
   let recordingOpening = false
   /**
@@ -431,12 +468,9 @@ async function boot(): Promise<void> {
   function finishOpening(swoosh: boolean): void {
     const video = openingVideo
     if (!video?.isConnected || video.classList.contains('is-leaving')) return
-    openingPlaying = false
-    // A circuit chosen while it played loads now, behind the menu. Not when a
-    // session is starting: that loads the one it needs itself.
-    const queued = queuedPreview
-    queuedPreview = null
-    if (swoosh && queued) preview(queued)
+    // A circuit chosen while it played loads now, behind the menu.
+    if (swoosh) releaseQueued()
+    else { firstBuild = false; queuedPreview = null }
     video.classList.add('is-leaving', swoosh ? 'is-swooshing' : 'is-gone')
     document.documentElement.classList.remove('plays-opening')
     if (swoosh) {
@@ -487,10 +521,18 @@ async function boot(): Promise<void> {
           // Behind the menu the build always yields to painting, the first one
           // included: the menu is up and usable while it runs. Once Drive has
           // been pressed the driver is waiting on it, so then: full speed.
+          // Leaving the night run: its last frame is held over the swap, so
+          // the swap's one hitch happens out of sight, then dissolves slowly
+          // into the circuit as the streaks fade with it.
+          let leavingNight = false
           const applied = await renderer.setTrack(loaded, () => trackJob === job, async () => {
             if (!running) await crossfade.hold()
+            leavingNight = !!nightRun && nightReady && track === null && !running
           }, () => !running && !menu.waitingToDrive && !curtain.covering)
-            .finally(() => crossfade.release())
+            .finally(() => {
+              crossfade.release(leavingNight ? NIGHT_DISSOLVE_MS : undefined)
+              if (leavingNight) loadingStreaks?.classList.add('is-gone')
+            })
           if (applied && trackJob === job) {
             track = loaded
             hud.setTrack(loaded)
@@ -508,7 +550,7 @@ async function boot(): Promise<void> {
   }
 
   function preview(trackId: string): void {
-    if (openingPlaying) { queuedPreview = trackId; return }
+    if (firstBuild) { queuedPreview = trackId; return }
     void ensureTrack(trackId).then(() => refreshAttractLine()).catch(error => console.error('[track-load]', error))
   }
 
@@ -579,6 +621,7 @@ async function boot(): Promise<void> {
 
   async function start(sel: Selection, oneShot = false): Promise<void> {
     finishOpening(false)
+    endNightRun(false)
     const event = sel.mode === 'race' ? eventFor(sel) : null
     if (event && !oneShot && !event.qualifying) {
       menu.showRaceEvent()
@@ -1230,6 +1273,21 @@ async function boot(): Promise<void> {
   const drawFrame = (alpha: number, dtWall: number): void => {
       if (finishState === 'results') return
       if (recordingOpening) return
+      if (!running && !paused && !track && nightRun && nightReady) {
+        nightRun.update(Math.min(dtWall, 1 / 20))
+        renderer.renderNightRun(nightRun, dtWall)
+        crossfade.afterFrame()
+        sound.idle()
+        // The streaks rush out of this road's vanishing point, and once the
+        // run is drawing they go see-through and carry on over it while the
+        // car fades in beneath them.
+        ;(window as unknown as { __streaksVP?: { x: number; y: number } }).__streaksVP = renderer.nightVanishing()
+        if (++nightFrames === 2) {
+          loadingStreaks?.classList.add('is-over')
+          canvas.classList.remove('is-dipped')
+        }
+        return
+      }
       if (!running && !paused && track) {
         // Attract mode: fly the selected circuit behind the menu. Only when
         // there is no session — a paused one keeps its own scene, held still.
@@ -1560,12 +1618,27 @@ async function boot(): Promise<void> {
     openingVideo?.remove()
     document.documentElement.classList.remove('plays-opening')
   }
-  // Under the video, the video's own circuit: what the swoosh lands on.
-  const firstCircuit = openingWanted && RELEASED_TRACKS.includes(OPENING_TRACK)
+  // Silverstone first, every time (see `firstBuild`); the saved circuit after.
+  const firstCircuit = RELEASED_TRACKS.includes(OPENING_TRACK)
     && manifest.some((t) => t.id === OPENING_TRACK) ? OPENING_TRACK : selection.trackId
   void preview(firstCircuit)
-  if (openingWanted && firstCircuit !== selection.trackId) queuedPreview = selection.trackId
-  openingPlaying = openingWanted
+  if (firstCircuit !== selection.trackId) queuedPreview = selection.trackId
+  firstBuild = true
+  if (!openingWanted) {
+    // While Silverstone builds: the grid for the first moment, then the night
+    // run, then the circuit (see the swap in ensureTrack).
+    if (!holdLoading) {
+      const run = new NightRun()
+      nightRun = run
+      // Hidden until the run draws, then faded in under the streaks.
+      canvas.classList.add('is-dipped')
+      void renderer.prepareNightRun(run).then(() => { if (nightRun === run) nightReady = true })
+    }
+    void until(() => track !== null).then(() => frames(4)).then(() => {
+      if (!holdLoading) endNightRun(false)
+      releaseQueued()
+    })
+  }
   loop.start()
   arriveMenu()
   if (openingWanted && openingVideo) {
@@ -1745,6 +1818,9 @@ function playsOpening(): boolean {
 function markOpeningSeen(): void {
   try { window.sessionStorage.setItem(OPENING_SEEN_KEY, '1') } catch { /* it plays again: harmless */ }
 }
+
+/** The night run dissolving into the circuit: slow, no slide, no zoom. */
+const NIGHT_DISSOLVE_MS = 1200
 
 /** The menu comes up piece by piece, from lights out or from when it is built. */
 function arriveMenu(): void {

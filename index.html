@@ -92,6 +92,137 @@
         if (p && p.catch) p.catch(function () {})
       })()
     </script>
+    <!--
+      The loading screen when the video does not play: dim streaks of light
+      rushing out of a point ahead and past you, low and to the sides, like
+      road lights at speed in the dark. From the first paint; once the night
+      run is drawing (src/render/nightRun.ts) they carry straight on over it,
+      transparent, from its road's vanishing point (window.__streaksVP), and
+      src/main.ts fades them as the circuit takes over. `?loading` keeps them up.
+    -->
+    <canvas id="loading-streaks" class="loading-streaks" aria-hidden="true"></canvas>
+    <style>
+      .loading-streaks {
+        position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+        pointer-events: none; background: #020306; transition: opacity 1200ms ease;
+      }
+      .loading-streaks.is-over { background: transparent; }
+      .plays-opening .loading-streaks { display: none; }
+      .loading-streaks.is-gone { opacity: 0; }
+    </style>
+    <script>
+      (function () {
+        var cv = document.getElementById('loading-streaks')
+        if (document.documentElement.classList.contains('plays-opening')) { cv.remove(); return }
+        var g = cv.getContext('2d')
+        if (!g) return
+        document.documentElement.classList.add('shows-loading')
+        var calm = false
+        try { calm = matchMedia('(prefers-reduced-motion: reduce)').matches } catch (e) {}
+        var W = 0, H = 0
+        function size() {
+          var r = Math.min(devicePixelRatio || 1, 2)
+          W = innerWidth; H = innerHeight
+          cv.width = Math.round(W * r); cv.height = Math.round(H * r)
+          g.setTransform(r, 0, 0, r, 0, 0)
+        }
+        size()
+        addEventListener('resize', size)
+        // Lights at the roadside: amber, a dull red, the odd cold white.
+        var COLOURS = ['226,170,72', '226,170,72', '214,74,58', '200,210,225']
+        var seed = 5
+        function rnd() { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
+        // Where they come from: the road's vanishing point, roughly where the
+        // halo camera's horizon will be, eased onto the real one when known.
+        var vx = 0.5, vy = 0.36
+        function spawn(s, anywhere) {
+          var side = rnd() < 0.5 ? -1 : 1, kind = rnd(), a
+          if (kind < 0.25) a = (rnd() * 0.16 - 0.08)            // hugging the line of the road
+          else if (kind < 0.75) a = rnd() * 0.5 - 0.14          // out at the roadside
+          else if (kind < 0.9) a = -(0.25 + rnd() * 0.65)       // high and wide
+          else a = -Math.PI / 2 + (rnd() - 0.5) * 2.2           // overhead
+          if (kind < 0.9) a = side < 0 ? Math.PI - a : a
+          s.a = a
+          s.d = anywhere ? 0.02 + rnd() * 0.9 : 0.01 + rnd() * 0.03
+          // Fast, and very variable: some crawl in, most tear past.
+          s.k = 3.2 + Math.pow(rnd(), 1.6) * 5.5
+          s.c = COLOURS[Math.floor(rnd() * COLOURS.length)]
+          s.w = 0.4 + Math.pow(rnd(), 2) * 1.8
+          s.bright = 0.35 + rnd() * 0.75
+          s.tail = 0.3 + rnd() * 0.45
+          s.near = false
+          return s
+        }
+        // A near miss: something bright tearing past right beside you.
+        function nearMiss(s) {
+          var side = rnd() < 0.5 ? -1 : 1, a = 0.04 + rnd() * 0.28
+          s.a = side < 0 ? Math.PI - a : a
+          s.d = 0.02
+          s.k = 9 + rnd() * 5
+          s.c = rnd() < 0.6 ? '235,238,240' : '232,64,52'
+          s.w = 2 + rnd() * 2.2
+          s.bright = 1.6
+          s.tail = 0.55 + rnd() * 0.2
+          s.near = true
+          return s
+        }
+        var streaks = []
+        for (var i = 0; i < 96; i++) streaks.push(spawn({}, true))
+        var misses = [], nextMiss = 0.8, nextCluster = 0.5
+        var last = performance.now()
+        function frame(now) {
+          if (!cv.isConnected) return
+          var dt = Math.min((now - last) / 1000, 0.05); last = now
+          var want = window.__streaksVP
+          if (want) { vx += (want.x - vx) * Math.min(1, dt * 6); vy += (want.y - vy) * Math.min(1, dt * 6) }
+          var over = cv.classList.contains('is-over')
+          if (over) g.clearRect(0, 0, W, H)
+          else { g.fillStyle = '#020306'; g.fillRect(0, 0, W, H) }
+          g.globalCompositeOperation = 'lighter'
+          g.lineCap = 'round'
+          var cx = vx * W, cy = vy * H, reach = Math.hypot(W, H) * 0.75
+          if (!calm) {
+            nextMiss -= dt
+            if (nextMiss <= 0) { misses.push(nearMiss({})); nextMiss = 0.9 + rnd() * 1.8 }
+            // Now and then a few arrive together, like a line of roadside lights.
+            nextCluster -= dt
+            if (nextCluster <= 0) {
+              var lead = spawn(streaks[Math.floor(rnd() * streaks.length)], false)
+              for (var c = 0; c < 3; c++) {
+                var follower = streaks[Math.floor(rnd() * streaks.length)]
+                if (follower === lead) continue
+                spawn(follower, false)
+                follower.a = lead.a + (rnd() - 0.5) * 0.03
+                follower.k = lead.k
+                follower.d = lead.d * (0.55 + c * 0.12)
+              }
+              nextCluster = 0.6 + rnd() * 1.2
+            }
+          }
+          var all = streaks.concat(misses)
+          for (var i = 0; i < all.length; i++) {
+            var s = all[i]
+            if (!calm) s.d *= Math.exp(s.k * dt)
+            var head = s.d * reach, tail = head * (1 - s.tail)
+            var ca = Math.cos(s.a), sa = Math.sin(s.a)
+            var alpha = Math.min(s.near ? 0.9 : 0.6, (0.04 + s.d * 0.7) * s.bright)
+            var grad = g.createLinearGradient(cx + ca * tail, cy + sa * tail, cx + ca * head, cy + sa * head)
+            grad.addColorStop(0, 'rgba(' + s.c + ',0)')
+            grad.addColorStop(1, 'rgba(' + s.c + ',' + alpha + ')')
+            g.strokeStyle = grad
+            g.lineWidth = s.w * (0.5 + s.d * 2.6)
+            g.beginPath(); g.moveTo(cx + ca * tail, cy + sa * tail); g.lineTo(cx + ca * head, cy + sa * head); g.stroke()
+            if (s.d > 1.25) {
+              if (s.near) misses.splice(misses.indexOf(s), 1)
+              else spawn(s, false)
+            }
+          }
+          g.globalCompositeOperation = 'source-over'
+          requestAnimationFrame(frame)
+        }
+        requestAnimationFrame(frame)
+      })()
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

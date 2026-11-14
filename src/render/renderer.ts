@@ -36,6 +36,7 @@ import { CameraRig, type CameraMode, type Surface } from './cameras'
 import { buildCar, SKINS, type CarModel, type CarSkin } from './carModel'
 import { FIELD_LIVERIES } from './liveries'
 import { OPENING_CARS, type OpeningShot } from './openingShot'
+import type { NightRun } from './nightRun'
 import { PALETTE } from './palette'
 
 // Shared by the visible sky, reflection capture and shadow-casting sunlight.
@@ -827,6 +828,77 @@ export class Renderer {
     this.followWithSun(eye.x, eye.z)
     this.sky.position.copy(eye)
     this.post.render(0)
+  }
+
+  /** The loading run's car: the player's, seen from the halo. */
+  private nightCar: CarModel | null = null
+  private nightTime = 0
+  private readonly vanishing = new THREE.Vector3()
+  private readonly noSun = new THREE.Vector3(0, -1, 0)
+
+  /**
+   * Draw the loading run (see `NightRun`) from the halo camera, through the
+   * same effects as the game: speed blur, bloom on the lamps.
+   */
+  /** Build the run's car and compile its shaders off the critical path, before the first frame. */
+  async prepareNightRun(run: NightRun): Promise<void> {
+    if (!this.nightCar) {
+      this.nightCar = buildCar(handlingPreset('f1'), SKINS.player)
+      run.scene.add(this.nightCar.root)
+    }
+    await this.renderer.compileAsync(run.scene, this.rig.camera)
+  }
+
+  renderNightRun(run: NightRun, dtWall: number): void {
+    this.renderer.info.reset()
+    if (!this.nightCar) {
+      this.nightCar = buildCar(handlingPreset('f1'), SKINS.player)
+      run.scene.add(this.nightCar.root)
+    }
+    const car = this.nightCar, s = run.state
+    placeCar(car, s)
+    car.updateSuspension()
+    car.updateCockpitSteering(s.vx, dtWall)
+    this.rollWheels(car, s.vx, s.wheelVr, this.attractWheelRadius, dtWall)
+    const mode = this.rig.mode
+    this.rig.mode = 'halo'
+    this.rig.update(s, handlingPreset('f1'), 1, dtWall, null)
+    this.rig.mode = mode
+    // Shake: a fine vibration at speed, and now and then a jolt, as if over
+    // a bump nobody can see in the dark.
+    this.nightTime += dtWall
+    const t = this.nightTime
+    const bump = Math.max(0, Math.sin(t * 1.7) * Math.sin(t * 0.63 + 1.1) - 0.55) * 2.2
+    const amp = 0.0022 + 0.009 * bump
+    const camera = this.rig.camera
+    camera.rotateX((Math.sin(t * 47.3) * 0.6 + Math.sin(t * 29.1 + 0.7) * 0.4) * amp)
+    camera.rotateY((Math.sin(t * 38.9 + 1.3) * 0.6 + Math.sin(t * 21.7) * 0.4) * amp * 0.7)
+    camera.rotateZ(Math.sin(t * 33.1 + 2.1) * amp * 0.8)
+    camera.position.y += Math.sin(t * 52.7) * amp * 0.6
+    // No sun at night: keep the lens flare out of it.
+    this.post.setSunDirection(this.noSun)
+    this.post.setScene(run.scene)
+    this.post.render(s.vx / TOP_SPEED)
+    this.post.setScene(this.scene)
+  }
+
+  /**
+   * Where the run's road vanishes on screen, 0..1 across and down: the point
+   * the page's loading streaks rush out of, so they line up with the road.
+   */
+  nightVanishing(): { x: number; y: number } {
+    const camera = this.rig.camera
+    const p = this.vanishing.set(camera.position.x + 2000, camera.position.y, camera.position.z).project(camera)
+    return { x: (p.x + 1) / 2, y: (1 - p.y) / 2 }
+  }
+
+  /** The run is over: its car is not needed again. */
+  endNightRun(): void {
+    this.post.setSunDirection(SUN_OFFSET)
+    if (!this.nightCar) return
+    this.nightCar.root.removeFromParent()
+    this.nightCar.dispose()
+    this.nightCar = null
   }
 
   /**

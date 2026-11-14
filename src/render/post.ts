@@ -184,7 +184,7 @@ const CompositeShader = {
 
 export class PostPipeline {
   private readonly renderer: THREE.WebGLRenderer
-  private readonly scene: THREE.Scene
+  private scene: THREE.Scene
   private readonly composer: EffectComposer
   private readonly renderPass: RenderPass
   private readonly bloom: UnrealBloomPass
@@ -232,6 +232,12 @@ export class PostPipeline {
 
   setCamera(camera: THREE.Camera): void {
     this.renderPass.camera = camera
+  }
+
+  /** Render a different scene through the same effects (the loading run). */
+  setScene(scene: THREE.Scene): void {
+    this.scene = scene
+    this.renderPass.scene = scene
   }
 
   setSize(w: number, h: number, pixelRatio: number): void {
