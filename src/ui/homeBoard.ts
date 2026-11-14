@@ -56,6 +56,8 @@ export interface HomeBoardOptions {
   local: (trackId: string, page: BoardPage) => { time: number } | null
   open: (trackId: string) => void
   drive: (trackId: string) => void
+  /** Save an unsaved lap on this circuit: sign in, then name. */
+  save?: (trackId: string, rank: number | null) => void
   /** The circuit's outline, drawn as the board turns to it. */
   outline?: (trackId: string) => SVGSVGElement | null
 }
@@ -214,9 +216,21 @@ export class HomeBoard {
     if (!shownYou) {
       // Fourth is the next row down, not a gap: one continuous list.
       if (page.entries.length && place?.position !== SHOWN + 1) list.append(el('li', 'home-board-gap'))
-      list.append(place
+      const row = place
         ? boardRow(place.position === null ? '—' : String(place.position), 'You', formatTime(place.time), youNote(place), true)
-        : boardRow('—', 'You', '—:——.———', page.entries.length ? 'No lap here yet' : `Set the first lap on ${label}`, true, true))
+        : boardRow('—', 'You', '—:——.———', page.entries.length ? 'No lap here yet' : `Set the first lap on ${label}`, true, true)
+      if (place?.unsaved && this.opts.save) {
+        const save = el('button', 'home-board-save')
+        save.textContent = 'Save with Google →'
+        const trackId = this.current
+        save.addEventListener('click', (event) => {
+          event.stopPropagation()
+          this.opts.save?.(trackId, place.position)
+        })
+        row.querySelector('.home-board-detail')?.replaceChildren(save)
+        if (!row.querySelector('.home-board-detail')) row.querySelector('.home-board-name')?.append(save)
+      }
+      list.append(row)
     }
     this.body.replaceChildren(list)
   }
@@ -229,7 +243,7 @@ function youNote(place: Standing | null): string {
   const gap = place.gap === null
     ? place.position === 1 ? 'Fastest' : ''
     : `+${place.gap.toFixed(3)} to P${place.position - 1}`
-  return [gap, place.unsaved ? 'not on the board yet' : ''].filter(Boolean).join(' · ')
+  return place.unsaved ? '' : gap
 }
 
 function boardRow(rank: string, name: string, time: string, detail: string, you: boolean, empty = false): HTMLElement {

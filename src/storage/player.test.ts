@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-import { DevicePlayerProfileClient, SupabasePlayerProfileClient } from './player'
+import { DevicePlayerProfileClient, SupabasePlayerProfileClient, nameFromAccount } from './player'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -192,6 +192,39 @@ describe('browser player profile', () => {
     expect(client.current).toEqual({
       id: 'google-user', username: 'OriginalName', locked: true,
     })
+    expect(client.needsName).toBe(false)
+  })
+
+  it('asks a new Google driver for a name, suggesting their first name', async () => {
+    const storage = new MemoryStorage()
+    // No profile on the server yet.
+    const fetchSpy = vi.fn(async () => new Response('Not found', { status: 404 }))
+    vi.stubGlobal('fetch', fetchSpy)
+    const supabase = {
+      auth: {
+        onAuthStateChange: vi.fn(),
+        getSession: vi.fn(async () => ({
+          data: { session: { access_token: 'google-jwt', user: {
+            is_anonymous: false, email: 'a@example.com', user_metadata: { given_name: 'Abdur Rahman' },
+          } } },
+          error: null,
+        })),
+      },
+    } as unknown as SupabaseClient
+    const client = new SupabasePlayerProfileClient(supabase, 'publishable-key', 'https://board.example', storage)
+
+    await client.ready()
+
+    expect(client.current).toBeNull()
+    expect(client.needsName).toBe(true)
+    expect(client.suggestedName).toBe('Abdur')
+  })
+
+  it('makes a usable driver name from a Google account', () => {
+    expect(nameFromAccount({ given_name: 'José' })).toBe('Jose')
+    expect(nameFromAccount({ name: 'Li' }, 'speedy.li@example.com')).toBe('speedyli')
+    expect(nameFromAccount({}, 'x@example.com')).toBeNull()
+    expect(nameFromAccount(null, null)).toBeNull()
   })
 })
 

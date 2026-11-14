@@ -152,6 +152,16 @@ html, body, #app {
 
 /* =====================  HUD  ===================== */
 
+/* Another driver's name over their ghost: small, and as see-through as the car. */
+.ghost-tag {
+  position: fixed; left: 0; top: 0; pointer-events: none; opacity: 0;
+  padding: 1px 5px; border-radius: 2px; white-space: nowrap;
+  background: rgba(10, 12, 16, 0.55); color: #e8edf3;
+  font: 600 9px var(--mono); letter-spacing: 0.04em;
+  border-bottom: 1.5px solid rgba(201, 210, 221, 0.7);
+  will-change: transform, opacity;
+}
+
 .hud {
   /* Absolute against the stage, not fixed to the window, so it boxes with the
      picture when the viewport is limited. */
@@ -1131,6 +1141,20 @@ html, body, #app {
   .quick-controls { grid-template-columns: 1fr; }
 }
 
+/* A personal best not on the board yet: the one thing worth doing here. */
+.pause-save { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin: 16px 0 4px; padding: 12px 14px; border: 1px solid rgba(226, 170, 72, 0.35); background: var(--accent-soft); }
+.pause-save-words { display: flex; flex-direction: column; gap: 3px; }
+.pause-save-time { font: 600 18px var(--mono); font-variant-numeric: tabular-nums; }
+.pause-save-note { color: var(--muted); font-size: 12px; }
+.pause-save-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.pause-save-button { flex-shrink: 0; }
+.pause-save-status { color: var(--muted); font-size: 11px; }
+.leaderboard-login-google { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.leaderboard-login-status { color: var(--muted); font-size: 11px; min-height: 14px; }
+.profile-step .google-signin, .profile-step > button { align-self: flex-start; }
+.profile-other-account { align-self: flex-start; margin-top: 10px; font-size: 12px; }
+.lap-banner.is-unsaved .lap-banner-change { color: var(--accent); }
 .pause-context {
   margin: 10px 0 0;
   color: var(--muted);
@@ -2319,6 +2343,8 @@ kbd {
 .home-board-detail { display: block; margin-top: 2px; color: var(--muted); font: 400 10px var(--mono); }
 .home-board-time { font: 12px var(--mono); font-variant-numeric: tabular-nums; }
 .home-board-body:hover .home-board-row:not(.is-you) { background: rgba(255, 255, 255, 0.025); }
+.home-board-save { display: block; margin-top: 3px; padding: 0; border: 0; background: none; color: var(--accent); font: 600 10px var(--mono); cursor: pointer; }
+.home-board-save:hover { color: var(--ink); }
 .home-board-note { margin: 12px 0 0; color: var(--muted); font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   .is-turning .home-board-body { animation: home-board-fade-in 200ms ease both; }
@@ -2667,6 +2693,36 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   .curtain, .curtain.is-on { transition-duration: 1ms; }
   .curtain-bar span { animation: none; width: 100%; opacity: 0.5; }
+}
+
+/* =====================  ARRIVAL  =====================
+ * The menu comes up piece by piece as the page opens, usable at once. The
+ * circuit settles in beneath it from a closer, darker frame when the overhead
+ * camera takes over from the opening shot (src/render/openingShot.ts). */
+.is-arriving .menu-flow .flow-top,
+.is-arriving .flow-home .flow-kicker,
+.is-arriving .flow-title-home,
+.is-arriving .flow-home > :nth-child(2),
+.is-arriving .home-board,
+.is-arriving .menu-flow .flow-footer { animation: arrive-up 700ms cubic-bezier(.16, 1, .3, 1) both; }
+.is-arriving .menu-flow .flow-top { animation-delay: 120ms; }
+.is-arriving .flow-home .flow-kicker { animation-delay: 190ms; }
+.is-arriving .flow-title-home { animation-delay: 250ms; }
+.is-arriving .flow-home > :nth-child(2) { animation-delay: 330ms; }
+.is-arriving .home-board { animation-delay: 410ms; }
+.is-arriving .menu-flow .flow-footer { animation-delay: 480ms; }
+.is-arriving .menu-panel { animation: arrive-fade 500ms ease both; }
+@keyframes arrive-up { from { opacity: 0; transform: translateY(14px); } }
+@keyframes arrive-fade { from { opacity: 0; } }
+
+/* While the opening video plays, the menu's scrim steps back so it reads;
+   it returns, eased, once the overhead camera takes over. */
+.menu.menu-flow { transition: background-color 1000ms cubic-bezier(.4, 0, .2, 1); }
+.plays-opening .menu.menu-flow { background-color: rgba(6, 8, 11, 0.4); }
+.stage.is-settling .viewport { animation: arrive-stage 2200ms cubic-bezier(.16, 1, .3, 1) both; }
+@keyframes arrive-stage { from { transform: scale(1.06); filter: brightness(0.7); } }
+@media (prefers-reduced-motion: reduce) {
+  .is-arriving .menu-panel, .is-arriving .menu-flow * , .stage.is-settling .viewport { animation: none !important; }
 }
 
 /* A two-way choice in the setup toggles row (Gearbox), sized to sit beside the

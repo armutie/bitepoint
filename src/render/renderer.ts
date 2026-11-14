@@ -35,6 +35,7 @@ import { indexAtDistance, type AttractLine } from './attractLine'
 import { CameraRig, type CameraMode, type Surface } from './cameras'
 import { buildCar, SKINS, type CarModel, type CarSkin } from './carModel'
 import { FIELD_LIVERIES } from './liveries'
+import { OPENING_CARS, type OpeningShot } from './openingShot'
 import { PALETTE } from './palette'
 
 // Shared by the visible sky, reflection capture and shadow-casting sunlight.
@@ -49,6 +50,10 @@ import { ContactSuspension } from './contactSuspension'
 
 /** Rough top speed, for normalising the post pipeline's speed input. */
 const TOP_SPEED = 75
+/** The ghost's name tag: fully clear within this many seconds of you... */
+const TAG_FULL = 0.5
+/** ...and faded out entirely by this many. */
+const TAG_FADE_END = 1
 
 /**
  * How solid the spokes look at a given wheel rate (rad/s).
@@ -610,6 +615,56 @@ export class Renderer {
   private wantGhost = true
   /** Eased ghost opacity, driven by the gap to the player each frame. */
   private ghostOpacity = 0.4
+  /**
+   * Another driver's name over their ghost, so a leaderboard lap reads as
+   * someone else's car rather than your own best. Null for your own laps.
+   */
+  private ghostTag: HTMLElement | null = null
+  private readonly tagPoint = new THREE.Vector3()
+  /** Seconds between you and the ghost, ahead or behind, as the HUD delta measures it. */
+  private ghostGap = Infinity
+  /** Eased tag opacity, so it breathes in and out like the car does. */
+  private tagOpacity = 0
+
+  set ghostName(name: string | null) {
+    if (!name) { this.ghostTag?.remove(); this.ghostTag = null; return }
+    if (!this.ghostTag) {
+      this.ghostTag = document.createElement('div')
+      this.ghostTag.className = 'ghost-tag'
+      this.ghostTag.setAttribute('aria-hidden', 'true')
+      // Straight after the canvas, so the HUD and menus still paint over it.
+      this.canvas.after(this.ghostTag)
+    }
+    this.ghostTag.textContent = name
+    this.ghostTag.style.opacity = '0'
+  }
+
+  /** Pinned over the ghost's roll hoop, fading out far away and when you drive inside it. */
+  private placeGhostTag(ghost: CarState | null): void {
+    const tag = this.ghostTag
+    if (!tag) return
+    const car = this.ghostCar
+    if (!ghost || !car || !car.root.visible) { tag.style.opacity = '0'; this.tagOpacity = 0; return }
+    const camera = this.rig.camera
+    camera.updateMatrixWorld()
+    this.tagPoint.set(ghost.x, car.root.position.y + 1.25, -ghost.y)
+    const distance = this.tagPoint.distanceTo(camera.position)
+    this.tagPoint.project(camera)
+    const { x, y, z } = this.tagPoint
+    if (z > 1 || x < -1.1 || x > 1.1 || y < -1.1 || y > 1.1) { tag.style.opacity = '0'; this.tagOpacity = 0; return }
+    // Ghost opacity runs 0.09 (inside it) to 0.4 (clear of it); the tag follows.
+    const near = Math.min(1, Math.max(0, (this.ghostOpacity - 0.12) / 0.2))
+    // Clearest within half a second, ahead or behind, gone by a second: a
+    // name for the car you are racing, not a label on the horizon.
+    const gap = Math.min(1, Math.max(0, (TAG_FADE_END - this.ghostGap) / (TAG_FADE_END - TAG_FULL)))
+    const far = Math.min(1, Math.max(0, (400 - distance) / 100))
+    const target = near * gap * far
+    this.tagOpacity += (target - this.tagOpacity) * 0.15
+    tag.style.opacity = this.tagOpacity < 0.01 ? '0' : this.tagOpacity.toFixed(3)
+    const rect = this.canvas.getBoundingClientRect()
+    tag.style.transform =
+      `translate(${rect.left + (x + 1) / 2 * rect.width}px, ${rect.top + (1 - y) / 2 * rect.height}px) translate(-50%, -100%)`
+  }
 
   get ghostVisible(): boolean {
     return this.wantGhost
@@ -698,6 +753,7 @@ export class Renderer {
         // delta the HUD shows.
         const dist = Math.hypot(ghost.x - player.x, ghost.y - player.y)
         const gap = dist / Math.max(Math.hypot(player.vx, player.vy), 5)
+        this.ghostGap = gap
         const target = gap <= 0.05 ? 0.09 : gap >= 0.3 ? 0.4 : 0.09 + ((gap - 0.05) / 0.25) * 0.31
         // Eased, so crossing the threshold breathes instead of popping.
         this.ghostOpacity += (target - this.ghostOpacity) * Math.min(1, dtWall * 8)
@@ -724,10 +780,74 @@ export class Renderer {
     }
     this.followWithSun(player.x, -player.y)
     this.sky.position.copy(this.rig.camera.position)
+    this.placeGhostTag(ghost)
 
     const speed = Math.hypot(player.vx, player.vy)
     this.post.render(speed / TOP_SPEED)
     this.profiler?.end(performance.now()-profileStart,dtWall,this.renderer)
+  }
+
+  /** The opening shot's cars: full detail, because they pass a few metres away. */
+  private heroCars: CarModel[] = []
+
+  /**
+   * Draw the opening shot (see `OpeningShot`) as it stands: its cars and its
+   * pit-wall camera. Does not advance it; the recorder steps it between draws.
+   */
+  renderOpening(shot: OpeningShot, dtWall: number): void {
+    this.renderer.info.reset()
+    if (this.scenery) {
+      this.scenery.root.visible = true
+      this.scenery.decorativeRoot.visible = true
+    }
+    if (this.playerCar) this.playerCar.root.visible = false
+    if (this.ghostCar) this.ghostCar.root.visible = false
+    if (this.ghostTag) this.ghostTag.style.opacity = '0'
+    // The straight is empty but for the shot's own cars.
+    if (this.attractGroup.parent) this.scene.remove(this.attractGroup)
+    if (!this.heroCars.length) {
+      this.heroCars = OPENING_CARS.map((car) => {
+        const model = buildCar(handlingPreset('f1'), car.livery)
+        this.scene.add(model.root)
+        return model
+      })
+    }
+    shot.heroes().forEach((pose, i) => {
+      const car = this.heroCars[i]!
+      car.root.visible = pose.visible
+      if (!pose.visible) return
+      car.root.position.set(pose.x, 0, -pose.y)
+      car.root.rotation.y = pose.yaw
+      for (const w of car.frontWheels) w.rotation.y = Math.max(-0.2, Math.min(pose.steer, 0.2))
+      car.updateSuspension()
+      this.rollWheels(car, pose.v, pose.v, this.attractWheelRadius, dtWall)
+    })
+    shot.apply(this.rig.camera, (deg) => this.rig.setHFov(deg))
+    const eye = this.rig.camera.position
+    this.followWithSun(eye.x, eye.z)
+    this.sky.position.copy(eye)
+    this.post.render(0)
+  }
+
+  /**
+   * Draw at exactly this many pixels, whatever the window or the adaptive
+   * resolution say, until called with null: for recording video.
+   */
+  recordSize(size: { width: number; height: number } | null): void {
+    if (!size) { this.resize(); return }
+    this.renderer.setPixelRatio(1)
+    this.renderer.setSize(size.width, size.height, false)
+    this.post.setSize(size.width, size.height, 1)
+    this.rig.resize(size.width / size.height)
+  }
+
+  /** The recording is over: its cars are not needed again. */
+  endOpening(): void {
+    for (const car of this.heroCars) {
+      this.scene.remove(car.root)
+      car.dispose()
+    }
+    this.heroCars = []
   }
 
   /** Draw the circuit with the attract camera, for the menu to sit over. */
@@ -742,6 +862,7 @@ export class Renderer {
     }
     if (this.playerCar) this.playerCar.root.visible = false
     if (this.ghostCar) this.ghostCar.root.visible = false
+    if (this.ghostTag) this.ghostTag.style.opacity = '0'
     if (!this.attractGroup.parent) this.scene.add(this.attractGroup)
     this.updateAttract(dtWall)
     this.rig.flyover(track, t)

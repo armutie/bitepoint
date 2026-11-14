@@ -124,6 +124,11 @@ export class CameraRig {
     this.applyHFov(HFOV[this.mode])
   }
 
+  /** For shots that aim the camera themselves (the opening). */
+  setHFov(hFovDeg: number): void {
+    this.applyHFov(hFovDeg)
+  }
+
   /** Set the vertical FOV that yields ``hFovDeg`` horizontally at this aspect. */
   private applyHFov(hFovDeg: number): void {
     const h = (hFovDeg * Math.PI) / 180

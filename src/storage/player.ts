@@ -17,6 +17,14 @@ export interface PlayerProfileClient {
   readonly supportsGoogle: boolean
   /** A failed attempt to reserve a local name after the Google redirect. */
   readonly claimError: string | null
+  /**
+   * Signed in with Google, but no driver name yet: the moment to ask for one.
+   * Sign-in comes first and the name second, so nobody picks a name that is
+   * then not theirs.
+   */
+  readonly needsName: boolean
+  /** A starting point for the name, from the Google account. */
+  readonly suggestedName: string | null
   ready(): Promise<void>
   claim(username: string): Promise<PlayerProfile>
   /** Headers expected by the leaderboard service, optionally requiring a session. */
@@ -43,6 +51,8 @@ interface DeviceProfileEnvelope {
 export class DevicePlayerProfileClient implements PlayerProfileClient {
   readonly supportsGoogle = false
   readonly claimError = null
+  readonly needsName = false
+  readonly suggestedName = null
   private profile: DeviceProfile | null
 
   constructor(
@@ -123,6 +133,8 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   private profile: PlayerProfile | null
   private claimProblem: string | null = null
   private readyPromise: Promise<void> | null = null
+  private unnamed = false
+  private suggestion: string | null = null
 
   constructor(
     private readonly supabase: SupabaseClient,
@@ -144,6 +156,14 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
 
   get claimError(): string | null {
     return this.claimProblem
+  }
+
+  get needsName(): boolean {
+    return this.unnamed && !this.profile?.locked
+  }
+
+  get suggestedName(): string | null {
+    return this.suggestion
   }
 
   ready(): Promise<void> {
@@ -198,6 +218,12 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   }
 
   async signInWithGoogle(): Promise<void> {
+    const session = await this.session()
+    if (session?.user.is_anonymous) {
+      // See lockWithGoogle: a leftover anonymous user must not be linked.
+      const signedOut = await this.supabase.auth.signOut({ scope: 'local' })
+      if (signedOut.error) throw new Error(signedOut.error.message)
+    }
     const { error } = await this.supabase.auth.signInWithOAuth({
       provider: 'google',
       options: { redirectTo: redirectUrl() },
@@ -217,6 +243,7 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   private async restoreFromSession(): Promise<void> {
     const session = await this.session()
     if (!session || session.user.is_anonymous) return
+    this.suggestion = nameFromAccount(session.user.user_metadata, session.user.email)
     try {
       const envelope = await requestJson<SupabaseProfileEnvelope>(
         `${trimSlash(this.functionUrl)}/v1/me`,
@@ -233,7 +260,11 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
       // A newly authenticated driver has no server profile until their local
       // name is claimed below. A returning driver normally succeeds above.
     }
+    // Signed in, with no driver yet: the name is asked for next. A name kept
+    // on this device from an older build is offered first.
+    this.unnamed = true
     if (!this.profile || this.profile.locked) return
+    this.suggestion = this.profile.username
     try {
       await this.claimRemote(this.profile.username, session)
     } catch (error) {
@@ -266,6 +297,7 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   private remember(profile: PlayerProfile): PlayerProfile {
     this.profile = profile
     this.claimProblem = null
+    if (profile.locked) this.unnamed = false
     save(this.storage, SUPABASE_PROFILE_KEY, profile)
     return profile
   }
@@ -273,6 +305,8 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
   private forget(): void {
     this.profile = null
     this.claimProblem = null
+    this.unnamed = false
+    this.suggestion = null
     remove(this.storage, SUPABASE_PROFILE_KEY)
   }
 
@@ -284,6 +318,23 @@ export class SupabasePlayerProfileClient implements PlayerProfileClient {
     ) return null
     return { id: value.id, username: value.username, locked: value.locked }
   }
+}
+
+/**
+ * A driver name to start from: the Google first name, cut down to what a name
+ * may contain. Only a suggestion; the driver edits it before it is claimed.
+ */
+export function nameFromAccount(metadata: unknown, email?: string | null): string | null {
+  const m = (metadata && typeof metadata === 'object' ? metadata : {}) as Record<string, unknown>
+  const candidates = [m.given_name, m.name, m.full_name, typeof email === 'string' ? email.split('@')[0] : null]
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue
+    const first = candidate.trim().split(/\s+/)[0] ?? ''
+    const cleaned = first.normalize('NFKD').replace(/[^A-Za-z0-9_-]/g, '')
+      .replace(/^[_-]+|[_-]+$/g, '').slice(0, 16).replace(/[_-]+$/g, '')
+    if (parseUsername(cleaned)) return cleaned
+  }
+  return null
 }
 
 type Session = NonNullable<Awaited<ReturnType<SupabaseClient['auth']['getSession']>>['data']['session']>

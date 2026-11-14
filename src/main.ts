@@ -41,6 +41,7 @@ import { Crossfade } from './render/crossfade'
 import { Renderer } from './render/renderer'
 import { fieldLivery, liveryCss, PLAYER_LIVERY } from './render/liveries'
 import { Curtain } from './ui/curtain'
+import { OPENING_MIN_T, OPENING_TRACK, OpeningShot } from './render/openingShot'
 import { Hud, type HudRaceState } from './ui/hud'
 import { RaceFinish } from './ui/raceFinish'
 import { proximityMarkers, type ProximityRival } from './ui/proximity'
@@ -89,6 +90,11 @@ async function boot(): Promise<void> {
   app.append(stage)
   const crossfade = new Crossfade(canvas)
   const curtain = new Curtain(document.body)
+  // The opening video, playing from index.html before any script ran. Moved
+  // over the canvas (under the HUD and menu) so the live circuit, once it is
+  // drawing, is underneath it for the swoosh.
+  const openingVideo = document.getElementById('opening-video') as HTMLVideoElement | null
+  if (openingVideo) canvas.after(openingVideo)
 
   const manifest = await loadManifest()
   if (manifest.length === 0) throw new Error('no circuits in the manifest')
@@ -126,6 +132,96 @@ async function boot(): Promise<void> {
       // As it happens for real: the lap first, the verdict a second later.
       hud.flashLap(92.418, true, true)
       setTimeout(() => hud.flashRank(rank, gained), 1000)
+    }
+    /** previewSaveOffer(7): a signed-out personal best, banner and pause menu. */
+    /**
+     * recordOpening(): render the opening shot (src/render/openingShot.ts) and
+     * encode it, for public/opening-silverstone-*. Run at Silverstone; it draws
+     * at the output size whatever the window is.
+     *
+     * Offline, not real time: every video frame is the average of `samples`
+     * instants spread over the open part of a `shutter` (a film camera's motion
+     * blur), and frames reach the encoder with fixed timestamps, so nothing
+     * about how long a frame took to draw can show in the video.
+     */
+    ;(window as unknown as Record<string, unknown>)['recordOpening'] = async (
+      { codec = 'vp9', width = 1920, height = 1080, bitrate = 6_000_000, fps = 30, samples = 8, shutter = 0.5 }: {
+        codec?: 'vp9' | 'avc'; width?: number; height?: number
+        bitrate?: number; fps?: number; samples?: number; shutter?: number
+      } = {},
+    ): Promise<{ video: Blob; poster: Blob | null } | null> => {
+      if (track?.id !== OPENING_TRACK) return null
+      recordingOpening = true
+      renderer.recordSize({ width, height })
+      try {
+        const acc = document.createElement('canvas')
+        acc.width = width
+        acc.height = height
+        const g = acc.getContext('2d')!
+        let add: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void
+        let finish: () => ArrayBuffer
+        if (codec === 'vp9') {
+          const { Muxer, ArrayBufferTarget } = await import('webm-muxer')
+          const target = new ArrayBufferTarget()
+          const muxer = new Muxer({ target, video: { codec: 'V_VP9', width, height, frameRate: fps } })
+          add = (chunk, meta) => muxer.addVideoChunk(chunk, meta)
+          finish = () => { muxer.finalize(); return target.buffer }
+        } else {
+          const { Muxer, ArrayBufferTarget } = await import('mp4-muxer')
+          const target = new ArrayBufferTarget()
+          const muxer = new Muxer({ target, video: { codec: 'avc', width, height, frameRate: fps }, fastStart: 'in-memory' })
+          add = (chunk, meta) => muxer.addVideoChunk(chunk, meta)
+          finish = () => { muxer.finalize(); return target.buffer }
+        }
+        let failure: unknown = null
+        const encoder = new VideoEncoder({ output: (chunk, meta) => add(chunk, meta), error: (e) => { failure = e } })
+        encoder.configure({
+          codec: codec === 'vp9' ? 'vp09.00.40.08' : 'avc1.640028',
+          width, height, bitrate, framerate: fps, latencyMode: 'quality', bitrateMode: 'variable',
+        })
+        const shot = new OpeningShot(track)
+        const frameDt = 1 / fps, sampleDt = frameDt * shutter / samples
+        let poster: Blob | null = null
+        for (let i = 0; ; i++) {
+          for (let k = 0; k < samples; k++) {
+            renderer.renderOpening(shot, sampleDt)
+            // A running average: sample k weighs 1/(k+1) against the rest.
+            g.globalAlpha = 1 / (k + 1)
+            g.drawImage(canvas, 0, 0, width, height)
+            if (k < samples - 1) shot.step(sampleDt)
+          }
+          shot.step(frameDt - sampleDt * (samples - 1))
+          g.globalAlpha = 1
+          if (i === 0) {
+            const still = document.createElement('canvas')
+            still.width = 960
+            still.height = Math.round(960 * height / width)
+            still.getContext('2d')!.drawImage(acc, 0, 0, still.width, still.height)
+            poster = await new Promise<Blob | null>((resolve) => still.toBlob(resolve, 'image/webp', 0.72))
+          }
+          const frame = new VideoFrame(acc, { timestamp: Math.round(i * 1e6 / fps), duration: Math.round(1e6 / fps) })
+          encoder.encode(frame, { keyFrame: i % (fps * 2) === 0 })
+          frame.close()
+          if (failure) throw failure
+          while (encoder.encodeQueueSize > 3) await new Promise((resolve) => setTimeout(resolve, 5))
+          if (shot.done) break
+        }
+        await encoder.flush()
+        encoder.close()
+        if (failure) throw failure
+        return { video: new Blob([finish()], { type: codec === 'vp9' ? 'video/webm' : 'video/mp4' }), poster }
+      } finally {
+        recordingOpening = false
+        renderer.endOpening()
+        renderer.recordSize(null)
+      }
+    }
+    ;(window as unknown as Record<string, unknown>)['previewSaveOffer'] = (rank: number | null = 7): void => {
+      hud.root.classList.remove('is-hidden')
+      hud.flashLap(91.22, true, true)
+      setTimeout(() => hud.flashUnsaved(rank), 1000)
+      menu.offerSave({ trackId: 'power_8', time: 91.22 } as LapRecord, rank)
+      setTimeout(() => menu.showPause(null), 2500)
     }
   }
 
@@ -317,6 +413,38 @@ async function boot(): Promise<void> {
   /** Smoothed ABS intervention for the badge. */
   let absBite = 0
   let attractTime = 0
+
+  /**
+   * While the opening video plays, the circuit under it (Silverstone, the
+   * video's own) is built without interruption, so the video never sits frozen
+   * waiting on a build that was restarted. A circuit chosen meanwhile is
+   * queued and loaded after the swoosh (see `preview`).
+   */
+  let openingPlaying = false
+  let queuedPreview: string | null = null
+  /** True while the dev recorder owns the canvas (recordOpening). */
+  let recordingOpening = false
+  /**
+   * The opening video leaves: whipped away sideways with the live circuit
+   * settling in beneath it, or simply faded when a session starts over it.
+   */
+  function finishOpening(swoosh: boolean): void {
+    const video = openingVideo
+    if (!video?.isConnected || video.classList.contains('is-leaving')) return
+    openingPlaying = false
+    // A circuit chosen while it played loads now, behind the menu. Not when a
+    // session is starting: that loads the one it needs itself.
+    const queued = queuedPreview
+    queuedPreview = null
+    if (swoosh && queued) preview(queued)
+    video.classList.add('is-leaving', swoosh ? 'is-swooshing' : 'is-gone')
+    document.documentElement.classList.remove('plays-opening')
+    if (swoosh) {
+      stage.classList.add('is-settling')
+      setTimeout(() => stage.classList.remove('is-settling'), 2400)
+    }
+    setTimeout(() => video.remove(), 800)
+  }
   /** Selection + record stamp the attract line was last baked for. */
   let attractLineKey = ''
 
@@ -356,9 +484,12 @@ async function boot(): Promise<void> {
           // Pace the build to the frame rate only while there is a circuit on
           // screen to keep smooth. On first load there is none, and once
           // Drive has been pressed the driver is waiting on it: full speed.
+          // Behind the menu the build always yields to painting, the first one
+          // included: the menu is up and usable while it runs. Once Drive has
+          // been pressed the driver is waiting on it, so then: full speed.
           const applied = await renderer.setTrack(loaded, () => trackJob === job, async () => {
             if (!running) await crossfade.hold()
-          }, () => track !== null && !running && !menu.waitingToDrive && !curtain.covering)
+          }, () => !running && !menu.waitingToDrive && !curtain.covering)
             .finally(() => crossfade.release())
           if (applied && trackJob === job) {
             track = loaded
@@ -377,6 +508,7 @@ async function boot(): Promise<void> {
   }
 
   function preview(trackId: string): void {
+    if (openingPlaying) { queuedPreview = trackId; return }
     void ensureTrack(trackId).then(() => refreshAttractLine()).catch(error => console.error('[track-load]', error))
   }
 
@@ -446,6 +578,7 @@ async function boot(): Promise<void> {
   }
 
   async function start(sel: Selection, oneShot = false): Promise<void> {
+    finishOpening(false)
     const event = sel.mode === 'race' ? eventFor(sel) : null
     if (event && !oneShot && !event.qualifying) {
       menu.showRaceEvent()
@@ -606,11 +739,16 @@ async function boot(): Promise<void> {
     const personalBest = await store.best(boardKey)
     sessionPersonalBestBefore = personalBest?.time ?? null
     ghostRecord = personalBest
+    // A name over the ghost only when it is somebody else's lap.
+    renderer.ghostName = null
     if (sel.mode === 'time' && sel.ghostEntryId) {
       try {
         const selected = await leaderboard.ghost(sel.ghostEntryId)
         if (!sameBoard(selected, boardKey)) throw new Error('Ghost belongs to another leaderboard.')
         ghostRecord = selected
+        const name = sel.ghostName ?? null
+        const own = profiles?.current?.username
+        if (name && name !== 'You' && name !== own) renderer.ghostName = name
       } catch (error) {
         console.warn('[leaderboard] selected ghost unavailable; using personal best', error)
         current = { ...current, ghostEntryId: null }
@@ -950,6 +1088,8 @@ async function boot(): Promise<void> {
       }).catch((error: unknown) => {
         console.warn('[leaderboard] lap submission failed', error)
       })
+      // Not signed in: say where this lap would place, and how to put it there.
+      if (isBest && profiles?.supportsGoogle && !profiles.current?.locked) offerSave(record)
       if (isBest) {
         // `isBest` now means best IN ITS ASSIST SLOT, so a clean lap can be
         // saved while being slower than the assisted lap the menu is showing.
@@ -1089,6 +1229,7 @@ async function boot(): Promise<void> {
 
   const drawFrame = (alpha: number, dtWall: number): void => {
       if (finishState === 'results') return
+      if (recordingOpening) return
       if (!running && !paused && track) {
         // Attract mode: fly the selected circuit behind the menu. Only when
         // there is no session — a paused one keeps its own scene, held still.
@@ -1351,11 +1492,25 @@ async function boot(): Promise<void> {
     paused = false
     hud.root.classList.remove('is-hidden')
   }
+  /** A personal best that could go on the board: where it would place. */
+  function offerSave(record: LapRecord): void {
+    menu.offerSave(record, null)
+    const here = (): boolean => running && track?.id === record.trackId
+    void leaderboard.list({ trackId: record.trackId }, 50).then((page) => {
+      const faster = page.entries.filter((e) => e.time < record.time).length
+      // Past the bottom of a full board, the place is not known.
+      const rank = page.entries.length >= 50 && faster === page.entries.length ? null : faster + 1
+      menu.offerSave(record, rank)
+      if (here()) hud.flashUnsaved(rank)
+    }).catch(() => { if (here()) hud.flashUnsaved(null) })
+  }
   menu.onEndSession = () => endSession()
   menu.onQuit = () => quitToMenu()
   finish.onRestart = () => restartLap()
   finish.onQuit = () => quitToMenu()
   menu.onProfileClaimed = () => void menu.showLeaderboard()
+  // Straight back from Google with no driver name yet: ask for it now.
+  if (profiles?.needsName) menu.showSignIn()
   menu.onSettingsChange = (s) => applySettings(s)
   menu.onSelectionChange = (sel) => {
     if (sel.mode === 'race') eventFor(sel)
@@ -1400,8 +1555,40 @@ async function boot(): Promise<void> {
 
   renderer.resize()
   // Show the opening circuit straight away, so the menu never opens on a void.
-  void preview(selection.trackId)
+  const openingWanted = !!openingVideo && playsOpening()
+  if (!openingWanted) {
+    openingVideo?.remove()
+    document.documentElement.classList.remove('plays-opening')
+  }
+  // Under the video, the video's own circuit: what the swoosh lands on.
+  const firstCircuit = openingWanted && RELEASED_TRACKS.includes(OPENING_TRACK)
+    && manifest.some((t) => t.id === OPENING_TRACK) ? OPENING_TRACK : selection.trackId
+  void preview(firstCircuit)
+  if (openingWanted && firstCircuit !== selection.trackId) queuedPreview = selection.trackId
+  openingPlaying = openingWanted
   loop.start()
+  arriveMenu()
+  if (openingWanted && openingVideo) {
+    // The opening video (index.html) is already playing. It swooshes away into
+    // the live overhead view the moment the circuit is drawing, but never
+    // before the first car has gone by: that pass is the point of it. On a slow
+    // load it plays on, and holds its last frame if it gets there. A video that
+    // is not playing (blocked, failed, stalled) gives way as soon as the
+    // circuit is up.
+    markOpeningSeen()
+    void openingVideo.play()?.catch(() => {})
+    let lastTime = -1, lastMoved = performance.now()
+    const passed = (): boolean => {
+      const v = openingVideo
+      if (v.currentTime !== lastTime) { lastTime = v.currentTime; lastMoved = performance.now() }
+      const stuck = !v.ended && performance.now() - lastMoved > 1500
+      return v.currentTime >= OPENING_MIN_T || v.ended || !!v.error || stuck
+    }
+    void Promise.race([
+      until(() => track !== null).then(() => frames(6)).then(() => until(passed)),
+      new Promise((resolve) => setTimeout(resolve, 15_000)),
+    ]).then(() => finishOpening(true))
+  }
 
   // Dev-only handle for driving the game from an automated browser session.
   // Stripped from production builds by the bundler's dead-code elimination.
@@ -1513,6 +1700,8 @@ function restoreSelection(manifest: TrackManifestEntry[]): Selection {
       easy: parsed.easy ?? fallback.easy,
       ghost: parsed.ghost ?? true,
       ghostEntryId: typeof parsed.ghostEntryId === 'string' ? parsed.ghostEntryId : null,
+      ghostName: typeof parsed.ghostEntryId === 'string' && typeof parsed.ghostName === 'string'
+        ? parsed.ghostName : null,
       mode: parsed.mode === 'race' ? 'race' : fallback.mode,
       laps: clampInt(parsed.laps, 1, MAX_RACE_LAPS, fallback.laps),
       opponents: clampInt(parsed.opponents, 0, MAX_OPPONENTS, fallback.opponents),
@@ -1537,6 +1726,48 @@ function restoreSelection(manifest: TrackManifestEntry[]): Selection {
  */
 function migrateStoredPreset(stored: string | undefined): string | undefined {
   return stored === 'f1' ? 'legacy' : stored
+}
+
+const OPENING_SEEN_KEY = 'bitepoint:opening-seen'
+
+/**
+ * Whether this visit opens with the video: once per browser session.
+ * `?opening` forces it. index.html makes the same decision before any script
+ * runs, to start the video at once; keep the two in step.
+ */
+function playsOpening(): boolean {
+  if (LEGACY_TYRE_MODE) return false
+  if (new URLSearchParams(window.location.search).has('opening')) return true
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return false
+  try { return !window.sessionStorage.getItem(OPENING_SEEN_KEY) } catch { return false }
+}
+
+function markOpeningSeen(): void {
+  try { window.sessionStorage.setItem(OPENING_SEEN_KEY, '1') } catch { /* it plays again: harmless */ }
+}
+
+/** The menu comes up piece by piece, from lights out or from when it is built. */
+function arriveMenu(): void {
+  document.body.classList.add('is-arriving')
+  setTimeout(() => document.body.classList.remove('is-arriving'), 1800)
+}
+
+/** Resolves on the first frame `ready()` is true, checked once per frame. */
+function until(ready: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const check = (): void => { if (ready()) resolve(); else requestAnimationFrame(check) }
+    check()
+  })
+}
+
+function frames(n: number): Promise<void> {
+  return new Promise((resolve) => {
+    const step = (left: number): void => {
+      if (left <= 0) resolve()
+      else requestAnimationFrame(() => step(left - 1))
+    }
+    step(n)
+  })
 }
 
 function persistSelection(s: Selection): void {

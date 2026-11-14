@@ -41,8 +41,57 @@
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' shape-rendering='crispEdges'%3E%3Cpath d='M10 1H22V3H26V6H28V10H30V24H28V28H24V31H8V28H4V24H2V10H4V6H6V3H10Z' fill='%230d1014'/%3E%3Cpath d='M10 3H22V5H26V10H28V23H26V26H22V29H10V26H6V23H4V10H6V6H10Z' fill='%232563eb'/%3E%3Cpath d='M14 3H18V10H14Z' fill='%23e5a14f'/%3E%3Cpath d='M4 10H28V19H26V21H6V19H4Z' fill='%230d1014'/%3E%3Cpath d='M6 12H26V18H24V19H8V18H6Z' fill='%232a3545'/%3E%3Cpath d='M8 12H16V14H8Z' fill='%23e8e1d6'/%3E%3Cpath d='M22 15H26V17H22Z' fill='%237db5ff'/%3E%3Cpath d='M8 23H24V27H21V29H11V27H8Z' fill='%231d4ed8'/%3E%3Cpath d='M14 23H18V29H14Z' fill='%23e5a14f'/%3E%3C/svg%3E"
     />
+    <!--
+      The opening video: the view from the Silverstone pit wall as an F1 car
+      screams past, recorded from the game (src/render/openingShot.ts). Playing
+      from the first paint, behind the menu, while the circuit loads; then it
+      swooshes away into the live view (src/main.ts). Once per browser session;
+      src/main.ts makes the same decision (playsOpening), keep them in step.
+    -->
+    <script>
+      try {
+        var forced = /[?&]opening(=|&|$)/.test(location.search)
+        var calm = matchMedia('(prefers-reduced-motion: reduce)').matches
+        if (forced || (!calm && !sessionStorage.getItem('bitepoint:opening-seen'))) {
+          document.documentElement.classList.add('plays-opening')
+        }
+      } catch (e) {}
+    </script>
+    <style>
+      html, body { margin: 0; background: #06080b; }
+      .opening-video { display: none; }
+      .plays-opening .opening-video, .opening-video.is-leaving {
+        display: block; position: fixed; inset: 0; width: 100%; height: 100%;
+        object-fit: cover; pointer-events: none; background: #06080b;
+      }
+      .opening-video.is-gone { opacity: 0; transition: opacity 500ms ease; }
+      /* The camera swinging off the car: whipped sideways, blurring as it goes,
+         with the live overhead view settling in underneath. */
+      .opening-video.is-swooshing { animation: opening-swoosh 560ms cubic-bezier(.55, 0, .75, .3) both; }
+      @keyframes opening-swoosh {
+        from { opacity: 1; transform: none; filter: blur(0); }
+        to { opacity: 0; transform: translateX(-38%) scale(1.12); filter: blur(18px); }
+      }
+    </style>
   </head>
   <body>
+    <video id="opening-video" class="opening-video" muted playsinline preload="auto"
+      poster="opening-silverstone-poster.webp" aria-hidden="true" disablepictureinpicture></video>
+    <script>
+      // 1080p where the screen can show it, 720p on phones and data-saver
+      // connections; WebM (smaller) where the browser plays it, else MP4.
+      (function () {
+        var v = document.getElementById('opening-video')
+        if (!document.documentElement.classList.contains('plays-opening')) return
+        var c = navigator.connection
+        var size = innerWidth * (devicePixelRatio || 1) > 1400 && !(c && c.saveData) ? '1080' : '720'
+        var webm = v.canPlayType('video/webm; codecs="vp9"')
+        v.src = 'opening-silverstone-' + size + (webm ? '.webm' : '.mp4')
+        v.autoplay = true
+        var p = v.play()
+        if (p && p.catch) p.catch(function () {})
+      })()
+    </script>
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -59,6 +59,8 @@ export interface Selection {
   ghost: boolean
   /** null follows the current personal best; an id pins a leaderboard lap. */
   ghostEntryId: string | null
+  /** Who drove the pinned leaderboard lap, shown over their ghost. */
+  ghostName?: string | null
   mode: SessionMode
   /** Race only. Ignored in a time trial, which never ends on its own. */
   laps: number
@@ -147,6 +149,8 @@ export class Menu {
   private leaderboardHideEasy = false
   /** A local PB the driver explicitly asked to publish after choosing a name. */
   private pendingLeaderboardLap: LapRecord | null
+  /** Where the pending lap would place, when known: said on the sign-in screen. */
+  private pendingRank: number | null = null
   /**
    * Tuning: the pointer is on the sensitivity slider, so the lines are up and
    * the rest of the panel is out of the way.
@@ -653,6 +657,12 @@ export class Menu {
         return page
       },
       local: (trackId, page) => this.localLeaderboardLap({ trackId }, page.scope),
+      save: (trackId, rank) => {
+        const lap = this.localLeaderboardLap({ trackId }, 'global')
+        if (!lap) return
+        this.pendingRank = rank
+        this.saveWithGoogle(lap)
+      },
       outline: (trackId) => {
         const track = tracks.find((t) => t.id === trackId)
         return track ? buildTrackMap(track) : null
@@ -817,9 +827,27 @@ export class Menu {
   }
 
   /** Identity is an action in the header, never a panel above the times. */
-  private leaderboardLogin(): HTMLButtonElement | null {
+  private leaderboardLogin(): HTMLElement | null {
     const profiles = this.deps.profiles
     if (!profiles) return null
+    // Google is the only way in, so the button is Google's own, and it goes
+    // straight there. The name is asked for on the way back.
+    if (profiles.supportsGoogle && !profiles.current && !profiles.needsName) {
+      const wrap = el('div', 'leaderboard-login-google')
+      const google = googleSignInButton()
+      const status = el('span', 'leaderboard-login-status')
+      status.setAttribute('role', 'status')
+      google.addEventListener('click', () => {
+        google.disabled = true
+        status.textContent = 'Opening Google…'
+        void profiles.signInWithGoogle().catch((reason: unknown) => {
+          status.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
+          google.disabled = false
+        })
+      })
+      wrap.append(google, status)
+      return wrap
+    }
     const button = el('button', 'btn leaderboard-login')
     button.type = 'button'
     const current = profiles.current
@@ -834,7 +862,7 @@ export class Menu {
         ? 'Driver profile · protected with Google'
         : 'Not saved to the leaderboard · sign in with Google to reserve it'
     } else {
-      button.textContent = 'Log in to save laps'
+      button.textContent = profiles.needsName ? 'Pick your driver name' : 'Log in to save laps'
     }
     button.addEventListener('click', () => this.showProfile())
     return button
@@ -926,21 +954,28 @@ export class Menu {
       if (entry.assists?.abs) marks.append(assistBadge('ABS', 'is-abs', 'Anti-lock braking was on'))
     }
     const ghost = el('button', 'btn leaderboard-ghost')
-    const selected = this.selection.ghostEntryId === entry.id
-    ghost.textContent = selected ? 'Ghost selected' : 'Race ghost'
-    ghost.disabled = !entry.ghostAvailable || selected
-    ghost.title = entry.ghostAvailable ? 'Use this verified replay as your ghost' : 'Replay unavailable'
+    ghost.textContent = 'Race ghost'
+    ghost.disabled = !entry.ghostAvailable
+    ghost.title = entry.ghostAvailable ? 'Start a time trial against this lap' : 'Replay unavailable'
     ghost.addEventListener('click', () => {
-      // The ghost replays in its own mode, so choosing an easy lap's ghost
-      // does not switch you into easy mode, or the reverse.
+      // Straight into a time trial against this lap: picking a ghost and then
+      // walking back through the menu to drive it was three screens for one
+      // decision already made. The ghost replays in its own mode, so an easy
+      // lap's ghost does not switch you into easy mode, or the reverse.
+      const timed = this.selection.mode === 'time'
+        ? this.selection
+        : { ...this.selection, ...this.timeSelection, mode: 'time' as const }
       this.selection = {
-        ...this.selection,
+        ...timed,
         trackId: this.leaderboardTrackId,
         ghost: true,
         ghostEntryId: entry.id,
+        ghostName: entry.playerName,
       }
+      this.timeSelection = { trackId: this.leaderboardTrackId, preset: this.selection.preset }
       this.onSelectionChange(this.selection)
-      void this.showLeaderboard()
+      if (hasSeenControls()) this.whenReady(ghost, () => this.startDrive())
+      else this.showQuickStart()
     })
     row.append(rank, driver, marks, time, ghost)
     return row
@@ -968,11 +1003,13 @@ export class Menu {
     const save = el('button', 'btn leaderboard-ghost leaderboard-save')
     save.type = 'button'
     const signedIn = this.deps.profiles?.current?.locked === true
-    save.textContent = signedIn ? 'Retry save' : 'Sign in to save'
+    const viaGoogle = !signedIn && !!this.deps.profiles?.supportsGoogle && !this.deps.profiles.needsName
+    save.textContent = signedIn ? 'Retry save' : viaGoogle ? 'Save with Google' : 'Sign in to save'
     save.addEventListener('click', () => {
       this.pendingLeaderboardLap = record
       rememberPendingLeaderboardLap(record)
       if (signedIn) void this.showLeaderboard()
+      else if (viaGoogle) { save.disabled = true; this.saveWithGoogle(record, undefined, () => { save.disabled = false }) }
       else this.showProfile(record)
     })
     row.append(rank, driver, marks, time, save)
@@ -1079,6 +1116,33 @@ export class Menu {
       this.panel.append(title, meta, stats)
     }
 
+    const offer = this.saveOffer()
+    if (offer) {
+      const strip = el('div', 'pause-save')
+      const words = el('div', 'pause-save-words')
+      const time = el('strong', 'pause-save-time')
+      time.textContent = formatTime(offer.time)
+      const note = el('span', 'pause-save-note')
+      note.textContent = this.pendingRank !== null
+        ? `P${this.pendingRank} on the leaderboard · not saved yet`
+        : 'Not on the leaderboard yet'
+      words.append(time, note)
+      // Straight to Google: the name is asked for on the way back.
+      const save = googleSignInButton()
+      save.classList.add('pause-save-button')
+      const status = el('span', 'pause-save-status')
+      status.setAttribute('role', 'status')
+      save.addEventListener('click', () => {
+        save.disabled = true
+        status.textContent = 'Opening Google…'
+        this.saveWithGoogle(offer, status, () => { save.disabled = false })
+      })
+      const side = el('div', 'pause-save-side')
+      side.append(save, status)
+      strip.append(words, side)
+      this.panel.append(strip)
+    }
+
     const actions = el('div', 'menu-actions pause-actions')
     actions.append(
       actionButton('play', 'Resume', 'Esc', 'btn-primary', () => {
@@ -1109,18 +1173,22 @@ export class Menu {
     const header = el('header', 'menu-header profile-header')
     const eyebrow = el('div', 'eyebrow')
     eyebrow.textContent = 'Driver profile'
+    const profiles = this.deps.profiles!
     const title = el('h1', 'menu-title')
-    title.textContent = 'Save your laps'
+    title.textContent = profiles.needsName ? 'Pick your driver name' : 'Save your laps'
     header.append(eyebrow, title)
 
     const actions = el('div', 'menu-actions profile-actions')
     const back = el('button', 'btn')
     back.type = 'button'
-    back.textContent = 'Back to leaderboard'
-    back.addEventListener('click', () => void this.showLeaderboard())
+    const paused = this.pausedStatus !== undefined
+    back.textContent = paused ? 'Back to pause' : 'Back to leaderboard'
+    back.addEventListener('click', () => {
+      if (paused) this.showPause(this.pausedStatus ?? null)
+      else void this.showLeaderboard()
+    })
     actions.append(back)
 
-    const profiles = this.deps.profiles!
     const currentProfile = profiles.current
     if (currentProfile?.locked) {
       const signOutStatus = el('span', 'profile-signout-status')
@@ -1156,6 +1224,11 @@ export class Menu {
   /** A public name is asked for here, never at boot and never before driving. */
   private profilePanel(editName = false): HTMLElement {
     const profiles = this.deps.profiles!
+    // With Google: sign in first, then the name. No name exists before that.
+    if (profiles.supportsGoogle && !editName) {
+      if (profiles.needsName) return this.namePanel()
+      if (!profiles.current) return this.googlePanel()
+    }
     const wrap = el('section', 'leaderboard-profile')
     const current = profiles.current
     if (current && !editName) {
@@ -1260,6 +1333,135 @@ export class Menu {
       wrap.append(recovery)
     }
     return wrap
+  }
+
+  /** Step one: Google. Nothing to type; the name comes straight after. */
+  private googlePanel(): HTMLElement {
+    const profiles = this.deps.profiles!
+    const wrap = el('section', 'leaderboard-profile profile-step')
+    const copy = el('div', 'leaderboard-profile-copy')
+    const lap = this.pendingLeaderboardLap
+    const title = el('strong', 'leaderboard-profile-title')
+    const blurb = el('span', 'leaderboard-profile-blurb')
+    if (lap) {
+      const circuit = this.deps.tracks.find((t) => t.id === lap.trackId)?.label ?? lap.trackId
+      title.textContent = `Save ${formatTime(lap.time)}`
+      blurb.textContent = `${this.pendingRank !== null ? `P${this.pendingRank} on ${circuit}. ` : `${circuit}. `}`
+        + 'Sign in with Google to put it on the leaderboard. You pick your driver name next.'
+    } else {
+      title.textContent = 'Put your laps on the leaderboard'
+      blurb.textContent = 'Sign in with Google, then pick your driver name. Your best laps go up from then on.'
+    }
+    copy.append(title, blurb)
+    const status = el('span', 'leaderboard-profile-error')
+    status.setAttribute('role', 'status')
+    const signIn = googleSignInButton()
+    signIn.addEventListener('click', () => {
+      signIn.disabled = true
+      status.textContent = 'Opening Google…'
+      void profiles.signInWithGoogle().catch((reason: unknown) => {
+        status.textContent = reason instanceof Error ? reason.message : 'Google is unavailable.'
+        signIn.disabled = false
+      })
+    })
+    const note = el('span', 'leaderboard-profile-hint')
+    note.textContent = 'Your laps stay safe on this device until then.'
+    wrap.append(copy, signIn, status, note)
+    return wrap
+  }
+
+  /** Step two, straight back from Google: the name on the board. */
+  private namePanel(): HTMLElement {
+    const profiles = this.deps.profiles!
+    const wrap = el('section', 'leaderboard-profile profile-step')
+    const copy = el('div', 'leaderboard-profile-copy')
+    const title = el('strong', 'leaderboard-profile-title')
+    title.textContent = 'Signed in with Google'
+    const blurb = el('span', 'leaderboard-profile-blurb')
+    const lap = this.pendingLeaderboardLap
+    blurb.textContent = 'This is the name everyone sees on the leaderboard.'
+      + (lap ? ` Your ${formatTime(lap.time)} goes up as soon as you pick it.` : '')
+    copy.append(title, blurb)
+
+    const form = document.createElement('form')
+    form.className = 'leaderboard-profile-form'
+    const username = el('input', 'profile-input') as HTMLInputElement
+    username.name = 'username'
+    username.placeholder = 'Driver name'
+    username.autocomplete = 'username'
+    username.maxLength = 16
+    username.spellcheck = false
+    username.setAttribute('aria-label', 'Driver name')
+    username.value = profiles.suggestedName ?? ''
+    const submit = el('button', 'btn btn-primary profile-submit')
+    submit.type = 'submit'
+    submit.textContent = lap ? 'Save name and lap' : 'Save name'
+    form.append(username, submit)
+
+    const hint = el('span', 'leaderboard-profile-hint')
+    hint.textContent = usernameHint
+    const error = el('span', 'leaderboard-profile-error')
+    error.setAttribute('role', 'alert')
+    error.textContent = profiles.claimError ?? ''
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      error.textContent = ''
+      submit.disabled = true
+      void profiles.claim(username.value).then(() => this.onProfileClaimed()).catch((reason: unknown) => {
+        error.textContent = reason instanceof Error ? reason.message : 'That name could not be saved.'
+        submit.disabled = false
+        username.focus()
+      })
+    })
+    const other = el('button', 'flow-link profile-other-account')
+    other.type = 'button'
+    other.textContent = 'Use a different Google account'
+    other.addEventListener('click', () => {
+      void profiles.signOut().then(() => this.showProfile())
+    })
+    const help = el('div', 'leaderboard-profile-help')
+    help.append(hint, error)
+    wrap.append(copy, form, help, other)
+    queueMicrotask(() => { username.focus(); username.select() })
+    return wrap
+  }
+
+  /** A personal best not on the board, from a driver not signed in. */
+  private saveOffer(): LapRecord | null {
+    const profiles = this.deps.profiles
+    if (!profiles?.supportsGoogle || profiles.current?.locked) return null
+    return this.pendingLeaderboardLap
+  }
+
+  /**
+   * Note a personal best that could go on the board, with where it would
+   * place. The pause menu offers it; nothing opens by itself mid-drive.
+   */
+  offerSave(lap: LapRecord, rank: number | null): void {
+    this.pendingLeaderboardLap = lap
+    this.pendingRank = rank
+    rememberPendingLeaderboardLap(lap)
+  }
+
+  /**
+   * Keep the lap queued and go straight to Google; the name is asked for on
+   * the way back. If Google cannot be opened, the sign-in screen explains.
+   */
+  private saveWithGoogle(lap: LapRecord, status?: HTMLElement, failed?: () => void): void {
+    const profiles = this.deps.profiles
+    if (!profiles?.supportsGoogle) { this.showProfile(lap); return }
+    this.offerSave(lap, this.pendingRank)
+    void profiles.signInWithGoogle().catch((reason: unknown) => {
+      const message = reason instanceof Error ? reason.message : 'Google is unavailable.'
+      if (status) status.textContent = message
+      else this.showProfile(lap)
+      failed?.()
+    })
+  }
+
+  /** Open the sign-in or name step: on boot straight back from Google, say. */
+  showSignIn(): void {
+    this.showProfile()
   }
 
   private showProfileClaimed(wrap: HTMLElement, profile: PlayerProfile): void {

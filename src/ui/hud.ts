@@ -256,6 +256,7 @@ export class Hud {
   private readonly boardRows: HTMLElement
   private bannerTimer: ReturnType<typeof setTimeout> | null = null
   private readonly rankPlace: HTMLElement
+  private readonly rankLabel: HTMLElement
   private readonly rankChange: HTMLElement
   private invalidTimer: ReturnType<typeof setTimeout> | null = null
   private chipsTimer: ReturnType<typeof setTimeout> | null = null
@@ -342,11 +343,11 @@ export class Hud {
     // "Leaderboard updated · 8th ▲ 6 places". A place on a timing board, not
     // P8: that is a race position, and this is not a race.
     const rankRow = el('div', 'lap-banner-rank')
-    const rankLabel = el('span', 'lap-banner-rank-label')
-    rankLabel.textContent = 'Leaderboard updated ·'
+    this.rankLabel = el('span', 'lap-banner-rank-label')
+    this.rankLabel.textContent = 'Leaderboard updated ·'
     this.rankPlace = el('span', 'lap-banner-place')
     this.rankChange = el('span', 'lap-banner-change')
-    rankRow.append(rankLabel, this.rankPlace, this.rankChange)
+    rankRow.append(this.rankLabel, this.rankPlace, this.rankChange)
     this.lapBanner.append(this.lapBannerLabel, this.lapBannerTime, rankRow)
 
     // One instrument binnacle, bottom centre, exactly as pygame groups it:
@@ -663,6 +664,8 @@ export class Hud {
    * comes back with the same lap, now ranked.
    */
   flashRank(rank: number, gained: number | null): void {
+    this.rankLabel.textContent = 'Leaderboard updated ·'
+    this.lapBanner.classList.remove('is-unsaved')
     this.rankPlace.textContent = ordinal(rank)
     this.rankChange.textContent = gained === null
       ? 'New entry'
@@ -672,6 +675,22 @@ export class Hud {
     // Long enough to read the new line, however late it arrived.
     if (this.bannerTimer) clearTimeout(this.bannerTimer)
     this.bannerTimer = setTimeout(() => this.lapBanner.classList.remove('is-on'), 3200)
+  }
+
+  /**
+   * A personal best from a driver who is not signed in: where it would place,
+   * and how to put it there. Said while the lap is fresh, when it matters.
+   */
+  flashUnsaved(rank: number | null): void {
+    // The place stays in the pause menu; here it is just the one action.
+    void rank
+    this.rankLabel.textContent = ''
+    this.rankPlace.textContent = ''
+    this.rankChange.textContent = 'Esc · Sign in to save'
+    this.lapBanner.classList.remove('is-first-rank')
+    this.lapBanner.classList.add('is-on', 'has-rank', 'is-unsaved')
+    if (this.bannerTimer) clearTimeout(this.bannerTimer)
+    this.bannerTimer = setTimeout(() => this.lapBanner.classList.remove('is-on'), 4200)
   }
 
   /** Freeze the displayed clock without releasing the held pedal telemetry. */
